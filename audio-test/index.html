@@ -1,0 +1,139 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+<title>Mini Arcade — Sound Test</title>
+<style>
+  body { font-family: -apple-system, system-ui, sans-serif; background:#0b0b18; color:#eef; margin:0; padding:20px; }
+  h1 { font-size:22px; margin:0 0 6px; }
+  p { font-size:15px; line-height:1.45; color:#ccd; }
+  button { display:block; width:100%; margin:14px 0; padding:18px; font-size:18px; font-weight:700;
+           border-radius:12px; border:2px solid #0ff; background:#123; color:#fff; }
+  button:active { background:#1a4a5e; }
+  #log { background:#000; border:1px solid #345; border-radius:8px; padding:12px; font-size:13px;
+         font-family: ui-monospace, Menlo, monospace; white-space:pre-wrap; word-break:break-all; min-height:120px; }
+  .q { background:#141428; border-radius:8px; padding:12px; margin-top:16px; }
+</style>
+</head>
+<body>
+<h1>🔊 Mini Arcade Sound Test</h1>
+<p>Three different ways of playing the same loud beeps. Tap each button and note which ones you actually hear. Keep your phone's volume up.</p>
+
+<button id="btnA">Test A — Game sound engine</button>
+<button id="btnB">Test B — Speaker element</button>
+<button id="btnC">Test C — Game engine rerouted to speaker</button>
+
+<div class="q">
+<p><b>Then tell Muse:</b> 1) Which tests made sound — A, B, C? &nbsp; 2) Is your silent switch ON (orange showing) or OFF? &nbsp; 3) Anything the log below shows that looks odd.</p>
+</div>
+
+<p>What this phone reports:</p>
+<div id="log">loading…</div>
+<audio id="playerB" playsinline></audio>
+<audio id="playerC" playsinline autoplay="false"></audio>
+
+<script>
+"use strict";
+var logEl = document.getElementById('log');
+var lines = [];
+function log(s) { lines.push(s); logEl.textContent = lines.join("\n"); }
+
+function iosPlaybackSession() {
+  try { if ('audioSession' in navigator) navigator.audioSession.type = 'playback'; } catch (e) {}
+}
+document.addEventListener('pointerdown', iosPlaybackSession, true);
+document.addEventListener('touchstart', iosPlaybackSession, true);
+
+log("User agent: " + navigator.userAgent);
+log("'audioSession' supported: " + ('audioSession' in navigator));
+try { if ('audioSession' in navigator) log("audioSession.type now: " + navigator.audioSession.type); } catch (e) { log("audioSession read error: " + e); }
+log("AudioContext supported: " + !!(window.AudioContext || window.webkitAudioContext));
+
+// ---------- shared melody: three clear beeps ----------
+var NOTES = [660, 880, 990];
+
+// ---------- Test A: plain Web Audio (what the games do today) ----------
+var actx = null;
+document.getElementById('btnA').addEventListener('click', function () {
+  iosPlaybackSession();
+  try { if ('audioSession' in navigator) log("A: audioSession.type after set: " + navigator.audioSession.type); } catch (e) {}
+  if (!actx) {
+    var AC = window.AudioContext || window.webkitAudioContext;
+    actx = new AC();
+  }
+  if (actx.state === 'suspended') actx.resume();
+  log("A: context state = " + actx.state + ", sampleRate = " + actx.sampleRate);
+  var t0 = actx.currentTime + 0.05;
+  NOTES.forEach(function (f, i) {
+    var o = actx.createOscillator(), g = actx.createGain();
+    o.type = 'square'; o.frequency.setValueAtTime(f, t0 + i * 0.28);
+    g.gain.setValueAtTime(0.22, t0 + i * 0.28);
+    g.gain.exponentialRampToValueAtTime(0.0001, t0 + i * 0.28 + 0.24);
+    o.connect(g); g.connect(actx.destination);
+    o.start(t0 + i * 0.28); o.stop(t0 + i * 0.28 + 0.26);
+  });
+});
+
+// ---------- Test B: same beeps as a WAV file through an <audio> element ----------
+function makeWavBlob() {
+  var sr = 22050, dur = 0.28 * 3 + 0.1, n = Math.floor(sr * dur);
+  var buf = new Int16Array(n);
+  for (var i = 0; i < n; i++) {
+    var t = i / sr, idx = Math.min(2, Math.floor(t / 0.28)), lt = t - idx * 0.28;
+    var env = Math.max(0, 1 - lt / 0.24);
+    var ph = (NOTES[idx] * lt) % 1;
+    buf[i] = Math.round((ph < 0.5 ? 1 : -1) * 0.5 * env * 32767); // square wave
+  }
+  var bytes = new Uint8Array(44 + n * 2), dv = new DataView(bytes.buffer);
+  function wstr(off, s) { for (var j = 0; j < s.length; j++) bytes[off + j] = s.charCodeAt(j); }
+  wstr(0, 'RIFF'); dv.setUint32(4, 36 + n * 2, true); wstr(8, 'WAVE'); wstr(12, 'fmt ');
+  dv.setUint32(16, 16, true); dv.setUint16(20, 1, true); dv.setUint16(22, 1, true);
+  dv.setUint32(24, sr, true); dv.setUint32(28, sr * 2, true); dv.setUint16(32, 2, true); dv.setUint16(34, 16, true);
+  wstr(36, 'data'); dv.setUint32(40, n * 2, true);
+  for (var k = 0; k < n; k++) dv.setInt16(44 + k * 2, buf[k], true);
+  return new Blob([bytes], { type: 'audio/wav' });
+}
+var wavUrl = null;
+document.getElementById('btnB').addEventListener('click', function () {
+  if (!wavUrl) wavUrl = URL.createObjectURL(makeWavBlob());
+  var p = document.getElementById('playerB');
+  p.src = wavUrl; p.volume = 1;
+  var pr = p.play();
+  log("B: audio element play() called" + (p.readyState !== undefined ? ", readyState=" + p.readyState : ""));
+  if (pr && pr.catch) pr.catch(function (e) { log("B: play() rejected: " + e); });
+});
+
+// ---------- Test C: Web Audio routed through a media stream into an <audio> element ----------
+var cctx = null;
+document.getElementById('btnC').addEventListener('click', function () {
+  iosPlaybackSession();
+  try {
+    if (!cctx) {
+      var AC2 = window.AudioContext || window.webkitAudioContext;
+      cctx = new AC2();
+      var dest = cctx.createMediaStreamDestination();
+      var master = cctx.createGain(); master.gain.value = 1;
+      master.connect(dest);
+      cctx._master = master;
+      var p = document.getElementById('playerC');
+      p.srcObject = dest.stream;
+      var pr2 = p.play();
+      if (pr2 && pr2.catch) pr2.catch(function (e) { log("C: element play() rejected: " + e); });
+    }
+    if (cctx.state === 'suspended') cctx.resume();
+    log("C: context state = " + cctx.state);
+    var t0 = cctx.currentTime + 0.05;
+    NOTES.forEach(function (f, i) {
+      var o = cctx.createOscillator(), g = cctx.createGain();
+      o.type = 'square'; o.frequency.setValueAtTime(f, t0 + i * 0.28);
+      g.gain.setValueAtTime(0.22, t0 + i * 0.28);
+      g.gain.exponentialRampToValueAtTime(0.0001, t0 + i * 0.28 + 0.24);
+      o.connect(g); g.connect(cctx._master);
+      o.start(t0 + i * 0.28); o.stop(t0 + i * 0.28 + 0.26);
+    });
+  } catch (e) { log("C: error: " + e); }
+});
+</script>
+</body>
+</html>
