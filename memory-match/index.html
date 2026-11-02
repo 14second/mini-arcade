@@ -1,0 +1,390 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, user-scalable=no">
+<meta name="theme-color" content="#14102a">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<title>Memory Match</title>
+<style>
+  * { margin:0; padding:0; box-sizing:border-box; }
+  html, body {
+    width:100%; height:100%; overflow:hidden; background:#14102a;
+    font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+    touch-action:none; user-select:none; -webkit-user-select:none;
+    -webkit-tap-highlight-color: transparent;
+  }
+  canvas { position:fixed; inset:0; display:block; touch-action:none; }
+  #muteBtn {
+    position:fixed; top:10px; right:10px; z-index:10;
+    width:48px; height:48px; border-radius:12px;
+    border:2px solid rgba(200,180,255,.5); background:rgba(14,10,34,.62);
+    color:#fff; font-size:22px; line-height:1; cursor:pointer;
+    touch-action:none; user-select:none; -webkit-user-select:none;
+    display:flex; align-items:center; justify-content:center; padding:0;
+  }
+</style>
+</head>
+<body>
+<canvas id="game"></canvas>
+<button id="muteBtn" aria-label="Toggle sound">🔊</button>
+<script>
+// iOS audio routing: route Web Audio to the media/playback channel (iOS 17+
+// Audio Session API) on the first gesture and inside audio init, so sound
+// plays even with the silent switch on.
+function iosPlaybackSession() {
+  try { if ('audioSession' in navigator) navigator.audioSession.type = 'playback'; } catch (e) {}
+}
+document.addEventListener('pointerdown', iosPlaybackSession, true);
+document.addEventListener('touchstart', iosPlaybackSession, true);
+
+"use strict";
+/* ============================================================
+   MEMORY MATCH — 4x4 cards, 8 pairs of hand-drawn shapes.
+   Flip two at a time and find every pair.
+   Fewest moves wins. A calm game: take your time.
+   ============================================================ */
+
+const canvas = document.getElementById("game");
+const ctx = canvas.getContext("2d");
+let W = 0, H = 0, DPR = 1, u = 4;
+const HUD_H = 66;
+let gridX = 0, gridY = 0, cardSize = 60, gap = 8;
+const COLS = 4, ROWS = 4;
+
+function resize() {
+  DPR = Math.min(window.devicePixelRatio || 1, 2);
+  W = window.innerWidth; H = window.innerHeight;
+  canvas.width = Math.round(W * DPR); canvas.height = Math.round(H * DPR);
+  canvas.style.width = W + "px"; canvas.style.height = H + "px";
+  ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+  u = Math.min(W, H) / 100;
+  gap = Math.max(6, u * 1.8);
+  const availW = W - 24, availH = H - HUD_H - 24;
+  cardSize = Math.floor(Math.min(availW / COLS, availH / ROWS) - gap);
+  const gw = cardSize * COLS + gap * (COLS - 1);
+  const gh = cardSize * ROWS + gap * (ROWS - 1);
+  gridX = Math.round((W - gw) / 2);
+  gridY = Math.round(HUD_H + (H - HUD_H - gh) / 2);
+}
+window.addEventListener("resize", resize);
+
+function clamp(v, a, b) { return v < a ? a : (v > b ? b : v); }
+
+// ---------- Audio ----------
+let actx = null, muted = false;
+const muteBtn = document.getElementById("muteBtn");
+function initAudio() {
+  iosPlaybackSession();
+  if (!actx) {
+    try {
+      const AC = window.AudioContext || window.webkitAudioContext;
+      if (AC) actx = new AC();
+    } catch (e) { actx = null; }
+    if (actx) startMusicScheduler();
+  }
+  if (actx && actx.state === "suspended") actx.resume();
+}
+function beep(freq, dur, type, vol, slide) {
+  if (!actx || muted) return;
+  const t = actx.currentTime;
+  const o = actx.createOscillator(), g = actx.createGain();
+  o.type = type || "triangle";
+  o.frequency.setValueAtTime(freq, t);
+  if (slide) o.frequency.exponentialRampToValueAtTime(Math.max(20, slide), t + dur);
+  g.gain.setValueAtTime(vol || 0.08, t);
+  g.gain.exponentialRampToValueAtTime(0.0001, t + dur);
+  o.connect(g); g.connect(actx.destination);
+  o.start(t); o.stop(t + dur + 0.02);
+}
+function sfxFlip()  { beep(520, 0.07, "triangle", 0.06, 700); }
+function sfxMatch() { beep(660, 0.1, "triangle", 0.07); setTimeout(() => beep(880, 0.14, "triangle", 0.07), 80); }
+function sfxNope()  { beep(300, 0.12, "triangle", 0.045, 240); }
+function sfxWin()   { [523,659,784,1046,1318].forEach((f,i)=>setTimeout(()=>beep(f,0.16,"triangle",0.06), i*120)); }
+
+// Gentle concentration loop, BPM 84. Bass >= MIDI 48.
+const BPM = 84, STEP_DUR = 60 / BPM / 2;
+const BASS = [
+  48,0,0,0, 0,0,0,0, 45,0,0,0, 0,0,0,0,
+  41,0,0,0, 0,0,0,0, 43,0,0,0, 0,0,0,0
+];
+const LEAD = [
+  76,0,0,79, 0,0,76,0, 74,0,0,0, 0,0,0,0,
+  72,0,0,76, 0,0,74,0, 71,0,0,0, 0,0,0,0
+];
+const PADS = [ [60,64,67], [57,60,64], [53,57,60], [55,59,62] ];
+let musicStep = 0, nextNoteTime = 0, musicTimer = null;
+function midiFreq(m) { return 440 * Math.pow(2, (m - 69) / 12); }
+function toneAt(midi, when, dur, type, vol) {
+  const o = actx.createOscillator(), g = actx.createGain();
+  o.type = type; o.frequency.setValueAtTime(midiFreq(midi), when);
+  g.gain.setValueAtTime(0.0001, when);
+  g.gain.exponentialRampToValueAtTime(vol, when + 0.015);
+  g.gain.exponentialRampToValueAtTime(0.0001, when + dur);
+  o.connect(g); g.connect(actx.destination);
+  o.start(when); o.stop(when + dur + 0.03);
+}
+function scheduleStep(step, when) {
+  if (muted) return;
+  const b = BASS[step % 32]; if (b) toneAt(b, when, STEP_DUR * 1.8, "triangle", 0.04);
+  const l = LEAD[step % 32]; if (l) toneAt(l, when, STEP_DUR * 1.5, "triangle", 0.02);
+  if (step % 8 === 0) {
+    const chord = PADS[Math.floor(step / 8) % PADS.length];
+    for (let i = 0; i < chord.length; i++) toneAt(chord[i], when, STEP_DUR * 7.8, "triangle", 0.012);
+  }
+}
+function startMusicScheduler() {
+  if (musicTimer !== null || !actx) return;
+  musicStep = 0; nextNoteTime = actx.currentTime + 0.06;
+  musicTimer = setInterval(function () {
+    if (!actx) return;
+    if (nextNoteTime < actx.currentTime) nextNoteTime = actx.currentTime + 0.05;
+    while (nextNoteTime < actx.currentTime + 0.12) {
+      scheduleStep(musicStep, nextNoteTime);
+      nextNoteTime += STEP_DUR; musicStep = (musicStep + 1) % 32;
+    }
+  }, 25);
+}
+function setMuted(m) { muted = m; muteBtn.textContent = muted ? "🔇" : "🔊"; }
+muteBtn.addEventListener("pointerdown", function (e) {
+  e.stopPropagation(); e.preventDefault(); initAudio(); setMuted(!muted);
+});
+muteBtn.addEventListener("click", function (e) { e.stopPropagation(); e.preventDefault(); });
+
+// ---------- Icons (drawn shapes, no emoji) ----------
+const ICONS = [
+  { name: "star",    color: "#ffd93d" },
+  { name: "heart",   color: "#ff5d7a" },
+  { name: "moon",    color: "#a8c8ff" },
+  { name: "bolt",    color: "#ffe14d" },
+  { name: "flower",  color: "#ff9ff3" },
+  { name: "diamond", color: "#54e0ff" },
+  { name: "leaf",    color: "#6fe07a" },
+  { name: "ring",    color: "#ffb35c" }
+];
+function drawIcon(kind, cx, cy, s) {
+  ctx.save(); ctx.translate(cx, cy);
+  ctx.fillStyle = ICONS[kind].color; ctx.strokeStyle = ICONS[kind].color;
+  const r = s / 2;
+  if (kind === 0) { // star
+    ctx.beginPath();
+    for (let i = 0; i < 10; i++) {
+      const ang = -Math.PI / 2 + i * Math.PI / 5;
+      const rad = i % 2 === 0 ? r : r * 0.45;
+      const px = Math.cos(ang) * rad, py = Math.sin(ang) * rad;
+      if (i === 0) ctx.moveTo(px, py); else ctx.lineTo(px, py);
+    }
+    ctx.closePath(); ctx.fill();
+  } else if (kind === 1) { // heart
+    ctx.beginPath();
+    ctx.moveTo(0, r * 0.85);
+    ctx.bezierCurveTo(-r * 1.15, -r * 0.1, -r * 0.55, -r * 0.95, 0, -r * 0.4);
+    ctx.bezierCurveTo(r * 0.55, -r * 0.95, r * 1.15, -r * 0.1, 0, r * 0.85);
+    ctx.fill();
+  } else if (kind === 2) { // moon
+    ctx.beginPath(); ctx.arc(0, 0, r * 0.9, 0, Math.PI * 2); ctx.fill();
+    ctx.fillStyle = "#241d4d";
+    ctx.beginPath(); ctx.arc(r * 0.38, -r * 0.22, r * 0.72, 0, Math.PI * 2); ctx.fill();
+  } else if (kind === 3) { // bolt
+    ctx.beginPath();
+    ctx.moveTo(r * 0.25, -r); ctx.lineTo(-r * 0.55, r * 0.18); ctx.lineTo(-r * 0.05, r * 0.18);
+    ctx.lineTo(-r * 0.25, r); ctx.lineTo(r * 0.55, -r * 0.18); ctx.lineTo(r * 0.05, -r * 0.18);
+    ctx.closePath(); ctx.fill();
+  } else if (kind === 4) { // flower
+    for (let i = 0; i < 6; i++) {
+      const a = i * Math.PI / 3;
+      ctx.beginPath();
+      ctx.ellipse(Math.cos(a) * r * 0.5, Math.sin(a) * r * 0.5, r * 0.42, r * 0.26, a, 0, Math.PI * 2);
+      ctx.fill();
+    }
+    ctx.fillStyle = "#fff3a0";
+    ctx.beginPath(); ctx.arc(0, 0, r * 0.3, 0, Math.PI * 2); ctx.fill();
+  } else if (kind === 5) { // diamond
+    ctx.beginPath();
+    ctx.moveTo(0, -r); ctx.lineTo(r * 0.8, -r * 0.25); ctx.lineTo(0, r); ctx.lineTo(-r * 0.8, -r * 0.25);
+    ctx.closePath(); ctx.fill();
+    ctx.strokeStyle = "rgba(20,16,42,0.5)"; ctx.lineWidth = 2;
+    ctx.beginPath(); ctx.moveTo(-r * 0.8, -r * 0.25); ctx.lineTo(r * 0.8, -r * 0.25); ctx.stroke();
+  } else if (kind === 6) { // leaf
+    ctx.beginPath();
+    ctx.moveTo(0, r);
+    ctx.bezierCurveTo(-r, r * 0.2, -r * 0.6, -r * 0.8, 0, -r);
+    ctx.bezierCurveTo(r * 0.6, -r * 0.8, r, r * 0.2, 0, r);
+    ctx.fill();
+    ctx.strokeStyle = "rgba(20,42,20,0.55)"; ctx.lineWidth = 2;
+    ctx.beginPath(); ctx.moveTo(0, r * 0.9); ctx.lineTo(0, -r * 0.85); ctx.stroke();
+  } else { // ring
+    ctx.lineWidth = s * 0.18;
+    ctx.beginPath(); ctx.arc(0, 0, r * 0.72, 0, Math.PI * 2); ctx.stroke();
+    ctx.fillStyle = "#fff";
+    ctx.beginPath(); ctx.arc(r * 0.3, -r * 0.32, r * 0.12, 0, Math.PI * 2); ctx.fill();
+  }
+  ctx.restore();
+}
+
+// ---------- Game state ----------
+let state = "menu"; // menu | play | over (won)
+let best = 0; // fewest moves
+try { best = parseInt(localStorage.getItem("memorymatch_best") || "0", 10) || 0; } catch (e) { best = 0; }
+let cards = []; // {icon, faceUp, matched, flip:0..1}
+let firstPick = -1, lockUntil = 0, moves = 0, matchedPairs = 0;
+let startedAt = 0, elapsed = 0, timerOn = false;
+
+function reset() {
+  const deck = [];
+  for (let i = 0; i < 8; i++) { deck.push(i, i); }
+  for (let i = deck.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    const t = deck[i]; deck[i] = deck[j]; deck[j] = t;
+  }
+  cards = deck.map(icon => ({ icon, faceUp: false, matched: false, flip: 0 }));
+  firstPick = -1; lockUntil = 0; moves = 0; matchedPairs = 0;
+  startedAt = 0; elapsed = 0; timerOn = false;
+}
+function startGame() { initAudio(); reset(); state = "play"; }
+
+function pickCard(idx) {
+  const now = performance.now();
+  if (now < lockUntil) return;
+  const c = cards[idx];
+  if (!c || c.faceUp || c.matched) return;
+  if (!timerOn) { timerOn = true; startedAt = now; }
+  c.faceUp = true; sfxFlip();
+  if (firstPick === -1) { firstPick = idx; return; }
+  moves++;
+  const a = cards[firstPick];
+  if (a.icon === c.icon) {
+    a.matched = true; c.matched = true;
+    matchedPairs++; sfxMatch();
+    firstPick = -1;
+    if (matchedPairs === 8) {
+      state = "over";
+      elapsed = (now - startedAt) / 1000;
+      if (!best || moves < best) { best = moves; try { localStorage.setItem("memorymatch_best", String(best)); } catch (e) {} }
+      sfxWin();
+    }
+  } else {
+    sfxNope();
+    const p = firstPick;
+    firstPick = -1;
+    lockUntil = now + 780;
+    setTimeout(() => { cards[p].faceUp = false; c.faceUp = false; }, 720);
+  }
+}
+
+function cardAt(x, y) {
+  for (let i = 0; i < cards.length; i++) {
+    const cx = gridX + (i % COLS) * (cardSize + gap);
+    const cy = gridY + Math.floor(i / COLS) * (cardSize + gap);
+    if (x >= cx && x <= cx + cardSize && y >= cy && y <= cy + cardSize) return i;
+  }
+  return -1;
+}
+canvas.addEventListener("pointerdown", function (e) {
+  initAudio();
+  if (state !== "play") { startGame(); return; }
+  const idx = cardAt(e.clientX, e.clientY);
+  if (idx >= 0) pickCard(idx);
+});
+window.addEventListener("keydown", function (e) {
+  initAudio();
+  if (state !== "play" && (e.key === " " || e.key === "Enter")) startGame();
+  if (e.key === "m" || e.key === "M") setMuted(!muted);
+});
+
+// ---------- Draw ----------
+function rr(x, y, w, h, r) {
+  r = Math.max(0, Math.min(r, w / 2, h / 2));
+  ctx.beginPath(); ctx.moveTo(x + r, y);
+  ctx.arcTo(x + w, y, x + w, y + h, r); ctx.arcTo(x + w, y + h, x, y + h, r);
+  ctx.arcTo(x, y + h, x, y, r); ctx.arcTo(x, y, x + w, y, r);
+  ctx.closePath();
+}
+function fmtTime(s) {
+  const m = Math.floor(s / 60), ss = Math.floor(s % 60);
+  return m + ":" + (ss < 10 ? "0" : "") + ss;
+}
+function draw(t) {
+  ctx.fillStyle = "#14102a"; ctx.fillRect(0, 0, W, H);
+  // HUD
+  ctx.textAlign = "left"; ctx.textBaseline = "middle";
+  ctx.fillStyle = "#efeaff";
+  ctx.font = "bold " + Math.round(u * 5) + "px system-ui, sans-serif";
+  ctx.fillText("Moves " + moves, 14, HUD_H / 2);
+  const shown = state === "over" ? elapsed : (timerOn ? (t - startedAt) / 1000 : 0);
+  ctx.textAlign = "center";
+  ctx.fillText(fmtTime(shown), W / 2, HUD_H / 2);
+  ctx.textAlign = "right";
+  ctx.fillStyle = "#b7a8e8";
+  ctx.fillText("Pairs " + matchedPairs + "/8", W - 66, HUD_H / 2);
+  // Cards
+  for (let i = 0; i < cards.length; i++) {
+    const c = cards[i];
+    const target = (c.faceUp || c.matched) ? 1 : 0;
+    c.flip += (target - c.flip) * 0.22;
+    if (Math.abs(target - c.flip) < 0.01) c.flip = target;
+    const cx = gridX + (i % COLS) * (cardSize + gap);
+    const cy = gridY + Math.floor(i / COLS) * (cardSize + gap);
+    const sq = Math.abs(Math.cos(c.flip * Math.PI)); // 1 face-down, 0 edge-on, 1 face-up
+    const wNow = Math.max(4, cardSize * sq);
+    const xNow = cx + (cardSize - wNow) / 2;
+    if (c.flip < 0.5) {
+      // back
+      ctx.fillStyle = c.matched ? "#3a3468" : "#4b3f8f";
+      rr(xNow, cy, wNow, cardSize, 10); ctx.fill();
+      if (wNow > 18) {
+        ctx.strokeStyle = "rgba(220,205,255,0.5)"; ctx.lineWidth = 2;
+        rr(xNow + 5, cy + 5, wNow - 10, cardSize - 10, 7); ctx.stroke();
+      }
+      if (wNow > 20) {
+        ctx.fillStyle = "rgba(230,220,255,0.8)";
+        ctx.font = "bold " + Math.round(cardSize * 0.4) + "px system-ui, sans-serif";
+        ctx.textAlign = "center"; ctx.textBaseline = "middle";
+        ctx.fillText("?", cx + cardSize / 2, cy + cardSize / 2 + 1);
+      }
+    } else {
+      ctx.fillStyle = c.matched ? "#2e4d3a" : "#241d4d";
+      rr(xNow, cy, wNow, cardSize, 10); ctx.fill();
+      if (wNow > 16) drawIcon(c.icon, cx + cardSize / 2, cy + cardSize / 2, cardSize * 0.52 * Math.min(1, wNow / cardSize + 0.25));
+    }
+  }
+  if (state !== "play") {
+    ctx.fillStyle = "rgba(8,6,20,0.8)"; ctx.fillRect(0, 0, W, H);
+    ctx.textAlign = "center"; ctx.textBaseline = "middle";
+    ctx.fillStyle = "#c9b8ff";
+    ctx.font = "bold " + Math.round(u * 9.5) + "px system-ui, sans-serif";
+    ctx.fillText("MEMORY MATCH", W / 2, H * 0.30);
+    ctx.fillStyle = "#efeaff";
+    ctx.font = Math.round(u * 4.4) + "px system-ui, sans-serif";
+    if (state === "menu") {
+      ctx.fillText("Flip two cards. Match all 8 pairs.", W / 2, H * 0.42);
+      ctx.fillStyle = "#b7a8e8";
+      ctx.fillText("Fewest moves wins — no time pressure,", W / 2, H * 0.475);
+      ctx.fillText("the clock is just for you.", W / 2, H * 0.525);
+      if (best) ctx.fillText("Your best: " + best + " moves", W / 2, H * 0.585);
+    } else {
+      ctx.fillStyle = "#8be04e";
+      ctx.fillText("All pairs found!", W / 2, H * 0.42);
+      ctx.fillStyle = "#efeaff";
+      ctx.fillText(moves + " moves · " + fmtTime(elapsed), W / 2, H * 0.48);
+      ctx.fillStyle = "#b7a8e8";
+      ctx.fillText("Best: " + best + " moves", W / 2, H * 0.535);
+    }
+    ctx.fillStyle = "#c9b8ff";
+    ctx.font = "bold " + Math.round(u * 5) + "px system-ui, sans-serif";
+    ctx.fillText(state === "menu" ? "TAP TO START" : "TAP TO PLAY AGAIN", W / 2, H * 0.66);
+  }
+}
+
+// ---------- Loop ----------
+function frame(t) {
+  requestAnimationFrame(frame);
+  draw(t || 0);
+}
+resize();
+reset();
+requestAnimationFrame(frame);
+</script>
+</body>
+</html>

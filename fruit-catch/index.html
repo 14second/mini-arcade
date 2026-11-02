@@ -1,0 +1,381 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, user-scalable=no">
+<meta name="theme-color" content="#14301c">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<title>Fruit Catch</title>
+<style>
+  * { margin:0; padding:0; box-sizing:border-box; }
+  html, body {
+    width:100%; height:100%; overflow:hidden; background:#14301c;
+    font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+    touch-action:none; user-select:none; -webkit-user-select:none;
+    -webkit-tap-highlight-color: transparent;
+  }
+  canvas { position:fixed; inset:0; display:block; touch-action:none; }
+  #muteBtn {
+    position:fixed; top:10px; right:10px; z-index:10;
+    width:48px; height:48px; border-radius:12px;
+    border:2px solid rgba(160,255,170,.5); background:rgba(10,26,14,.62);
+    color:#fff; font-size:22px; line-height:1; cursor:pointer;
+    touch-action:none; user-select:none; -webkit-user-select:none;
+    display:flex; align-items:center; justify-content:center; padding:0;
+  }
+</style>
+</head>
+<body>
+<canvas id="game"></canvas>
+<button id="muteBtn" aria-label="Toggle sound">🔊</button>
+<script>
+// iOS audio routing: route Web Audio to the media/playback channel (iOS 17+
+// Audio Session API) on the first gesture and inside audio init, so sound
+// plays even with the silent switch on.
+function iosPlaybackSession() {
+  try { if ('audioSession' in navigator) navigator.audioSession.type = 'playback'; } catch (e) {}
+}
+document.addEventListener('pointerdown', iosPlaybackSession, true);
+document.addEventListener('touchstart', iosPlaybackSession, true);
+
+"use strict";
+/* ============================================================
+   FRUIT CATCH — slide the basket, catch the falling fruit.
+   Bombs cost a life (you have 3). Fruit that hits the ground
+   only breaks your streak. Fairness: fall speed is capped and
+   spawns are spaced so a catch is always reachable.
+   ============================================================ */
+
+const canvas = document.getElementById("game");
+const ctx = canvas.getContext("2d");
+let W = 0, H = 0, DPR = 1, u = 4;
+let basketW = 88, basketH = 36, basketY = 0, groundY = 0;
+const MAX_FALL = 330;      // px/s — capped so fruit stays catchable
+const BASKET_KEY_SPEED = 600;
+
+function resize() {
+  DPR = Math.min(window.devicePixelRatio || 1, 2);
+  W = window.innerWidth; H = window.innerHeight;
+  canvas.width = Math.round(W * DPR); canvas.height = Math.round(H * DPR);
+  canvas.style.width = W + "px"; canvas.style.height = H + "px";
+  ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+  u = Math.min(W, H) / 100;
+  basketW = Math.max(72, Math.min(120, W * 0.24));
+  basketH = Math.max(28, u * 7);
+  groundY = H - Math.max(26, H * 0.045);
+  basketY = groundY - basketH - 6;
+  basket.x = clamp(basket.x || W / 2, basketW / 2, W - basketW / 2);
+}
+window.addEventListener("resize", resize);
+
+function clamp(v, a, b) { return v < a ? a : (v > b ? b : v); }
+function rand(a, b) { return a + Math.random() * (b - a); }
+
+// ---------- Audio ----------
+let actx = null, muted = false;
+const muteBtn = document.getElementById("muteBtn");
+function initAudio() {
+  iosPlaybackSession();
+  if (!actx) {
+    try {
+      const AC = window.AudioContext || window.webkitAudioContext;
+      if (AC) actx = new AC();
+    } catch (e) { actx = null; }
+    if (actx) startMusicScheduler();
+  }
+  if (actx && actx.state === "suspended") actx.resume();
+}
+function beep(freq, dur, type, vol, slide) {
+  if (!actx || muted) return;
+  const t = actx.currentTime;
+  const o = actx.createOscillator(), g = actx.createGain();
+  o.type = type || "square";
+  o.frequency.setValueAtTime(freq, t);
+  if (slide) o.frequency.exponentialRampToValueAtTime(Math.max(20, slide), t + dur);
+  g.gain.setValueAtTime(vol || 0.08, t);
+  g.gain.exponentialRampToValueAtTime(0.0001, t + dur);
+  o.connect(g); g.connect(actx.destination);
+  o.start(t); o.stop(t + dur + 0.02);
+}
+function noiseBurst(dur, vol) {
+  if (!actx || muted) return;
+  const t = actx.currentTime;
+  const len = Math.max(1, Math.floor(actx.sampleRate * dur));
+  const buf = actx.createBuffer(1, len, actx.sampleRate);
+  const d = buf.getChannelData(0);
+  for (let i = 0; i < len; i++) d[i] = (Math.random() * 2 - 1) * (1 - i / len);
+  const src = actx.createBufferSource(); src.buffer = buf;
+  const g = actx.createGain();
+  g.gain.setValueAtTime(vol, t);
+  g.gain.exponentialRampToValueAtTime(0.0001, t + dur);
+  const f = actx.createBiquadFilter(); f.type = "lowpass";
+  f.frequency.setValueAtTime(2600, t);
+  f.frequency.exponentialRampToValueAtTime(160, t + dur);
+  src.connect(f); f.connect(g); g.connect(actx.destination);
+  src.start(t);
+}
+function sfxCatch(streak) { beep(520 + Math.min(streak, 10) * 40, 0.09, "triangle", 0.08, 880); }
+function sfxBomb()  { beep(150, 0.35, "sawtooth", 0.1, 40); noiseBurst(0.3, 0.1); }
+function sfxMiss()  { beep(240, 0.1, "triangle", 0.04, 180); }
+
+// Orchard loop, BPM 126. Bass >= MIDI 48.
+const BPM = 126, STEP_DUR = 60 / BPM / 2;
+const BASS = [
+  48,0,55,0, 48,0,55,0, 57,0,53,0, 50,0,55,0,
+  48,0,55,0, 48,0,55,0, 53,0,55,0, 48,0, 0,0
+];
+const LEAD = [
+  76,0,79,0, 81,0,79,0, 76,0,74,0, 72,0, 0,0,
+  76,0,79,0, 84,0,81,0, 79,0,76,0, 74,0, 0,0
+];
+const PADS = [ [60,64,67], [64,67,72], [65,69,72], [62,67,71] ];
+let musicStep = 0, nextNoteTime = 0, musicTimer = null;
+function midiFreq(m) { return 440 * Math.pow(2, (m - 69) / 12); }
+function toneAt(midi, when, dur, type, vol) {
+  const o = actx.createOscillator(), g = actx.createGain();
+  o.type = type; o.frequency.setValueAtTime(midiFreq(midi), when);
+  g.gain.setValueAtTime(0.0001, when);
+  g.gain.exponentialRampToValueAtTime(vol, when + 0.012);
+  g.gain.exponentialRampToValueAtTime(0.0001, when + dur);
+  o.connect(g); g.connect(actx.destination);
+  o.start(when); o.stop(when + dur + 0.03);
+}
+function scheduleStep(step, when) {
+  if (muted) return;
+  const b = BASS[step % 32]; if (b) toneAt(b, when, STEP_DUR * 0.9, "triangle", 0.052);
+  const l = LEAD[step % 32]; if (l) toneAt(l, when, STEP_DUR * 0.8, "square", 0.024);
+  if (step % 8 === 0) {
+    const chord = PADS[Math.floor(step / 8) % PADS.length];
+    for (let i = 0; i < chord.length; i++) toneAt(chord[i], when, STEP_DUR * 7.6, "triangle", 0.012);
+  }
+}
+function startMusicScheduler() {
+  if (musicTimer !== null || !actx) return;
+  musicStep = 0; nextNoteTime = actx.currentTime + 0.06;
+  musicTimer = setInterval(function () {
+    if (!actx) return;
+    if (nextNoteTime < actx.currentTime) nextNoteTime = actx.currentTime + 0.05;
+    while (nextNoteTime < actx.currentTime + 0.12) {
+      scheduleStep(musicStep, nextNoteTime);
+      nextNoteTime += STEP_DUR; musicStep = (musicStep + 1) % 32;
+    }
+  }, 25);
+}
+function setMuted(m) { muted = m; muteBtn.textContent = muted ? "🔇" : "🔊"; }
+muteBtn.addEventListener("pointerdown", function (e) {
+  e.stopPropagation(); e.preventDefault(); initAudio(); setMuted(!muted);
+});
+muteBtn.addEventListener("click", function (e) { e.stopPropagation(); e.preventDefault(); });
+
+// ---------- Game state ----------
+let state = "menu"; // menu | play | over
+let hi = 0;
+try { hi = parseInt(localStorage.getItem("fruitcatch_hi") || "0", 10) || 0; } catch (e) { hi = 0; }
+const basket = { x: 0 };
+let items = []; // {x, y, vy, r, kind: 'apple'|'orange'|'berry'|'bomb'}
+let score = 0, lives = 3, streak = 0, bestStreak = 0;
+let spawnTimer = 0, playTime = 0, keys = {}, dragging = false;
+let lastSpawnX = -1, lastSpawnAgo = 99;
+
+const FRUITS = {
+  apple:  { r: 15, pts: 10, color: "#e8402f" },
+  orange: { r: 16, pts: 15, color: "#ff9f1c" },
+  berry:  { r: 11, pts: 25, color: "#7b5cff" }
+};
+function spawnItem() {
+  const roll = Math.random();
+  const kind = roll < 0.16 ? "bomb" : roll < 0.55 ? "apple" : roll < 0.83 ? "orange" : "berry";
+  const r = kind === "bomb" ? 15 : FRUITS[kind].r;
+  const margin = r + 8;
+  let x = rand(margin, W - margin);
+  // Fairness: if the previous item spawned very recently, keep this one
+  // within comfortable basket reach of it.
+  if (lastSpawnAgo < 0.55 && lastSpawnX >= 0) {
+    const reach = W * 0.55;
+    x = clamp(x, lastSpawnX - reach, lastSpawnX + reach);
+    x = clamp(x, margin, W - margin);
+  }
+  const speedRamp = Math.min(1, playTime / 75);
+  const vy = Math.min(MAX_FALL, rand(165, 215) + speedRamp * 115);
+  items.push({ x, y: -r - 4, vy, r, kind, spin: rand(0, Math.PI * 2) });
+  lastSpawnX = x; lastSpawnAgo = 0;
+}
+function reset() {
+  items = []; score = 0; lives = 3; streak = 0; bestStreak = 0;
+  spawnTimer = 0.4; playTime = 0; lastSpawnX = -1; lastSpawnAgo = 99;
+  basket.x = W / 2;
+}
+function gameOver() {
+  state = "over";
+  if (score > hi) { hi = score; try { localStorage.setItem("fruitcatch_hi", String(hi)); } catch (e) {} }
+}
+function startGame() { initAudio(); reset(); state = "play"; }
+
+// ---------- Input ----------
+canvas.addEventListener("pointerdown", function (e) {
+  initAudio();
+  if (state !== "play") { startGame(); return; }
+  dragging = true;
+  basket.x = clamp(e.clientX, basketW / 2, W - basketW / 2);
+});
+canvas.addEventListener("pointermove", function (e) {
+  if (dragging && state === "play") basket.x = clamp(e.clientX, basketW / 2, W - basketW / 2);
+});
+window.addEventListener("pointerup", function () { dragging = false; });
+window.addEventListener("keydown", function (e) {
+  keys[e.key] = true;
+  if (["ArrowLeft","ArrowRight"," "].includes(e.key)) e.preventDefault();
+  initAudio();
+  if (state !== "play" && (e.key === " " || e.key === "Enter")) startGame();
+  if (e.key === "m" || e.key === "M") setMuted(!muted);
+});
+window.addEventListener("keyup", function (e) { keys[e.key] = false; });
+
+// ---------- Update ----------
+function update(dt) {
+  if (state !== "play") return;
+  playTime += dt; lastSpawnAgo += dt;
+  if (keys["ArrowLeft"] || keys["a"] || keys["A"]) basket.x -= BASKET_KEY_SPEED * dt;
+  if (keys["ArrowRight"] || keys["d"] || keys["D"]) basket.x += BASKET_KEY_SPEED * dt;
+  basket.x = clamp(basket.x, basketW / 2, W - basketW / 2);
+
+  spawnTimer -= dt;
+  if (spawnTimer <= 0) {
+    spawnItem();
+    const interval = Math.max(0.52, 0.92 - playTime * 0.005);
+    spawnTimer = interval * rand(0.8, 1.2);
+  }
+  const rimY = basketY + 6;
+  for (let i = items.length - 1; i >= 0; i--) {
+    const it = items[i];
+    it.y += it.vy * dt;
+    it.spin += dt * 1.5;
+    // Catch: item centre crosses the rim while over the basket.
+    if (it.vy > 0 && it.y + it.r * 0.4 >= rimY && it.y - it.r < rimY + 14 &&
+        Math.abs(it.x - basket.x) <= basketW / 2 + it.r * 0.35) {
+      items.splice(i, 1);
+      if (it.kind === "bomb") {
+        lives--; streak = 0; sfxBomb();
+        if (lives <= 0) { gameOver(); return; }
+      } else {
+        streak++; bestStreak = Math.max(bestStreak, streak);
+        score += FRUITS[it.kind].pts + Math.min(10, streak); // small streak bonus
+        sfxCatch(streak);
+      }
+      continue;
+    }
+    if (it.y - it.r > groundY) {
+      items.splice(i, 1);
+      if (it.kind !== "bomb") { if (streak > 0) sfxMiss(); streak = 0; }
+    }
+  }
+}
+
+// ---------- Draw ----------
+function drawItem(it) {
+  ctx.save(); ctx.translate(it.x, it.y);
+  if (it.kind === "bomb") {
+    ctx.fillStyle = "#22242c";
+    ctx.beginPath(); ctx.arc(0, 0, it.r, 0, Math.PI * 2); ctx.fill();
+    ctx.strokeStyle = "#4a4f5e"; ctx.lineWidth = 3;
+    for (let i = 0; i < 8; i++) {
+      const a = it.spin + i * Math.PI / 4;
+      ctx.beginPath();
+      ctx.moveTo(Math.cos(a) * it.r * 0.8, Math.sin(a) * it.r * 0.8);
+      ctx.lineTo(Math.cos(a) * it.r * 1.18, Math.sin(a) * it.r * 1.18);
+      ctx.stroke();
+    }
+    ctx.fillStyle = "#ffca3a";
+    ctx.beginPath(); ctx.arc(-it.r * 0.3, -it.r * 0.35, it.r * 0.16, 0, Math.PI * 2); ctx.fill();
+  } else {
+    const f = FRUITS[it.kind];
+    ctx.fillStyle = f.color;
+    ctx.beginPath(); ctx.arc(0, 0, it.r, 0, Math.PI * 2); ctx.fill();
+    ctx.fillStyle = "rgba(255,255,255,0.35)";
+    ctx.beginPath(); ctx.arc(-it.r * 0.35, -it.r * 0.4, it.r * 0.28, 0, Math.PI * 2); ctx.fill();
+    ctx.strokeStyle = "#6b4423"; ctx.lineWidth = 2.5;
+    ctx.beginPath(); ctx.moveTo(0, -it.r * 0.8); ctx.lineTo(it.r * 0.12, -it.r * 1.15); ctx.stroke();
+    ctx.fillStyle = "#57b84a";
+    ctx.beginPath(); ctx.ellipse(it.r * 0.3, -it.r * 0.95, it.r * 0.32, it.r * 0.14, -0.4, 0, Math.PI * 2); ctx.fill();
+  }
+  ctx.restore();
+}
+function draw() {
+  // orchard backdrop
+  const grad = ctx.createLinearGradient(0, 0, 0, H);
+  grad.addColorStop(0, "#1c4a28"); grad.addColorStop(1, "#14301c");
+  ctx.fillStyle = grad; ctx.fillRect(0, 0, W, H);
+  ctx.fillStyle = "#0f2413"; ctx.fillRect(0, groundY, W, H - groundY);
+  ctx.fillStyle = "#2e6b3c"; ctx.fillRect(0, groundY, W, 3);
+  // HUD
+  ctx.textAlign = "left"; ctx.textBaseline = "middle";
+  ctx.fillStyle = "#eaffea";
+  ctx.font = "bold " + Math.round(u * 5.2) + "px system-ui, sans-serif";
+  ctx.fillText("Score " + score, 14, 30);
+  ctx.textAlign = "center"; ctx.fillStyle = "#ffd93d";
+  if (streak >= 3) ctx.fillText("Streak ×" + streak, W / 2, 30);
+  ctx.textAlign = "right";
+  let hearts = "";
+  for (let i = 0; i < lives; i++) hearts += "● ";
+  ctx.fillStyle = "#ff5d7a";
+  ctx.fillText(hearts.trim(), W - 66, 30);
+  // items
+  for (const it of items) drawItem(it);
+  // basket
+  const bx = basket.x - basketW / 2;
+  ctx.fillStyle = "#b0793a";
+  ctx.beginPath();
+  ctx.moveTo(bx - 6, basketY);
+  ctx.lineTo(bx + basketW + 6, basketY);
+  ctx.lineTo(bx + basketW - 8, basketY + basketH);
+  ctx.lineTo(bx + 8, basketY + basketH);
+  ctx.closePath(); ctx.fill();
+  ctx.strokeStyle = "#7a4a21"; ctx.lineWidth = 3;
+  for (let i = 1; i <= 3; i++) {
+    const yy = basketY + (basketH / 4) * i;
+    ctx.beginPath(); ctx.moveTo(bx - 4 + i * 2, yy); ctx.lineTo(bx + basketW + 4 - i * 2, yy); ctx.stroke();
+  }
+  ctx.fillStyle = "#8a5a28";
+  ctx.fillRect(bx - 8, basketY - 5, basketW + 16, 7);
+  if (state !== "play") {
+    ctx.fillStyle = "rgba(6,18,9,0.8)"; ctx.fillRect(0, 0, W, H);
+    ctx.textAlign = "center"; ctx.textBaseline = "middle";
+    ctx.fillStyle = "#8be04e";
+    ctx.font = "bold " + Math.round(u * 10) + "px system-ui, sans-serif";
+    ctx.fillText("FRUIT CATCH", W / 2, H * 0.28);
+    ctx.fillStyle = "#eaffea";
+    ctx.font = Math.round(u * 4.4) + "px system-ui, sans-serif";
+    if (state === "menu") {
+      ctx.fillText("Drag the basket (or ◀ ▶) to catch falling fruit.", W / 2, H * 0.40);
+      ctx.fillStyle = "#ffb3a7";
+      ctx.fillText("Bombs cost a life — you have 3.", W / 2, H * 0.455);
+      ctx.fillStyle = "#9fd8a8";
+      ctx.fillText("Dropped fruit only breaks your streak.", W / 2, H * 0.51);
+      ctx.fillText("Berries are small, quick, and worth the most.", W / 2, H * 0.565);
+      if (hi) ctx.fillText("Best score: " + hi, W / 2, H * 0.62);
+    } else {
+      ctx.fillText("Out of lives — score " + score, W / 2, H * 0.42);
+      ctx.fillStyle = "#9fd8a8";
+      ctx.fillText("Best streak ×" + bestStreak + " · Best score " + hi, W / 2, H * 0.475);
+    }
+    ctx.fillStyle = "#8be04e";
+    ctx.font = "bold " + Math.round(u * 5) + "px system-ui, sans-serif";
+    ctx.fillText(state === "menu" ? "TAP TO START" : "TAP TO PLAY AGAIN", W / 2, H * 0.68);
+  }
+}
+
+// ---------- Loop ----------
+let lastT = 0;
+function frame(t) {
+  requestAnimationFrame(frame);
+  const dt = Math.min(0.05, (t - lastT) / 1000 || 0); lastT = t;
+  update(dt);
+  draw();
+}
+resize();
+reset();
+requestAnimationFrame(frame);
+</script>
+</body>
+</html>

@@ -1,0 +1,378 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, user-scalable=no">
+<meta name="theme-color" content="#10283e">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<title>Balloon Pop</title>
+<style>
+  * { margin:0; padding:0; box-sizing:border-box; }
+  html, body {
+    width:100%; height:100%; overflow:hidden; background:#10283e;
+    font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+    touch-action:none; user-select:none; -webkit-user-select:none;
+    -webkit-tap-highlight-color: transparent;
+  }
+  canvas { position:fixed; inset:0; display:block; touch-action:none; }
+  #muteBtn {
+    position:fixed; top:10px; right:10px; z-index:10;
+    width:48px; height:48px; border-radius:12px;
+    border:2px solid rgba(160,210,255,.5); background:rgba(8,20,34,.62);
+    color:#fff; font-size:22px; line-height:1; cursor:pointer;
+    touch-action:none; user-select:none; -webkit-user-select:none;
+    display:flex; align-items:center; justify-content:center; padding:0;
+  }
+</style>
+</head>
+<body>
+<canvas id="game"></canvas>
+<button id="muteBtn" aria-label="Toggle sound">🔊</button>
+<script>
+// iOS audio routing: route Web Audio to the media/playback channel (iOS 17+
+// Audio Session API) on the first gesture and inside audio init, so sound
+// plays even with the silent switch on.
+function iosPlaybackSession() {
+  try { if ('audioSession' in navigator) navigator.audioSession.type = 'playback'; } catch (e) {}
+}
+document.addEventListener('pointerdown', iosPlaybackSession, true);
+document.addEventListener('touchstart', iosPlaybackSession, true);
+
+"use strict";
+/* ============================================================
+   BALLOON POP — balloons float up, tap to pop them.
+   +10 each, streaks build a bonus. The RED SPIKY ones are
+   traps: popping one costs a life (you have 3). Balloons
+   that float away only break your streak. Don't tap the red!
+   ============================================================ */
+
+const canvas = document.getElementById("game");
+const ctx = canvas.getContext("2d");
+let W = 0, H = 0, DPR = 1, u = 4;
+
+function resize() {
+  DPR = Math.min(window.devicePixelRatio || 1, 2);
+  W = window.innerWidth; H = window.innerHeight;
+  canvas.width = Math.round(W * DPR); canvas.height = Math.round(H * DPR);
+  canvas.style.width = W + "px"; canvas.style.height = H + "px";
+  ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+  u = Math.min(W, H) / 100;
+}
+window.addEventListener("resize", resize);
+
+function clamp(v, a, b) { return v < a ? a : (v > b ? b : v); }
+function rand(a, b) { return a + Math.random() * (b - a); }
+
+// ---------- Audio ----------
+let actx = null, muted = false;
+const muteBtn = document.getElementById("muteBtn");
+function initAudio() {
+  iosPlaybackSession();
+  if (!actx) {
+    try {
+      const AC = window.AudioContext || window.webkitAudioContext;
+      if (AC) actx = new AC();
+    } catch (e) { actx = null; }
+    if (actx) startMusicScheduler();
+  }
+  if (actx && actx.state === "suspended") actx.resume();
+}
+function beep(freq, dur, type, vol, slide) {
+  if (!actx || muted) return;
+  const t = actx.currentTime;
+  const o = actx.createOscillator(), g = actx.createGain();
+  o.type = type || "square";
+  o.frequency.setValueAtTime(freq, t);
+  if (slide) o.frequency.exponentialRampToValueAtTime(Math.max(20, slide), t + dur);
+  g.gain.setValueAtTime(vol || 0.08, t);
+  g.gain.exponentialRampToValueAtTime(0.0001, t + dur);
+  o.connect(g); g.connect(actx.destination);
+  o.start(t); o.stop(t + dur + 0.02);
+}
+function popSound(streak) {
+  // bright "pop": short noise snap + rising blip pitched by streak
+  if (!actx || muted) return;
+  const t = actx.currentTime;
+  const len = Math.max(1, Math.floor(actx.sampleRate * 0.05));
+  const buf = actx.createBuffer(1, len, actx.sampleRate);
+  const d = buf.getChannelData(0);
+  for (let i = 0; i < len; i++) d[i] = (Math.random() * 2 - 1) * (1 - i / len);
+  const src = actx.createBufferSource(); src.buffer = buf;
+  const g = actx.createGain(); g.gain.setValueAtTime(0.16, t);
+  g.gain.exponentialRampToValueAtTime(0.0001, t + 0.05);
+  const f = actx.createBiquadFilter(); f.type = "bandpass"; f.frequency.value = 1500; f.Q.value = 0.8;
+  src.connect(f); f.connect(g); g.connect(actx.destination);
+  src.start(t);
+  beep(700 + Math.min(streak, 12) * 45, 0.08, "triangle", 0.07, 1200);
+}
+function sfxTrap() { beep(160, 0.32, "sawtooth", 0.1, 45); }
+
+// Breezy fairground loop, BPM 138. Bass >= MIDI 48.
+const BPM = 138, STEP_DUR = 60 / BPM / 2;
+const BASS = [
+  48,0,0,55, 0,0,48,0, 53,0,0,60, 0,0,53,0,
+  55,0,0,62, 0,0,55,0, 50,0,55,0, 48,0, 0,0
+];
+const LEAD = [
+  72,0,76,79, 0,76,0,0, 77,0,81,0, 79,0,76,0,
+  74,0,79,0, 81,0,79,0, 76,0,74,0, 72,0, 0,0
+];
+const PADS = [ [60,64,67], [65,69,72], [67,71,74], [62,67,71] ];
+let musicStep = 0, nextNoteTime = 0, musicTimer = null;
+function midiFreq(m) { return 440 * Math.pow(2, (m - 69) / 12); }
+function toneAt(midi, when, dur, type, vol) {
+  const o = actx.createOscillator(), g = actx.createGain();
+  o.type = type; o.frequency.setValueAtTime(midiFreq(midi), when);
+  g.gain.setValueAtTime(0.0001, when);
+  g.gain.exponentialRampToValueAtTime(vol, when + 0.012);
+  g.gain.exponentialRampToValueAtTime(0.0001, when + dur);
+  o.connect(g); g.connect(actx.destination);
+  o.start(when); o.stop(when + dur + 0.03);
+}
+function scheduleStep(step, when) {
+  if (muted) return;
+  const b = BASS[step % 32]; if (b) toneAt(b, when, STEP_DUR * 0.9, "triangle", 0.05);
+  const l = LEAD[step % 32]; if (l) toneAt(l, when, STEP_DUR * 0.8, "square", 0.023);
+  if (step % 8 === 0) {
+    const chord = PADS[Math.floor(step / 8) % PADS.length];
+    for (let i = 0; i < chord.length; i++) toneAt(chord[i], when, STEP_DUR * 7.6, "triangle", 0.012);
+  }
+}
+function startMusicScheduler() {
+  if (musicTimer !== null || !actx) return;
+  musicStep = 0; nextNoteTime = actx.currentTime + 0.06;
+  musicTimer = setInterval(function () {
+    if (!actx) return;
+    if (nextNoteTime < actx.currentTime) nextNoteTime = actx.currentTime + 0.05;
+    while (nextNoteTime < actx.currentTime + 0.12) {
+      scheduleStep(musicStep, nextNoteTime);
+      nextNoteTime += STEP_DUR; musicStep = (musicStep + 1) % 32;
+    }
+  }, 25);
+}
+function setMuted(m) { muted = m; muteBtn.textContent = muted ? "🔇" : "🔊"; }
+muteBtn.addEventListener("pointerdown", function (e) {
+  e.stopPropagation(); e.preventDefault(); initAudio(); setMuted(!muted);
+});
+muteBtn.addEventListener("click", function (e) { e.stopPropagation(); e.preventDefault(); });
+
+// ---------- Game state ----------
+let state = "menu"; // menu | play | over
+let hi = 0;
+try { hi = parseInt(localStorage.getItem("balloonpop_hi") || "0", 10) || 0; } catch (e) { hi = 0; }
+let balloons = []; // {x, y, r, vy, phase, color, trap}
+let particles = [];
+let pops = [];     // floating score text {x, y, text, until, color}
+let score = 0, lives = 3, streak = 0, bestStreak = 0;
+let spawnTimer = 0, playTime = 0;
+const COLORS = ["#ff5d8f", "#ffb340", "#54e0ff", "#8be04e", "#b78bff", "#ff8a5c", "#4dd8c8"];
+
+function spawnBalloon() {
+  const r = rand(19, 29);
+  const trap = Math.random() < 0.15;
+  const ramp = Math.min(1, playTime / 80);
+  balloons.push({
+    x: rand(r + 6, W - r - 6),
+    y: H + r + 30,
+    r,
+    vy: rand(58, 92) + ramp * 78,
+    phase: rand(0, Math.PI * 2),
+    wobbleAmp: rand(6, 16),
+    color: trap ? "#e5322d" : COLORS[Math.floor(Math.random() * COLORS.length)],
+    trap
+  });
+}
+function reset() {
+  balloons = []; particles = []; pops = [];
+  score = 0; lives = 3; streak = 0; bestStreak = 0;
+  spawnTimer = 0.3; playTime = 0;
+}
+function gameOver() {
+  state = "over";
+  if (score > hi) { hi = score; try { localStorage.setItem("balloonpop_hi", String(hi)); } catch (e) {} }
+}
+function startGame() { initAudio(); reset(); state = "play"; }
+
+function popBalloon(i, x, y) {
+  const b = balloons[i];
+  balloons.splice(i, 1);
+  for (let p = 0; p < 10; p++) {
+    const a = (p / 10) * Math.PI * 2 + rand(-0.3, 0.3);
+    particles.push({ x: b.x, y: b.y, vx: Math.cos(a) * rand(60, 190), vy: Math.sin(a) * rand(60, 190), life: 0.35, color: b.color });
+  }
+  if (b.trap) {
+    lives--; streak = 0; sfxTrap();
+    pops.push({ x: b.x, y: b.y, text: "TRAP! −1 life", until: performance.now() + 800, color: "#ff7a6b" });
+    if (lives <= 0) gameOver();
+  } else {
+    streak++; bestStreak = Math.max(bestStreak, streak);
+    const pts = 10 + Math.min(20, Math.floor(streak / 5) * 5);
+    score += pts;
+    popSound(streak);
+    pops.push({ x: b.x, y: b.y, text: "+" + pts, until: performance.now() + 650, color: "#ffffff" });
+  }
+}
+
+// ---------- Input ----------
+canvas.addEventListener("pointerdown", function (e) {
+  initAudio();
+  if (state !== "play") { startGame(); return; }
+  const x = e.clientX, y = e.clientY;
+  // Topmost (last drawn) balloon first; generous hit radius.
+  for (let i = balloons.length - 1; i >= 0; i--) {
+    const b = balloons[i];
+    const dx = x - b.x, dy = y - (b.y - b.r * 0.15);
+    if (dx * dx + dy * dy <= Math.pow(b.r + 10, 2)) { popBalloon(i, x, y); return; }
+  }
+});
+window.addEventListener("keydown", function (e) {
+  initAudio();
+  if (state !== "play" && (e.key === " " || e.key === "Enter")) startGame();
+  if (e.key === "m" || e.key === "M") setMuted(!muted);
+});
+
+// ---------- Update ----------
+function update(dt) {
+  for (let i = particles.length - 1; i >= 0; i--) {
+    const p = particles[i];
+    p.life -= dt; p.x += p.vx * dt; p.y += p.vy * dt; p.vy += 300 * dt;
+    if (p.life <= 0) particles.splice(i, 1);
+  }
+  if (state !== "play") return;
+  playTime += dt;
+  spawnTimer -= dt;
+  if (spawnTimer <= 0) {
+    spawnBalloon();
+    spawnTimer = Math.max(0.42, 0.95 - playTime * 0.006) * rand(0.75, 1.25);
+  }
+  const t = performance.now() / 1000;
+  for (let i = balloons.length - 1; i >= 0; i--) {
+    const b = balloons[i];
+    b.y -= b.vy * dt;
+    b.x += Math.sin(t * 1.7 + b.phase) * b.wobbleAmp * dt;
+    if (b.y + b.r + 36 < 0) {
+      balloons.splice(i, 1);
+      if (!b.trap) streak = 0; // escaped: streak lost, nothing else
+    }
+  }
+}
+
+// ---------- Draw ----------
+function drawBalloon(b, t) {
+  const cy = b.y - b.r * 0.15;
+  ctx.save(); ctx.translate(b.x, cy);
+  // string
+  ctx.strokeStyle = "rgba(255,255,255,0.55)"; ctx.lineWidth = 1.5;
+  ctx.beginPath();
+  ctx.moveTo(0, b.r * 1.05);
+  ctx.quadraticCurveTo(Math.sin(t * 2 + b.phase) * 5, b.r * 1.5, Math.sin(t * 2 + b.phase) * 3, b.r * 1.95);
+  ctx.stroke();
+  // knot
+  ctx.fillStyle = b.color;
+  ctx.beginPath();
+  ctx.moveTo(-4, b.r * 0.95); ctx.lineTo(4, b.r * 0.95); ctx.lineTo(0, b.r * 1.18);
+  ctx.closePath(); ctx.fill();
+  // body
+  ctx.beginPath(); ctx.ellipse(0, 0, b.r * 0.86, b.r * 1.02, 0, 0, Math.PI * 2);
+  ctx.fillStyle = b.color; ctx.fill();
+  if (b.trap) {
+    // spikes + warning mark so traps are unmistakable
+    ctx.strokeStyle = "#7a120e"; ctx.lineWidth = 3;
+    for (let i = 0; i < 10; i++) {
+      const a = i * Math.PI / 5 + 0.3;
+      const c = Math.cos(a), s = Math.sin(a);
+      ctx.beginPath();
+      ctx.moveTo(c * b.r * 0.84, s * b.r);
+      ctx.lineTo(c * b.r * 1.12, s * b.r * 1.28);
+      ctx.stroke();
+    }
+    ctx.fillStyle = "#ffffff";
+    ctx.font = "bold " + Math.round(b.r * 1.05) + "px system-ui, sans-serif";
+    ctx.textAlign = "center"; ctx.textBaseline = "middle";
+    ctx.fillText("!", 0, 1);
+  } else {
+    ctx.fillStyle = "rgba(255,255,255,0.4)";
+    ctx.beginPath(); ctx.ellipse(-b.r * 0.32, -b.r * 0.38, b.r * 0.2, b.r * 0.32, -0.5, 0, Math.PI * 2); ctx.fill();
+  }
+  ctx.restore();
+}
+function draw() {
+  const grad = ctx.createLinearGradient(0, 0, 0, H);
+  grad.addColorStop(0, "#2a5a86"); grad.addColorStop(1, "#10283e");
+  ctx.fillStyle = grad; ctx.fillRect(0, 0, W, H);
+  // clouds
+  ctx.fillStyle = "rgba(255,255,255,0.16)";
+  for (let i = 0; i < 4; i++) {
+    const cx = ((i * 281) % 997) / 997 * W, cy = 70 + (i * 137) % Math.max(80, H - 200);
+    ctx.beginPath();
+    ctx.ellipse(cx, cy, 44, 15, 0, 0, Math.PI * 2);
+    ctx.ellipse(cx + 30, cy + 4, 30, 11, 0, 0, Math.PI * 2);
+    ctx.fill();
+  }
+  const t = performance.now() / 1000;
+  for (const b of balloons) drawBalloon(b, t);
+  for (const p of particles) {
+    ctx.fillStyle = p.color;
+    ctx.fillRect(p.x - 3, p.y - 3, 6, 6);
+  }
+  // HUD
+  ctx.textAlign = "left"; ctx.textBaseline = "middle";
+  ctx.fillStyle = "#ffffff";
+  ctx.font = "bold " + Math.round(u * 5.2) + "px system-ui, sans-serif";
+  ctx.fillText("Score " + score, 14, 30);
+  ctx.textAlign = "center"; ctx.fillStyle = "#ffd93d";
+  if (streak >= 3) ctx.fillText("Streak ×" + streak, W / 2, 30);
+  ctx.textAlign = "right";
+  let hearts = "";
+  for (let i = 0; i < lives; i++) hearts += "● ";
+  ctx.fillStyle = "#ff5d7a";
+  ctx.fillText(hearts.trim(), W - 66, 30);
+  // floating texts
+  const now = performance.now();
+  ctx.textAlign = "center";
+  ctx.font = "bold " + Math.round(u * 4.4) + "px system-ui, sans-serif";
+  for (const p of pops) {
+    if (now < p.until) { ctx.fillStyle = p.color; ctx.fillText(p.text, p.x, p.y - (800 - (p.until - now)) * 0.03); }
+  }
+  if (state !== "play") {
+    ctx.fillStyle = "rgba(6,14,24,0.8)"; ctx.fillRect(0, 0, W, H);
+    ctx.textAlign = "center"; ctx.textBaseline = "middle";
+    ctx.fillStyle = "#ffd93d";
+    ctx.font = "bold " + Math.round(u * 10) + "px system-ui, sans-serif";
+    ctx.fillText("BALLOON POP", W / 2, H * 0.28);
+    ctx.fillStyle = "#eaf6ff";
+    ctx.font = Math.round(u * 4.4) + "px system-ui, sans-serif";
+    if (state === "menu") {
+      ctx.fillText("Tap balloons to pop them for points.", W / 2, H * 0.40);
+      ctx.fillStyle = "#ff9a8a";
+      ctx.fillText("⚠ RED SPIKY balloons are traps — popping one", W / 2, H * 0.455);
+      ctx.fillText("costs a life. You have 3. Let those float away!", W / 2, H * 0.505);
+      ctx.fillStyle = "#a9cdea";
+      ctx.fillText("Normal balloons that escape only break your streak.", W / 2, H * 0.56);
+      if (hi) ctx.fillText("Best score: " + hi, W / 2, H * 0.615);
+    } else {
+      ctx.fillText("Out of lives — score " + score, W / 2, H * 0.42);
+      ctx.fillStyle = "#a9cdea";
+      ctx.fillText("Best streak ×" + bestStreak + " · Best score " + hi, W / 2, H * 0.475);
+    }
+    ctx.fillStyle = "#ffd93d";
+    ctx.font = "bold " + Math.round(u * 5) + "px system-ui, sans-serif";
+    ctx.fillText(state === "menu" ? "TAP TO START" : "TAP TO PLAY AGAIN", W / 2, H * 0.68);
+  }
+}
+
+// ---------- Loop ----------
+let lastT = 0;
+function frame(t) {
+  requestAnimationFrame(frame);
+  const dt = Math.min(0.05, (t - lastT) / 1000 || 0); lastT = t;
+  update(dt);
+  draw();
+}
+resize();
+reset();
+requestAnimationFrame(frame);
+</script>
+</body>
+</html>

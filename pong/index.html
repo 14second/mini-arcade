@@ -1,0 +1,365 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, user-scalable=no">
+<meta name="theme-color" content="#0a0a14">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<title>Pong</title>
+<style>
+  * { margin:0; padding:0; box-sizing:border-box; }
+  html, body {
+    width:100%; height:100%; overflow:hidden; background:#0a0a14;
+    font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+    touch-action:none; user-select:none; -webkit-user-select:none;
+    -webkit-tap-highlight-color: transparent;
+  }
+  canvas { position:fixed; inset:0; display:block; touch-action:none; }
+  #muteBtn {
+    position:fixed; top:10px; right:10px; z-index:10;
+    width:48px; height:48px; border-radius:12px;
+    border:2px solid rgba(160,170,255,.5); background:rgba(8,8,22,.62);
+    color:#fff; font-size:22px; line-height:1; cursor:pointer;
+    touch-action:none; user-select:none; -webkit-user-select:none;
+    display:flex; align-items:center; justify-content:center; padding:0;
+  }
+</style>
+</head>
+<body>
+<canvas id="game"></canvas>
+<button id="muteBtn" aria-label="Toggle sound">🔊</button>
+<script>
+// iOS audio routing: route Web Audio to the media/playback channel (iOS 17+
+// Audio Session API) on the first gesture and inside audio init, so sound
+// plays even with the silent switch on.
+function iosPlaybackSession() {
+  try { if ('audioSession' in navigator) navigator.audioSession.type = 'playback'; } catch (e) {}
+}
+document.addEventListener('pointerdown', iosPlaybackSession, true);
+document.addEventListener('touchstart', iosPlaybackSession, true);
+
+"use strict";
+/* ============================================================
+   PONG — vertical pong for portrait phones.
+   Your paddle is at the bottom. Drag or use arrow keys.
+   First to 7 wins. The rival paddle is quick but beatable:
+   it only chases when the ball comes at it, and it has a top speed.
+   ============================================================ */
+
+const canvas = document.getElementById("game");
+const ctx = canvas.getContext("2d");
+let W = 0, H = 0, DPR = 1, u = 4;
+let padW = 90, padH = 12, playerY = 0, aiY = 0, ballR = 8;
+
+function resize() {
+  DPR = Math.min(window.devicePixelRatio || 1, 2);
+  W = window.innerWidth; H = window.innerHeight;
+  canvas.width = Math.round(W * DPR); canvas.height = Math.round(H * DPR);
+  canvas.style.width = W + "px"; canvas.style.height = H + "px";
+  ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+  u = Math.min(W, H) / 100;
+  padW = Math.max(64, Math.min(130, W * 0.24));
+  padH = Math.max(10, u * 2.6);
+  ballR = Math.max(6, u * 1.9);
+  playerY = H - Math.max(56, H * 0.09);
+  aiY = Math.max(52, H * 0.075);
+  player.x = clamp(player.x || W / 2, padW / 2, W - padW / 2);
+  ai.x = clamp(ai.x || W / 2, padW / 2, W - padW / 2);
+}
+window.addEventListener("resize", resize);
+
+function clamp(v, a, b) { return v < a ? a : (v > b ? b : v); }
+
+// ---------- Audio ----------
+let actx = null, muted = false;
+const muteBtn = document.getElementById("muteBtn");
+function initAudio() {
+  iosPlaybackSession();
+  if (!actx) {
+    try {
+      const AC = window.AudioContext || window.webkitAudioContext;
+      if (AC) actx = new AC();
+    } catch (e) { actx = null; }
+    if (actx) startMusicScheduler();
+  }
+  if (actx && actx.state === "suspended") actx.resume();
+}
+function beep(freq, dur, type, vol, slide) {
+  if (!actx || muted) return;
+  const t = actx.currentTime;
+  const o = actx.createOscillator(), g = actx.createGain();
+  o.type = type || "square";
+  o.frequency.setValueAtTime(freq, t);
+  if (slide) o.frequency.exponentialRampToValueAtTime(Math.max(20, slide), t + dur);
+  g.gain.setValueAtTime(vol || 0.08, t);
+  g.gain.exponentialRampToValueAtTime(0.0001, t + dur);
+  o.connect(g); g.connect(actx.destination);
+  o.start(t); o.stop(t + dur + 0.02);
+}
+function sfxPaddle() { beep(660, 0.06, "square", 0.07); }
+function sfxWall()   { beep(440, 0.05, "square", 0.05); }
+function sfxScore()  { beep(880, 0.12, "square", 0.07, 1320); }
+function sfxConcede(){ beep(220, 0.22, "square", 0.07, 110); }
+function sfxWin()    { [523,659,784,1046].forEach((f,i)=>setTimeout(()=>beep(f,0.14,"square",0.06), i*110)); }
+
+// Minimal pulse loop, BPM 100. Bass >= MIDI 48.
+const BPM = 100, STEP_DUR = 60 / BPM / 2;
+const BASS = [
+  48,0,0,48, 0,0,48,0, 45,0,0,45, 0,0,45,0,
+  41,0,0,41, 0,0,41,0, 43,0,0,43, 0,0,43,0
+];
+const LEAD = [
+  72,0,0,0, 0,0,0,0, 69,0,0,0, 0,0,0,0,
+  65,0,0,0, 0,0,0,0, 67,0,0,0, 71,0,0,0
+];
+const PADS = [ [48,52,55], [45,48,52], [41,45,48], [43,47,50] ];
+let musicStep = 0, nextNoteTime = 0, musicTimer = null;
+function midiFreq(m) { return 440 * Math.pow(2, (m - 69) / 12); }
+function toneAt(midi, when, dur, type, vol) {
+  const o = actx.createOscillator(), g = actx.createGain();
+  o.type = type; o.frequency.setValueAtTime(midiFreq(midi), when);
+  g.gain.setValueAtTime(0.0001, when);
+  g.gain.exponentialRampToValueAtTime(vol, when + 0.012);
+  g.gain.exponentialRampToValueAtTime(0.0001, when + dur);
+  o.connect(g); g.connect(actx.destination);
+  o.start(when); o.stop(when + dur + 0.03);
+}
+function scheduleStep(step, when) {
+  if (muted) return;
+  const b = BASS[step % 32]; if (b) toneAt(b, when, STEP_DUR * 0.9, "square", 0.032);
+  const l = LEAD[step % 32]; if (l) toneAt(l, when, STEP_DUR * 1.6, "triangle", 0.02);
+  if (step % 8 === 0) {
+    const chord = PADS[Math.floor(step / 8) % PADS.length];
+    for (let i = 0; i < chord.length; i++) toneAt(chord[i], when, STEP_DUR * 7.6, "triangle", 0.01);
+  }
+}
+function startMusicScheduler() {
+  if (musicTimer !== null || !actx) return;
+  musicStep = 0; nextNoteTime = actx.currentTime + 0.06;
+  musicTimer = setInterval(function () {
+    if (!actx) return;
+    if (nextNoteTime < actx.currentTime) nextNoteTime = actx.currentTime + 0.05;
+    while (nextNoteTime < actx.currentTime + 0.12) {
+      scheduleStep(musicStep, nextNoteTime);
+      nextNoteTime += STEP_DUR; musicStep = (musicStep + 1) % 32;
+    }
+  }, 25);
+}
+function setMuted(m) { muted = m; muteBtn.textContent = muted ? "🔇" : "🔊"; }
+muteBtn.addEventListener("pointerdown", function (e) {
+  e.stopPropagation(); e.preventDefault(); initAudio(); setMuted(!muted);
+});
+muteBtn.addEventListener("click", function (e) { e.stopPropagation(); e.preventDefault(); });
+
+// ---------- Game state ----------
+const WIN_SCORE = 7;
+let state = "menu"; // menu | play | over
+let hi = 0; // best margin / wins count: store wins
+try { hi = parseInt(localStorage.getItem("pong_wins") || "0", 10) || 0; } catch (e) { hi = 0; }
+const player = { x: 0 };
+const ai = { x: 0 };
+const ball = { x: 0, y: 0, vx: 0, vy: 0, speed: 300 };
+let pScore = 0, aScore = 0, rally = 0, serveTimer = 0, serveDir = 1, won = false;
+let keys = {};
+let dragging = false;
+
+function serve(dir) {
+  ball.x = W / 2; ball.y = H / 2;
+  ball.speed = 300;
+  rally = 0;
+  const ang = (Math.random() * 0.5 + 0.25) * (Math.random() < 0.5 ? 1 : -1); // sideways tilt
+  ball.vx = Math.sin(ang) * ball.speed;
+  ball.vy = Math.cos(ang) * ball.speed * dir;
+  serveTimer = 0.7;
+}
+function reset() {
+  pScore = 0; aScore = 0; won = false;
+  player.x = W / 2; ai.x = W / 2;
+  serve(Math.random() < 0.5 ? 1 : -1);
+}
+function pointToPlayer() {
+  pScore++; sfxScore();
+  if (pScore >= WIN_SCORE) { endGame(true); return; }
+  serve(-1); // serve toward the rival, who conceded the point
+}
+function pointToAI() {
+  aScore++; sfxConcede();
+  if (aScore >= WIN_SCORE) { endGame(false); return; }
+  serve(1); // serve toward you — you conceded the point
+}
+function endGame(didWin) {
+  state = "over"; won = didWin;
+  if (didWin) {
+    hi++; try { localStorage.setItem("pong_wins", String(hi)); } catch (e) {}
+    sfxWin();
+  }
+}
+function startGame() { initAudio(); reset(); state = "play"; }
+
+// ---------- Input ----------
+canvas.addEventListener("pointerdown", function (e) {
+  initAudio();
+  if (state !== "play") { startGame(); return; }
+  dragging = true;
+  player.x = clamp(e.clientX, padW / 2, W - padW / 2);
+});
+canvas.addEventListener("pointermove", function (e) {
+  if (dragging && state === "play") player.x = clamp(e.clientX, padW / 2, W - padW / 2);
+});
+window.addEventListener("pointerup", function () { dragging = false; });
+window.addEventListener("keydown", function (e) {
+  keys[e.key] = true;
+  if (["ArrowLeft","ArrowRight"," "].includes(e.key)) e.preventDefault();
+  initAudio();
+  if (state !== "play" && (e.key === " " || e.key === "Enter")) startGame();
+  if (e.key === "m" || e.key === "M") setMuted(!muted);
+});
+window.addEventListener("keyup", function (e) { keys[e.key] = false; });
+
+// ---------- Update ----------
+function update(dt) {
+  if (state !== "play") return;
+  // Player keys
+  const kSpeed = 620;
+  if (keys["ArrowLeft"] || keys["a"] || keys["A"]) player.x -= kSpeed * dt;
+  if (keys["ArrowRight"] || keys["d"] || keys["D"]) player.x += kSpeed * dt;
+  player.x = clamp(player.x, padW / 2, W - padW / 2);
+
+  // AI: only chases while the ball travels toward it; capped speed and a
+  // small tracking lag keep it fair and beatable.
+  const aiMax = 265 + rally * 7; // px/s, caps via rally below
+  const aiSpeed = Math.min(aiMax, 330);
+  if (ball.vy < 0) {
+    const dx = ball.x - ai.x;
+    const step = clamp(dx, -aiSpeed * dt, aiSpeed * dt);
+    if (Math.abs(dx) > 3) ai.x += step;
+  } else {
+    // drift back toward centre slowly
+    const dx = W / 2 - ai.x;
+    ai.x += clamp(dx, -90 * dt, 90 * dt);
+  }
+  ai.x = clamp(ai.x, padW / 2, W - padW / 2);
+
+  if (serveTimer > 0) { serveTimer -= dt; return; }
+
+  ball.x += ball.vx * dt;
+  ball.y += ball.vy * dt;
+
+  // Side walls
+  if (ball.x < ballR) { ball.x = ballR; ball.vx = Math.abs(ball.vx); sfxWall(); }
+  if (ball.x > W - ballR) { ball.x = W - ballR; ball.vx = -Math.abs(ball.vx); sfxWall(); }
+
+  // Player paddle (bottom)
+  if (ball.vy > 0 && ball.y + ballR >= playerY && ball.y + ballR <= playerY + padH + ball.speed * dt + 4 &&
+      Math.abs(ball.x - player.x) <= padW / 2 + ballR * 0.6) {
+    const off = clamp((ball.x - player.x) / (padW / 2), -1, 1);
+    ball.speed = Math.min(640, ball.speed + 16);
+    const ang = off * 1.05; // max ~60 degrees
+    ball.vx = Math.sin(ang) * ball.speed;
+    ball.vy = -Math.cos(ang) * ball.speed;
+    ball.y = playerY - ballR - 1;
+    rally++; sfxPaddle();
+  }
+  // AI paddle (top)
+  if (ball.vy < 0 && ball.y - ballR <= aiY + padH && ball.y - ballR >= aiY - ball.speed * dt - 4 &&
+      Math.abs(ball.x - ai.x) <= padW / 2 + ballR * 0.6) {
+    const off = clamp((ball.x - ai.x) / (padW / 2), -1, 1);
+    ball.speed = Math.min(640, ball.speed + 16);
+    const ang = off * 1.05;
+    ball.vx = Math.sin(ang) * ball.speed;
+    ball.vy = Math.cos(ang) * ball.speed;
+    ball.y = aiY + padH + ballR + 1;
+    rally++; sfxPaddle();
+  }
+
+  if (ball.y < -ballR * 2) pointToPlayer();
+  else if (ball.y > H + ballR * 2) pointToAI();
+}
+
+// ---------- Draw ----------
+function rr(x, y, w, h, r) {
+  r = Math.min(r, w / 2, h / 2);
+  ctx.beginPath(); ctx.moveTo(x + r, y);
+  ctx.arcTo(x + w, y, x + w, y + h, r); ctx.arcTo(x + w, y + h, x, y + h, r);
+  ctx.arcTo(x, y + h, x, y, r); ctx.arcTo(x, y, x + w, y, r);
+  ctx.closePath();
+}
+function draw() {
+  ctx.fillStyle = "#0a0a14"; ctx.fillRect(0, 0, W, H);
+  // court
+  ctx.strokeStyle = "rgba(160,170,255,0.25)"; ctx.lineWidth = 2;
+  ctx.setLineDash([10, 12]);
+  ctx.beginPath(); ctx.moveTo(0, H / 2); ctx.lineTo(W, H / 2); ctx.stroke();
+  ctx.setLineDash([]);
+  ctx.strokeStyle = "rgba(160,170,255,0.12)";
+  ctx.beginPath(); ctx.arc(W / 2, H / 2, u * 11, 0, Math.PI * 2); ctx.stroke();
+  // scores (big, ghosted)
+  ctx.textAlign = "center"; ctx.textBaseline = "middle";
+  ctx.font = "bold " + Math.round(u * 17) + "px system-ui, sans-serif";
+  ctx.fillStyle = "rgba(255,120,140,0.20)";
+  ctx.fillText(String(aScore), W / 2, H * 0.30);
+  ctx.fillStyle = "rgba(120,220,255,0.20)";
+  ctx.fillText(String(pScore), W / 2, H * 0.70);
+  ctx.font = Math.round(u * 3.6) + "px system-ui, sans-serif";
+  ctx.fillStyle = "rgba(255,120,140,0.75)";
+  ctx.fillText("RIVAL", W / 2, H * 0.30 - u * 11);
+  ctx.fillStyle = "rgba(120,220,255,0.75)";
+  ctx.fillText("YOU", W / 2, H * 0.70 + u * 11.5);
+  ctx.font = Math.round(u * 3.4) + "px system-ui, sans-serif";
+  ctx.fillStyle = "#8b90b8";
+  ctx.textAlign = "left";
+  ctx.fillText("First to " + WIN_SCORE + " · Matches won: " + hi, 12, 24);
+  // paddles
+  ctx.fillStyle = "#ff5d7a"; rr(ai.x - padW / 2, aiY, padW, padH, padH / 2); ctx.fill();
+  ctx.fillStyle = "#59c8ff"; rr(player.x - padW / 2, playerY, padW, padH, padH / 2); ctx.fill();
+  // ball
+  if (state === "play" && serveTimer <= 0.45) {
+    ctx.fillStyle = "#ffffff";
+    ctx.beginPath(); ctx.arc(ball.x, ball.y, ballR, 0, Math.PI * 2); ctx.fill();
+    ctx.fillStyle = "rgba(255,255,255,0.25)";
+    ctx.beginPath(); ctx.arc(ball.x, ball.y, ballR * 1.9, 0, Math.PI * 2); ctx.fill();
+  }
+  if (state !== "play") {
+    ctx.fillStyle = "rgba(3,3,10,0.8)"; ctx.fillRect(0, 0, W, H);
+    ctx.textAlign = "center";
+    ctx.fillStyle = "#59c8ff";
+    ctx.font = "bold " + Math.round(u * 11) + "px system-ui, sans-serif";
+    ctx.fillText("PONG", W / 2, H * 0.30);
+    ctx.fillStyle = "#e8eaff";
+    ctx.font = Math.round(u * 4.4) + "px system-ui, sans-serif";
+    if (state === "menu") {
+      ctx.fillText("Your paddle is at the bottom.", W / 2, H * 0.42);
+      ctx.fillText("Drag, or use ◀ ▶ arrow keys.", W / 2, H * 0.475);
+      ctx.fillStyle = "#ffd166";
+      ctx.fillText("First to " + WIN_SCORE + " wins the match.", W / 2, H * 0.53);
+      ctx.fillStyle = "#8b90b8";
+      ctx.fillText("Tip: hit with the paddle's edge for sharp angles.", W / 2, H * 0.585);
+    } else {
+      ctx.fillStyle = won ? "#8be04e" : "#ff5d7a";
+      ctx.font = "bold " + Math.round(u * 6) + "px system-ui, sans-serif";
+      ctx.fillText(won ? "YOU WIN " + pScore + " – " + aScore : "RIVAL WINS " + aScore + " – " + pScore, W / 2, H * 0.44);
+      ctx.fillStyle = "#8b90b8";
+      ctx.font = Math.round(u * 4.2) + "px system-ui, sans-serif";
+      ctx.fillText("Matches won so far: " + hi, W / 2, H * 0.51);
+    }
+    ctx.fillStyle = "#59c8ff";
+    ctx.font = "bold " + Math.round(u * 5) + "px system-ui, sans-serif";
+    ctx.fillText(state === "menu" ? "TAP TO START" : "TAP TO PLAY AGAIN", W / 2, H * 0.66);
+  }
+}
+
+// ---------- Loop ----------
+let lastT = 0;
+function frame(t) {
+  requestAnimationFrame(frame);
+  const dt = Math.min(0.05, (t - lastT) / 1000 || 0); lastT = t;
+  update(dt);
+  draw();
+}
+resize();
+reset();
+requestAnimationFrame(frame);
+</script>
+</body>
+</html>

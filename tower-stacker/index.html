@@ -1,0 +1,341 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, user-scalable=no">
+<meta name="theme-color" content="#0e1a2e">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<title>Tower Stacker</title>
+<style>
+  * { margin:0; padding:0; box-sizing:border-box; }
+  html, body {
+    width:100%; height:100%; overflow:hidden; background:#0e1a2e;
+    font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+    touch-action:none; user-select:none; -webkit-user-select:none;
+    -webkit-tap-highlight-color: transparent;
+  }
+  canvas { position:fixed; inset:0; display:block; touch-action:none; }
+  #muteBtn {
+    position:fixed; top:10px; right:10px; z-index:10;
+    width:48px; height:48px; border-radius:12px;
+    border:2px solid rgba(150,190,255,.5); background:rgba(8,14,26,.62);
+    color:#fff; font-size:22px; line-height:1; cursor:pointer;
+    touch-action:none; user-select:none; -webkit-user-select:none;
+    display:flex; align-items:center; justify-content:center; padding:0;
+  }
+</style>
+</head>
+<body>
+<canvas id="game"></canvas>
+<button id="muteBtn" aria-label="Toggle sound">🔊</button>
+<script>
+// iOS audio routing: route Web Audio to the media/playback channel (iOS 17+
+// Audio Session API) on the first gesture and inside audio init, so sound
+// plays even with the silent switch on.
+function iosPlaybackSession() {
+  try { if ('audioSession' in navigator) navigator.audioSession.type = 'playback'; } catch (e) {}
+}
+document.addEventListener('pointerdown', iosPlaybackSession, true);
+document.addEventListener('touchstart', iosPlaybackSession, true);
+
+"use strict";
+/* ============================================================
+   TOWER STACKER — a block slides back and forth up high.
+   Tap (or SPACE) to drop it. Whatever hangs over the edge is
+   sliced off and falls. Land it perfectly to keep your width.
+   How tall can you build?
+   ============================================================ */
+
+const canvas = document.getElementById("game");
+const ctx = canvas.getContext("2d");
+let W = 0, H = 0, DPR = 1, u = 4;
+let blockH = 26, baseY = 0;
+
+function resize() {
+  DPR = Math.min(window.devicePixelRatio || 1, 2);
+  W = window.innerWidth; H = window.innerHeight;
+  canvas.width = Math.round(W * DPR); canvas.height = Math.round(H * DPR);
+  canvas.style.width = W + "px"; canvas.style.height = H + "px";
+  ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+  u = Math.min(W, H) / 100;
+  blockH = Math.max(20, Math.min(34, u * 6.4));
+  baseY = H - Math.max(60, H * 0.1);
+}
+window.addEventListener("resize", resize);
+
+function clamp(v, a, b) { return v < a ? a : (v > b ? b : v); }
+
+// ---------- Audio ----------
+let actx = null, muted = false;
+const muteBtn = document.getElementById("muteBtn");
+function initAudio() {
+  iosPlaybackSession();
+  if (!actx) {
+    try {
+      const AC = window.AudioContext || window.webkitAudioContext;
+      if (AC) actx = new AC();
+    } catch (e) { actx = null; }
+    if (actx) startMusicScheduler();
+  }
+  if (actx && actx.state === "suspended") actx.resume();
+}
+function beep(freq, dur, type, vol, slide) {
+  if (!actx || muted) return;
+  const t = actx.currentTime;
+  const o = actx.createOscillator(), g = actx.createGain();
+  o.type = type || "square";
+  o.frequency.setValueAtTime(freq, t);
+  if (slide) o.frequency.exponentialRampToValueAtTime(Math.max(20, slide), t + dur);
+  g.gain.setValueAtTime(vol || 0.08, t);
+  g.gain.exponentialRampToValueAtTime(0.0001, t + dur);
+  o.connect(g); g.connect(actx.destination);
+  o.start(t); o.stop(t + dur + 0.02);
+}
+function sfxDrop(perfect) {
+  if (perfect) { beep(880, 0.1, "square", 0.07); setTimeout(() => beep(1174, 0.12, "square", 0.07), 70); }
+  else beep(340, 0.08, "square", 0.06, 240);
+}
+function sfxSlice() { beep(190, 0.16, "sawtooth", 0.05, 90); }
+function sfxFall()  { beep(280, 0.4, "sawtooth", 0.08, 50); }
+
+// Sky-high loop, BPM 116. Bass >= MIDI 48.
+const BPM = 116, STEP_DUR = 60 / BPM / 2;
+const BASS = [
+  48,0,0,48, 0,0,55,0, 50,0,0,50, 0,0,57,0,
+  53,0,0,53, 0,0,60,0, 55,0,0,50, 0,0, 0,0
+];
+const LEAD = [
+  72,0,74,0, 76,0,0,0, 79,0,76,0, 74,0,0,0,
+  77,0,76,0, 74,0,71,0, 72,0,0,0, 0,0,0,0
+];
+const PADS = [ [60,64,67], [62,66,69], [65,69,72], [55,59,62] ];
+let musicStep = 0, nextNoteTime = 0, musicTimer = null;
+function midiFreq(m) { return 440 * Math.pow(2, (m - 69) / 12); }
+function toneAt(midi, when, dur, type, vol) {
+  const o = actx.createOscillator(), g = actx.createGain();
+  o.type = type; o.frequency.setValueAtTime(midiFreq(midi), when);
+  g.gain.setValueAtTime(0.0001, when);
+  g.gain.exponentialRampToValueAtTime(vol, when + 0.012);
+  g.gain.exponentialRampToValueAtTime(0.0001, when + dur);
+  o.connect(g); g.connect(actx.destination);
+  o.start(when); o.stop(when + dur + 0.03);
+}
+function scheduleStep(step, when) {
+  if (muted) return;
+  const b = BASS[step % 32]; if (b) toneAt(b, when, STEP_DUR * 0.9, "triangle", 0.05);
+  const l = LEAD[step % 32]; if (l) toneAt(l, when, STEP_DUR * 0.8, "square", 0.024);
+  if (step % 8 === 0) {
+    const chord = PADS[Math.floor(step / 8) % PADS.length];
+    for (let i = 0; i < chord.length; i++) toneAt(chord[i], when, STEP_DUR * 7.6, "triangle", 0.012);
+  }
+}
+function startMusicScheduler() {
+  if (musicTimer !== null || !actx) return;
+  musicStep = 0; nextNoteTime = actx.currentTime + 0.06;
+  musicTimer = setInterval(function () {
+    if (!actx) return;
+    if (nextNoteTime < actx.currentTime) nextNoteTime = actx.currentTime + 0.05;
+    while (nextNoteTime < actx.currentTime + 0.12) {
+      scheduleStep(musicStep, nextNoteTime);
+      nextNoteTime += STEP_DUR; musicStep = (musicStep + 1) % 32;
+    }
+  }, 25);
+}
+function setMuted(m) { muted = m; muteBtn.textContent = muted ? "🔇" : "🔊"; }
+muteBtn.addEventListener("pointerdown", function (e) {
+  e.stopPropagation(); e.preventDefault(); initAudio(); setMuted(!muted);
+});
+muteBtn.addEventListener("click", function (e) { e.stopPropagation(); e.preventDefault(); });
+
+// ---------- Game state ----------
+let state = "menu"; // menu | play | over
+let best = 0;
+try { best = parseInt(localStorage.getItem("towerstacker_best") || "0", 10) || 0; } catch (e) { best = 0; }
+let stack = [];      // {x, w, level} placed blocks; level 0 = base platform
+let mover = null;    // {x, w, dir, speed}
+let debris = [];     // falling sliced pieces {x, w, y, vy, level}
+let camY = 0, camTarget = 0, score = 0, perfects = 0;
+let flashText = "", flashUntil = 0;
+
+function blockColor(level) {
+  const hue = (205 + level * 9) % 360;
+  return "hsl(" + hue + ", 72%, " + (52 + (level % 3) * 4) + "%)";
+}
+function levelY(level) { return baseY - (level + 1) * blockH; } // screen y of a level's top, before camera
+
+function reset() {
+  const baseW = Math.min(W * 0.52, 300);
+  stack = [{ x: (W - baseW) / 2, w: baseW, level: 0 }];
+  debris = [];
+  score = 0; perfects = 0;
+  camY = 0; camTarget = 0;
+  spawnMover();
+}
+function spawnMover() {
+  const top = stack[stack.length - 1];
+  const speed = Math.min(330, 145 + stack.length * 7);
+  mover = { x: -top.w + 10, w: top.w, dir: 1, speed };
+  // Camera: keep the action line (top of stack + one block) at ~52% height.
+  const actionY = levelY(stack.length) + camY;
+  camTarget += (H * 0.52 - actionY);
+}
+function drop() {
+  if (state !== "play" || !mover) return;
+  const top = stack[stack.length - 1];
+  const left = Math.max(mover.x, top.x);
+  const right = Math.min(mover.x + mover.w, top.x + top.w);
+  const overlap = right - left;
+  if (overlap <= 0) {
+    // Complete miss — the whole block falls.
+    debris.push({ x: mover.x, w: mover.w, y: levelY(stack.length), vy: 40, level: stack.length });
+    mover = null;
+    sfxFall();
+    state = "over";
+    if (score > best) { best = score; try { localStorage.setItem("towerstacker_best", String(best)); } catch (e) {} }
+    return;
+  }
+  const perfect = Math.abs(mover.x - top.x) < 5;
+  const placedX = perfect ? top.x : left;
+  const placedW = perfect ? mover.w : overlap;
+  if (!perfect) {
+    if (mover.x < top.x) debris.push({ x: mover.x, w: mover.w - overlap, y: levelY(stack.length), vy: 30, level: stack.length });
+    else debris.push({ x: right, w: (mover.x + mover.w) - right, y: levelY(stack.length), vy: 30, level: stack.length });
+    if (overlap < mover.w - 2) sfxSlice();
+  }
+  stack.push({ x: placedX, w: placedW, level: stack.length });
+  score++;
+  if (perfect) {
+    perfects++;
+    score++; // perfect bonus point
+    flashText = "PERFECT! +1";
+    flashUntil = performance.now() + 800;
+    sfxDrop(true);
+  } else {
+    sfxDrop(false);
+  }
+  mover = null;
+  spawnMover();
+}
+function startGame() { initAudio(); reset(); state = "play"; }
+
+// ---------- Input ----------
+canvas.addEventListener("pointerdown", function (e) {
+  initAudio();
+  if (state !== "play") { startGame(); return; }
+  drop();
+});
+window.addEventListener("keydown", function (e) {
+  initAudio();
+  if (e.key === " ") {
+    e.preventDefault();
+    if (state !== "play") startGame(); else drop();
+  }
+  if (e.key === "Enter" && state !== "play") startGame();
+  if (e.key === "m" || e.key === "M") setMuted(!muted);
+});
+
+// ---------- Update / draw ----------
+function update(dt) {
+  if (mover && state === "play") {
+    mover.x += mover.dir * mover.speed * dt;
+    if (mover.x + mover.w > W + 30) { mover.x = W + 30 - mover.w; mover.dir = -1; }
+    if (mover.x < -30) { mover.x = -30; mover.dir = 1; }
+  }
+  for (let i = debris.length - 1; i >= 0; i--) {
+    const d = debris[i];
+    d.vy += 1500 * dt; d.y += d.vy * dt;
+    if (d.y > H + 80) debris.splice(i, 1);
+  }
+  camY += (camTarget - camY) * Math.min(1, dt * 5);
+}
+function drawBlock(x, y, w, level) {
+  ctx.fillStyle = blockColor(level);
+  ctx.fillRect(x, y, w, blockH - 2);
+  ctx.fillStyle = "rgba(255,255,255,0.25)";
+  ctx.fillRect(x, y, w, 3);
+  ctx.fillStyle = "rgba(0,0,0,0.18)";
+  ctx.fillRect(x, y + blockH - 6, w, 3);
+}
+function draw() {
+  // sky
+  const grad = ctx.createLinearGradient(0, 0, 0, H);
+  grad.addColorStop(0, "#0e1a2e"); grad.addColorStop(1, "#1d3355");
+  ctx.fillStyle = grad; ctx.fillRect(0, 0, W, H);
+  // stars (fixed pattern, scroll slightly with camera for depth)
+  ctx.fillStyle = "rgba(255,255,255,0.5)";
+  for (let i = 0; i < 40; i++) {
+    const sx = ((i * 173) % 997) / 997 * W;
+    const sy = (((i * 389) % 991) / 991 * H + camY * 0.25) % H;
+    ctx.fillRect(sx, sy < 0 ? sy + H : sy, 2, 2);
+  }
+  // ground
+  ctx.fillStyle = "#0a1420";
+  ctx.fillRect(0, baseY + camY, W, H - baseY);
+  ctx.fillStyle = "#2c4a6e";
+  ctx.fillRect(0, baseY + camY, W, 3);
+  // stack
+  for (const b of stack) drawBlock(b.x, levelY(b.level) + camY, b.w, b.level);
+  // guide line under mover
+  if (mover && state === "play") {
+    const my = levelY(stack.length) + camY;
+    ctx.fillStyle = "rgba(255,255,255,0.10)";
+    ctx.fillRect(mover.x, my + blockH, mover.w, Math.max(0, baseY + camY - my - blockH));
+    drawBlock(mover.x, my, mover.w, stack.length);
+  }
+  // debris (stored in no-camera space, like levelY)
+  for (const d of debris) drawBlock(d.x, d.y + camY, d.w, d.level);
+  // HUD
+  ctx.textAlign = "left"; ctx.textBaseline = "middle";
+  ctx.fillStyle = "#eaf3ff";
+  ctx.font = "bold " + Math.round(u * 5.4) + "px system-ui, sans-serif";
+  ctx.fillText("Height " + score, 14, 30);
+  ctx.textAlign = "right";
+  ctx.fillStyle = "#9db9dd";
+  ctx.fillText("Best " + Math.max(best, score), W - 66, 30);
+  if (flashText && performance.now() < flashUntil) {
+    ctx.textAlign = "center";
+    ctx.fillStyle = "#ffd93d";
+    ctx.font = "bold " + Math.round(u * 5.6) + "px system-ui, sans-serif";
+    ctx.fillText(flashText, W / 2, H * 0.3);
+  }
+  if (state !== "play") {
+    ctx.fillStyle = "rgba(5,10,20,0.8)"; ctx.fillRect(0, 0, W, H);
+    ctx.textAlign = "center"; ctx.textBaseline = "middle";
+    ctx.fillStyle = "#7cc4ff";
+    ctx.font = "bold " + Math.round(u * 9.5) + "px system-ui, sans-serif";
+    ctx.fillText("TOWER STACKER", W / 2, H * 0.28);
+    ctx.fillStyle = "#eaf3ff";
+    ctx.font = Math.round(u * 4.4) + "px system-ui, sans-serif";
+    if (state === "menu") {
+      ctx.fillText("A block slides overhead. Tap to drop it.", W / 2, H * 0.40);
+      ctx.fillText("Whatever hangs over the edge gets sliced off.", W / 2, H * 0.455);
+      ctx.fillStyle = "#ffd93d";
+      ctx.fillText("Perfect drops keep your width and score a bonus.", W / 2, H * 0.51);
+      ctx.fillStyle = "#9db9dd";
+      ctx.fillText("Miss completely and the tower topples.", W / 2, H * 0.565);
+    } else {
+      ctx.fillText("Tower height: " + score, W / 2, H * 0.42);
+      ctx.fillStyle = "#9db9dd";
+      ctx.fillText("Perfect drops: " + perfects + " · Best " + best, W / 2, H * 0.475);
+    }
+    ctx.fillStyle = "#7cc4ff";
+    ctx.font = "bold " + Math.round(u * 5) + "px system-ui, sans-serif";
+    ctx.fillText(state === "menu" ? "TAP TO START" : "TAP TO PLAY AGAIN", W / 2, H * 0.66);
+  }
+}
+
+// ---------- Loop ----------
+let lastT = 0;
+function frame(t) {
+  requestAnimationFrame(frame);
+  const dt = Math.min(0.05, (t - lastT) / 1000 || 0); lastT = t;
+  update(dt);
+  draw();
+}
+resize();
+reset();
+requestAnimationFrame(frame);
+</script>
+</body>
+</html>
