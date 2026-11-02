@@ -1,0 +1,503 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+<title>Bush Dash — a tiny cat jumper</title>
+<style>
+  * { margin:0; padding:0; box-sizing:border-box; }
+  html, body { height:100%; }
+  body {
+    background:#0e1420;
+    display:flex; flex-direction:column; align-items:center; justify-content:center;
+    font-family:"Segoe UI", system-ui, -apple-system, sans-serif;
+    color:#e8eef7; overflow:hidden;
+    -webkit-user-select:none; user-select:none;
+    touch-action:manipulation;
+  }
+  h1 { font-size:clamp(20px,4vw,34px); letter-spacing:2px; margin-bottom:4px; font-weight:800; }
+  h1 .accent { color:#ffb84d; }
+  p.sub { color:#8b98ad; font-size:clamp(12px,2vw,15px); margin-bottom:14px; }
+  #wrap { position:relative; width:min(96vw, 1060px); }
+  canvas {
+    width:100%; height:auto; display:block; border-radius:14px;
+    box-shadow:0 18px 60px rgba(0,0,0,.55), 0 0 0 1px rgba(255,255,255,.06);
+    background:#bfe8f5; cursor:pointer;
+  }
+  #hint { margin-top:10px; color:#8b98ad; font-size:13px; text-align:center; }
+  kbd { background:#1c2534; border:1px solid #33405a; border-bottom-width:3px; border-radius:6px;
+        padding:1px 8px; font-family:inherit; font-size:12px; color:#dbe4f0; }
+</style>
+</head>
+<body>
+  <h1>BUSH <span class="accent">DASH</span></h1>
+  <p class="sub">a tiny cat jumper &mdash; how far can you get?</p>
+  <div id="wrap"><canvas id="game" width="960" height="540"></canvas></div>
+  <p id="hint"><kbd>Space</kbd> / <kbd>&uarr;</kbd> / tap to jump &nbsp;&middot;&nbsp; hold for higher &nbsp;&middot;&nbsp; <kbd>M</kbd> mute &nbsp;&middot;&nbsp; <kbd>R</kbd> restart</p>
+<script>
+"use strict";
+/* ============================================================
+   BUSH DASH — a tiny endless jumper.
+   A cat dashes through the meadow and leaps over bushes.
+   No dependencies. Tweak the CONFIG block to change the feel.
+   ============================================================ */
+const CONFIG = {
+  gravity: 2900,        // px/s^2 pulling the cat down
+  jumpV: 1000,          // initial jump velocity
+  maxHold: 0.18,        // seconds of reduced gravity while holding for higher jumps
+  holdGravity: 0.45,    // gravity multiplier while holding (lower = floatier)
+  jumpCut: -520,        // upward velocity cap when released early (gentle cut)
+  coyote: 0.09,         // grace time to still jump after leaving ground
+  buffer: 0.12,         // jump presses remembered this long before landing
+  startSpeed: 380,      // px/s
+  maxSpeed: 820,
+  accel: 7,             // px/s gained per second survived
+  groundY: 452,
+};
+
+const cv = document.getElementById("game");
+const ctx = cv.getContext("2d");
+const W = cv.width, H = cv.height;
+const demo = new URLSearchParams(location.search).has("demo");
+
+// ---------- iOS audio routing ----------
+// Web Audio defaults to the "ambient" channel, which the iPhone silent
+// switch mutes entirely. Route it to the media/playback channel (iOS 17+
+// Audio Session API) on the first user gesture and inside the synth.
+function iosPlaybackSession() {
+  try { if ('audioSession' in navigator) navigator.audioSession.type = 'playback'; } catch (e) {}
+}
+document.addEventListener('pointerdown', iosPlaybackSession, true);
+document.addEventListener('touchstart', iosPlaybackSession, true);
+
+// ---------- tiny synth ----------
+let AC = null, muted = false;
+function beep(freq, dur, type, vol, slide) {
+  if (muted) return;
+  try {
+    iosPlaybackSession();
+    AC = AC || new (window.AudioContext || window.webkitAudioContext)();
+    if (AC.state === "suspended") AC.resume();
+    const o = AC.createOscillator(), g = AC.createGain();
+    o.type = type || "sine"; o.frequency.setValueAtTime(freq, AC.currentTime);
+    if (slide) o.frequency.exponentialRampToValueAtTime(slide, AC.currentTime + dur);
+    g.gain.setValueAtTime(vol || 0.12, AC.currentTime);
+    g.gain.exponentialRampToValueAtTime(0.0001, AC.currentTime + dur);
+    o.connect(g); g.connect(AC.destination);
+    o.start(); o.stop(AC.currentTime + dur);
+  } catch (e) {}
+}
+const sfx = {
+  jump:  () => beep(420, 0.14, "square", 0.06, 760),
+  ding:  () => { beep(880, 0.09, "sine", 0.08); setTimeout(() => beep(1320, 0.12, "sine", 0.08), 90); },
+  thud:  () => beep(160, 0.25, "sawtooth", 0.10, 60),
+  start: () => beep(520, 0.10, "triangle", 0.08, 780),
+};
+
+// ---------- state ----------
+let state = "menu";           // menu | play | dead
+let t = 0, speed = CONFIG.startSpeed, dist = 0, score = 0;
+let hi = +(localStorage.getItem("bushdash_hi") || 0);
+let lastMilestone = 0, flash = 0, shake = 0;
+let deadT = 0;
+
+const cat = {
+  x: 150, y: CONFIG.groundY, vy: 0,
+  w: 74, h: 58,
+  onGround: true, coyote: 0, buffer: 0, holdT: 0,
+  runPhase: 0, blink: 0, blinkT: 2 + Math.random() * 3,
+  dead: false,
+};
+
+let bushes = [];      // {x, w, h, seed}
+let clouds = [];
+let tufts = [];       // grass tufts {x, s}
+let puffs = [];       // landing dust {x,y,vx,vy,life}
+let nextBushAt = 0;
+
+function reset() {
+  state = "play"; t = 0; speed = CONFIG.startSpeed; dist = 0; score = 0;
+  lastMilestone = 0; flash = 0; shake = 0; deadT = 0;
+  Object.assign(cat, { y: CONFIG.groundY, vy: 0, onGround: true, coyote: 0, buffer: 0, holdT: 0, dead: false });
+  bushes = []; puffs = [];
+  nextBushAt = 700;
+  initScenery();
+  sfx.start();
+}
+
+function initScenery() {
+  clouds = [];
+  for (let i = 0; i < 6; i++) clouds.push({ x: Math.random() * W, y: 40 + Math.random() * 150, s: 0.6 + Math.random() * 0.9, v: 8 + Math.random() * 14 });
+  tufts = [];
+  for (let i = 0; i < 26; i++) tufts.push({ x: Math.random() * (W + 200) - 100, s: 0.7 + Math.random() * 0.7 });
+}
+
+// ---------- input ----------
+let holding = false;
+function pressJump() {
+  if (state === "menu" || state === "dead") { if (state !== "menu" || true) reset(); return; }
+  cat.buffer = CONFIG.buffer;
+  holding = true;
+}
+function releaseJump() { holding = false; }
+
+addEventListener("keydown", e => {
+  if (e.repeat) return;
+  if (e.code === "Space" || e.code === "ArrowUp" || e.code === "KeyW") { e.preventDefault(); pressJump(); }
+  if (e.code === "KeyR" && state !== "menu") reset();
+  if (e.code === "KeyM") muted = !muted;
+  if (e.code === "Enter" && state !== "play") reset();
+});
+addEventListener("keyup", e => {
+  if (e.code === "Space" || e.code === "ArrowUp" || e.code === "KeyW") releaseJump();
+});
+cv.addEventListener("pointerdown", e => { e.preventDefault(); pressJump(); });
+addEventListener("pointerup", releaseJump);
+addEventListener("blur", () => { holding = false; });
+
+// ---------- spawning ----------
+function spawnBush(x) {
+  const r = Math.random();
+  let w, h;
+  if (r < 0.45)      { w = 34 + Math.random() * 22; h = 48 + Math.random() * 22; }  // small
+  else if (r < 0.8)  { w = 52 + Math.random() * 26; h = 62 + Math.random() * 26; }  // medium
+  else               { w = 76 + Math.random() * 30; h = 78 + Math.random() * 26; }  // big cluster
+  // keep jumps fair at high speed: cap height
+  h = Math.min(h, 96);
+  bushes.push({ x, w, h, seed: Math.random() * 100 });
+}
+
+// ---------- update ----------
+function update(dt) {
+  t += dt;
+  if (state !== "play") { updateScenery(dt, state === "menu" ? 120 : 0); return; }
+
+  speed = Math.min(CONFIG.maxSpeed, speed + CONFIG.accel * dt);
+  dist += speed * dt;
+  score = Math.floor(dist / 12);
+
+  if (score - lastMilestone >= 100) { lastMilestone = score - (score % 100); flash = 0.6; sfx.ding(); }
+
+  // spawn bushes ahead
+  nextBushAt -= speed * dt;
+  if (nextBushAt <= 0) {
+    spawnBush(W + 40);
+    const gap = 260 + Math.random() * 320 + speed * 0.55;
+    nextBushAt = gap;
+  }
+  for (const b of bushes) b.x -= speed * dt;
+  bushes = bushes.filter(b => b.x + b.w > -60);
+
+  // --- demo autopilot: jump when a bush is in range (direct, no input buffer) ---
+  if (demo && state === "play" && cat.onGround) {
+    for (const b of bushes) {
+      const d = b.x - (cat.x + cat.w / 2);
+      if (d > 0 && d / speed < 0.38) {
+        cat.vy = -CONFIG.jumpV; cat.onGround = false; cat.holdT = 0;
+        holding = true; sfx.jump();
+        setTimeout(() => { holding = false; }, 400); // hold through the rise
+        break;
+      }
+    }
+  }
+  if (demo && state === "dead" && deadT > 1.2) reset();
+
+  // --- cat physics ---
+  cat.coyote -= dt; cat.buffer -= dt; cat.blinkT -= dt;
+  if (cat.blinkT <= 0) { cat.blink = 0.12; cat.blinkT = 2 + Math.random() * 4; }
+  cat.blink -= dt;
+
+  if (cat.onGround) {
+    cat.coyote = CONFIG.coyote;
+    if (cat.buffer > 0) {
+      cat.vy = -CONFIG.jumpV; cat.onGround = false; cat.buffer = 0; cat.holdT = 0;
+      sfx.jump();
+      for (let i = 0; i < 6; i++) puffs.push({ x: cat.x + 10, y: CONFIG.groundY + 4, vx: -60 - Math.random() * 120, vy: -40 - Math.random() * 90, life: 0.5 });
+    }
+  } else {
+    // variable jump height: holding gives reduced gravity (floatier rise);
+    // releasing early applies a gentle cut for snappy short hops
+    const boosted = holding && cat.holdT < CONFIG.maxHold && cat.vy < 0;
+    if (holding && cat.vy < 0) cat.holdT += dt;
+    if (!holding && cat.vy < CONFIG.jumpCut) cat.vy = CONFIG.jumpCut;
+    cat.vy += (boosted ? CONFIG.gravity * CONFIG.holdGravity : CONFIG.gravity) * dt;
+    cat.y += cat.vy * dt;
+    if (cat.y >= CONFIG.groundY) {
+      cat.y = CONFIG.groundY; cat.vy = 0; cat.onGround = true;
+      for (let i = 0; i < 5; i++) puffs.push({ x: cat.x + 20, y: CONFIG.groundY + 4, vx: -40 - Math.random() * 100, vy: -30 - Math.random() * 70, life: 0.4 });
+    }
+  }
+  if (cat.onGround) cat.runPhase += dt * (6 + speed / 90);
+
+  // --- collisions (forgiving hitbox) ---
+  const hx = cat.x + 12, hw = cat.w - 26, hy = cat.y - cat.h + 10, hh = cat.h - 14;
+  for (const b of bushes) {
+    const bx = b.x + 8, bw = b.w - 16, by = CONFIG.groundY - b.h + 12, bh = b.h - 12;
+    if (hx < bx + bw && hx + hw > bx && hy < by + bh && hy + hh > by) {
+      state = "dead"; deadT = 0; cat.dead = true; shake = 0.45; sfx.thud();
+      if (score > hi) { hi = score; localStorage.setItem("bushdash_hi", hi); }
+      for (let i = 0; i < 14; i++) puffs.push({ x: cat.x + 40, y: cat.y - 20, vx: -120 + Math.random() * 260, vy: -160 - Math.random() * 120, life: 0.7 });
+      break;
+    }
+  }
+
+  updateScenery(dt, speed);
+  for (const p of puffs) { p.x += p.vx * dt; p.y += p.vy * dt; p.vy += 500 * dt; p.life -= dt; }
+  puffs = puffs.filter(p => p.life > 0);
+  flash -= dt; shake -= dt;
+}
+
+function updateScenery(dt, spd) {
+  for (const c of clouds) { c.x -= (c.v * 0.4 + spd * 0.06) * dt; if (c.x < -140) { c.x = W + 120; c.y = 40 + Math.random() * 150; } }
+  for (const g of tufts) { g.x -= spd * dt; if (g.x < -30) { g.x = W + 20 + Math.random() * 80; g.s = 0.7 + Math.random() * 0.7; } }
+}
+
+// ---------- drawing ----------
+function skyGradient() {
+  // gentle day cycle as score climbs
+  const p = (score % 1200) / 1200;
+  const top = [191, 232, 245], bot = [235, 250, 235];
+  const d = Math.sin(p * Math.PI * 2) * 0.5 + 0.5; // 0..1
+  const mix = (a, b, k) => Math.round(a + (b - a) * k);
+  const g = ctx.createLinearGradient(0, 0, 0, H);
+  g.addColorStop(0, `rgb(${mix(top[0], 250, d * 0.25)},${mix(top[1], 214, d * 0.25)},${mix(top[2], 180, d * 0.25)})`);
+  g.addColorStop(0.82, `rgb(${mix(bot[0], 255, d * 0.2)},${mix(bot[1], 240, d * 0.2)},${mix(bot[2], 214, d * 0.2)})`);
+  g.addColorStop(0.821, "#8fce6e");
+  g.addColorStop(1, "#7cc25f");
+  return g;
+}
+
+function drawCloud(c) {
+  ctx.save(); ctx.translate(c.x, c.y); ctx.scale(c.s, c.s);
+  ctx.fillStyle = "rgba(255,255,255,.92)";
+  ctx.beginPath();
+  ctx.arc(0, 0, 22, 0, 7); ctx.arc(24, -8, 26, 0, 7); ctx.arc(52, 0, 20, 0, 7); ctx.arc(26, 10, 24, 0, 7);
+  ctx.fill(); ctx.restore();
+}
+
+function drawTuft(g) {
+  const y = CONFIG.groundY + 26;
+  ctx.strokeStyle = "#5da24c"; ctx.lineWidth = 2.5; ctx.lineCap = "round";
+  ctx.beginPath();
+  ctx.moveTo(g.x, y); ctx.quadraticCurveTo(g.x - 6 * g.s, y - 14 * g.s, g.x - 9 * g.s, y - 18 * g.s);
+  ctx.moveTo(g.x, y); ctx.quadraticCurveTo(g.x + 1 * g.s, y - 16 * g.s, g.x + 2 * g.s, y - 22 * g.s);
+  ctx.moveTo(g.x, y); ctx.quadraticCurveTo(g.x + 7 * g.s, y - 13 * g.s, g.x + 10 * g.s, y - 16 * g.s);
+  ctx.stroke();
+}
+
+function drawBush(b) {
+  const base = CONFIG.groundY + 4;
+  ctx.save(); ctx.translate(b.x, base);
+  // shadow
+  ctx.fillStyle = "rgba(0,0,0,.10)";
+  ctx.beginPath(); ctx.ellipse(b.w / 2, 4, b.w / 2, 7, 0, 0, 7); ctx.fill();
+  // foliage blobs
+  const n = Math.max(3, Math.round(b.w / 22));
+  for (let i = 0; i < n; i++) {
+    const fx = (i + 0.5) * (b.w / n);
+    const fh = b.h * (0.62 + 0.38 * Math.abs(Math.sin(b.seed + i * 2.1)));
+    const fr = b.w / n * 0.72;
+    const grd = ctx.createRadialGradient(fx - fr * 0.3, -fh + fr * 0.3, fr * 0.2, fx, -fh + fr, fr * 1.25);
+    grd.addColorStop(0, "#58b368"); grd.addColorStop(1, "#2f8f46");
+    ctx.fillStyle = grd;
+    ctx.beginPath(); ctx.arc(fx, -fh + fr * 0.55, fr, 0, 7); ctx.fill();
+  }
+  // little berries/flowers
+  ctx.fillStyle = "#ff8fa3";
+  for (let i = 0; i < Math.round(b.w / 30); i++) {
+    const fx = 10 + ((b.seed * 37 + i * 53) % (b.w - 16));
+    const fy = -20 - ((b.seed * 91 + i * 29) % (b.h - 30));
+    ctx.beginPath(); ctx.arc(fx, fy, 3.2, 0, 7); ctx.fill();
+  }
+  ctx.restore();
+}
+
+function drawCat() {
+  ctx.save();
+  ctx.translate(cat.x, cat.y);
+  if (shake > 0) ctx.translate((Math.random() - 0.5) * 8 * shake, (Math.random() - 0.5) * 8 * shake);
+
+  const ORANGE = "#f2a14e", DARK = "#d17f2e", CREAM = "#ffe8c9";
+  const running = cat.onGround && state === "play";
+  const legSwing = running ? Math.sin(cat.runPhase * Math.PI * 2) * 9 : 0;
+  const airTilt = !cat.onGround ? -0.10 : 0;
+  ctx.rotate(cat.dead ? 0.35 : airTilt);
+
+  // tail (wags)
+  const wag = Math.sin(t * 7) * 8;
+  ctx.strokeStyle = ORANGE; ctx.lineWidth = 11; ctx.lineCap = "round";
+  ctx.beginPath(); ctx.moveTo(-30, -38);
+  ctx.quadraticCurveTo(-52, -52 + wag * 0.4, -58, -72 + wag);
+  ctx.stroke();
+  ctx.strokeStyle = DARK; ctx.lineWidth = 11;
+  ctx.beginPath(); ctx.moveTo(-56, -66 + wag * 0.8); ctx.lineTo(-58, -72 + wag); ctx.stroke();
+
+  // back legs / front legs
+  ctx.fillStyle = ORANGE;
+  const legH = cat.onGround ? 20 : 12;
+  const tuck = cat.onGround ? 0 : 8;
+  // far legs (darker)
+  ctx.fillStyle = DARK;
+  rrect(-24 + legSwing * 0.6, -legH, 13, legH - tuck, 6); ctx.fill();
+  rrect(8 - legSwing * 0.6, -legH, 13, legH - tuck, 6); ctx.fill();
+  // near legs
+  ctx.fillStyle = ORANGE;
+  rrect(-16 - legSwing * 0.6, -legH, 13, legH - tuck, 6); ctx.fill();
+  rrect(16 + legSwing * 0.6, -legH, 13, legH - tuck, 6); ctx.fill();
+
+  // body
+  ctx.fillStyle = ORANGE;
+  ctx.beginPath(); ctx.ellipse(2, -38, 34, 21, 0, 0, 7); ctx.fill();
+  // stripes
+  ctx.strokeStyle = DARK; ctx.lineWidth = 4; ctx.lineCap = "round";
+  for (let i = -1; i <= 1; i++) {
+    ctx.beginPath(); ctx.moveTo(-6 + i * 14, -56); ctx.quadraticCurveTo(-4 + i * 14, -48, -6 + i * 14, -40); ctx.stroke();
+  }
+  // belly
+  ctx.fillStyle = CREAM;
+  ctx.beginPath(); ctx.ellipse(6, -28, 20, 9, 0, 0, 7); ctx.fill();
+
+  // head
+  const hx = 34, hy = -52;
+  ctx.fillStyle = ORANGE;
+  ctx.beginPath(); ctx.arc(hx, hy, 21, 0, 7); ctx.fill();
+  // ears
+  ctx.beginPath(); ctx.moveTo(hx - 16, hy - 12); ctx.lineTo(hx - 12, hy - 32); ctx.lineTo(hx - 2, hy - 16); ctx.closePath(); ctx.fill();
+  ctx.beginPath(); ctx.moveTo(hx + 6, hy - 16); ctx.lineTo(hx + 14, hy - 31); ctx.lineTo(hx + 18, hy - 11); ctx.closePath(); ctx.fill();
+  ctx.fillStyle = "#f7c9d4";
+  ctx.beginPath(); ctx.moveTo(hx - 13, hy - 16); ctx.lineTo(hx - 11, hy - 26); ctx.lineTo(hx - 5, hy - 17); ctx.closePath(); ctx.fill();
+  ctx.beginPath(); ctx.moveTo(hx + 9, hy - 18); ctx.lineTo(hx + 13, hy - 26); ctx.lineTo(hx + 15, hy - 15); ctx.closePath(); ctx.fill();
+  // head stripes
+  ctx.strokeStyle = DARK; ctx.lineWidth = 3;
+  ctx.beginPath(); ctx.moveTo(hx - 4, hy - 21); ctx.lineTo(hx - 4, hy - 12); ctx.stroke();
+  ctx.beginPath(); ctx.moveTo(hx + 3, hy - 21); ctx.lineTo(hx + 3, hy - 12); ctx.stroke();
+  // muzzle
+  ctx.fillStyle = CREAM;
+  ctx.beginPath(); ctx.ellipse(hx + 8, hy + 8, 11, 8, 0, 0, 7); ctx.fill();
+  ctx.fillStyle = "#e07a7a";
+  ctx.beginPath(); ctx.moveTo(hx + 4, hy + 5); ctx.lineTo(hx + 12, hy + 5); ctx.lineTo(hx + 8, hy + 10); ctx.closePath(); ctx.fill();
+  // eye
+  if (cat.dead) {
+    ctx.strokeStyle = "#3a2c1c"; ctx.lineWidth = 2.5;
+    ctx.beginPath(); ctx.moveTo(hx + 2, hy - 6); ctx.lineTo(hx + 10, hy + 2); ctx.moveTo(hx + 10, hy - 6); ctx.lineTo(hx + 2, hy + 2); ctx.stroke();
+  } else if (cat.blink > 0) {
+    ctx.strokeStyle = "#3a2c1c"; ctx.lineWidth = 2.5;
+    ctx.beginPath(); ctx.moveTo(hx + 1, hy - 2); ctx.lineTo(hx + 11, hy - 2); ctx.stroke();
+  } else {
+    ctx.fillStyle = "#2fbf71";
+    ctx.beginPath(); ctx.arc(hx + 6, hy - 2, 5.5, 0, 7); ctx.fill();
+    ctx.fillStyle = "#1d1d1d";
+    ctx.beginPath(); ctx.ellipse(hx + 6, hy - 2, 2, 4.4, 0, 0, 7); ctx.fill();
+    ctx.fillStyle = "rgba(255,255,255,.9)";
+    ctx.beginPath(); ctx.arc(hx + 4.4, hy - 3.6, 1.6, 0, 7); ctx.fill();
+  }
+  // whiskers
+  ctx.strokeStyle = "rgba(60,40,20,.55)"; ctx.lineWidth = 1.4;
+  for (const s of [-1, 1]) {
+    ctx.beginPath(); ctx.moveTo(hx + 12, hy + 6 + s * 3); ctx.lineTo(hx + 30, hy + 2 + s * 6); ctx.stroke();
+  }
+  ctx.restore();
+}
+
+function rrect(x, y, w, h, r) {
+  ctx.beginPath();
+  ctx.moveTo(x + r, y);
+  ctx.arcTo(x + w, y, x + w, y + h, r);
+  ctx.arcTo(x + w, y + h, x, y + h, r);
+  ctx.arcTo(x, y + h, x, y, r);
+  ctx.arcTo(x, y, x + w, y, r);
+  ctx.closePath();
+}
+
+function drawPuffs() {
+  for (const p of puffs) {
+    ctx.fillStyle = `rgba(255,255,255,${Math.max(0, p.life * 1.4)})`;
+    ctx.beginPath(); ctx.arc(p.x, p.y, 3 + (0.7 - p.life) * 10, 0, 7); ctx.fill();
+  }
+}
+
+function drawHUD() {
+  ctx.fillStyle = "#2b3648"; ctx.textAlign = "right";
+  ctx.font = "700 26px 'Segoe UI', system-ui, sans-serif";
+  ctx.fillText(String(score).padStart(5, "0"), W - 24, 44);
+  ctx.font = "600 15px 'Segoe UI', system-ui, sans-serif";
+  ctx.fillStyle = "#5b6b82";
+  ctx.fillText("HI " + String(Math.max(hi, score)).padStart(5, "0"), W - 24, 68);
+  if (muted) { ctx.textAlign = "left"; ctx.fillText("muted (M)", 24, 44); }
+  if (flash > 0) {
+    ctx.fillStyle = `rgba(255,255,255,${flash})`;
+    ctx.fillRect(0, 0, W, H);
+  }
+}
+
+function centerText(main, sub, mainSize) {
+  ctx.textAlign = "center";
+  ctx.fillStyle = "rgba(20,28,40,.72)";
+  const w = 460, h = sub ? 190 : 110;
+  rrect(W / 2 - w / 2, H / 2 - h / 2 - 30, w, h, 18); ctx.fill();
+  ctx.fillStyle = "#fff";
+  ctx.font = `800 ${mainSize || 44}px 'Segoe UI', system-ui, sans-serif`;
+  ctx.fillText(main, W / 2, H / 2 - (sub ? 18 : 2));
+  if (sub) {
+    ctx.font = "400 19px 'Segoe UI', system-ui, sans-serif";
+    ctx.fillStyle = "#cdd8e6";
+    ctx.fillText(sub, W / 2, H / 2 + 28);
+    ctx.font = "600 16px 'Segoe UI', system-ui, sans-serif";
+    ctx.fillStyle = "#8fa1b8";
+    ctx.fillText("SPACE / tap to start", W / 2, H / 2 + 58);
+  }
+}
+
+function draw() {
+  ctx.save();
+  ctx.fillStyle = skyGradient();
+  ctx.fillRect(0, 0, W, H);
+  for (const c of clouds) drawCloud(c);
+  // distant hills
+  ctx.fillStyle = "rgba(110,180,120,.45)";
+  ctx.beginPath(); ctx.ellipse(180, CONFIG.groundY + 6, 260, 90, 0, Math.PI, 0); ctx.fill();
+  ctx.beginPath(); ctx.ellipse(700, CONFIG.groundY + 6, 320, 120, 0, Math.PI, 0); ctx.fill();
+  // ground
+  ctx.fillStyle = "#8fce6e"; ctx.fillRect(0, CONFIG.groundY, W, H - CONFIG.groundY);
+  ctx.fillStyle = "#7cc25f"; ctx.fillRect(0, CONFIG.groundY, W, 5);
+  for (const g of tufts) drawTuft(g);
+  // bushes
+  const sorted = [...bushes].sort((a, b) => a.x - b.x);
+  for (const b of sorted) drawBush(b);
+  drawPuffs();
+  drawCat();
+  drawHUD();
+  if (state === "menu") {
+    centerText("BUSH DASH", "a tiny cat jumper", 54);
+  } else if (state === "dead") {
+    deadT += 1 / 60;
+    if (deadT > 0.5) {
+      const isHi = score >= hi && score > 0;
+      centerText("GAME OVER", `score ${score}` + (isHi ? "  ·  new best!" : `  ·  best ${hi}`), 44);
+    }
+  }
+  ctx.restore();
+}
+
+// ---------- main loop (fixed timestep) ----------
+let last = performance.now(), acc = 0;
+const STEP = 1 / 120;
+function frame(now) {
+  let dt = (now - last) / 1000; last = now;
+  if (dt > 0.25) dt = 0.25;
+  acc += dt;
+  while (acc >= STEP) { update(STEP); acc -= STEP; }
+  draw();
+  requestAnimationFrame(frame);
+}
+initScenery();
+if (demo) { state = "menu"; setTimeout(() => { if (state === "menu") reset(); }, 600); }
+// hook for automated capture / debugging
+window.__bushdash = {
+  get state() { return state; }, get score() { return score; },
+  get speed() { return speed; }, cat, get bushes() { return bushes; },
+};
+requestAnimationFrame(frame);
+</script>
+</body>
+</html>

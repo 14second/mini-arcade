@@ -2,6 +2,10 @@
 
 Tiny browser games, each a single dependency-free HTML file. Play them in any browser — no installs, no ads, works offline once loaded.
 
+- **Hoppy Hopper** — hop the lanes, dodge the cars, chase the top 5.
+- **Bush Dash** — a cat, some bushes, one jump button.
+- **Dodge the Falling Blocks** — slide to survive; the blocks keep coming.
+
 - **Neon Runner** — cyberpunk endless runner: jump, duck, shoot.
 - **Beat Tiles** — rhythm tapper where your taps play the melody.
 - **Bubble Shooter** — aim and match three to pop the cluster.
