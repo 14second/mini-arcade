@@ -1,0 +1,36 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Mini Arcade — tiny one-file browser games</title>
+<style>
+  :root { color-scheme: dark; }
+  body { margin: 0; font-family: system-ui, -apple-system, sans-serif; background: #10101c; color: #eee; }
+  header { padding: 28px 20px 8px; text-align: center; }
+  h1 { margin: 0 0 6px; font-size: 28px; }
+  p.sub { margin: 0; color: #aab; }
+  main { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 14px; padding: 22px 18px 34px; max-width: 720px; margin: 0 auto; }
+  a.game { display: block; padding: 20px 14px; border-radius: 14px; background: #1d1d31; color: #fff; text-decoration: none; text-align: center; border: 1px solid #2e2e4d; }
+  a.game:active { background: #2a2a48; }
+  a.game .t { display: block; font-size: 18px; font-weight: 700; margin-bottom: 6px; }
+  a.game .d { display: block; font-size: 13px; color: #aab; line-height: 1.35; }
+  footer { text-align: center; color: #778; font-size: 12px; padding: 0 20px 26px; }
+</style>
+</head>
+<body>
+<header>
+  <h1>🕹️ Mini Arcade</h1>
+  <p class="sub">Tiny browser games. Each one is a single HTML file — no downloads, no ads.</p>
+</header>
+<main>
+  <a class="game" href="neon-runner/"><span class="t">🏍️ Neon Runner</span><span class="d">Cyberpunk endless runner — jump, duck, shoot.</span></a>
+  <a class="game" href="beat-tiles/"><span class="t">🎵 Beat Tiles</span><span class="d">Rhythm tapper — your taps play the melody.</span></a>
+  <a class="game" href="bubble-shooter/"><span class="t">🫧 Bubble Shooter</span><span class="d">Aim, match three, pop the cluster.</span></a>
+  <a class="game" href="maze-chase/"><span class="t">👾 Maze Chase</span><span class="d">Eat the dots, dodge the sentries.</span></a>
+  <a class="game" href="traffic-hopper/"><span class="t">🐢 Traffic Hopper</span><span class="d">Cross the traffic, ride the logs home.</span></a>
+  <a class="game" href="pixel-racer/"><span class="t">🏎️ Pixel Racer</span><span class="d">Weave through traffic, graze for bonuses.</span></a>
+</main>
+<footer>More games on the way.</footer>
+</body>
+</html>

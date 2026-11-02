@@ -1,0 +1,624 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, user-scalable=no">
+<meta name="theme-color" content="#0b1e2d">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<title>Traffic Hopper</title>
+<style>
+  html,body{margin:0;padding:0;width:100%;height:100%;background:#0b1e2d;overflow:hidden;
+    font-family:system-ui,-apple-system,Segoe UI,Roboto,sans-serif;color:#fff;
+    touch-action:none;user-select:none;-webkit-user-select:none;-webkit-tap-highlight-color:transparent}
+  canvas{position:fixed;inset:0;display:block;touch-action:none}
+  #muteBtn{position:fixed;top:10px;right:10px;z-index:10;width:48px;height:48px;border-radius:12px;
+    border:2px solid rgba(255,255,255,.35);background:rgba(0,0,0,.45);color:#fff;font-size:24px;
+    line-height:1;cursor:pointer;display:flex;align-items:center;justify-content:center;padding:0}
+  #muteBtn:active{background:rgba(255,255,255,.25)}
+</style>
+</head>
+<body>
+<canvas id="game"></canvas>
+<button id="muteBtn" aria-label="Toggle sound">🔊</button>
+<script>
+// iOS audio routing: Web Audio defaults to the "ambient" channel, which the
+// iPhone silent switch mutes entirely. Route it to the media/playback
+// channel (iOS 17+ Audio Session API) on the first user gesture and inside
+// audio init, so game music/SFX play even with silent mode on.
+function iosPlaybackSession() {
+  try { if ('audioSession' in navigator) navigator.audioSession.type = 'playback'; } catch (e) {}
+}
+document.addEventListener('pointerdown', iosPlaybackSession, true);
+document.addEventListener('touchstart', iosPlaybackSession, true);
+
+"use strict";
+/* ================= Traffic Hopper — original single-file game ================= */
+const canvas=document.getElementById('game');
+const ctx=canvas.getContext('2d');
+const muteBtn=document.getElementById('muteBtn');
+
+let W=390,H=844,DPR=1;
+function resize(){
+  DPR=Math.min(window.devicePixelRatio||1,2);
+  W=window.innerWidth; H=window.innerHeight;
+  canvas.width=Math.round(W*DPR); canvas.height=Math.round(H*DPR);
+  canvas.style.width=W+'px'; canvas.style.height=H+'px';
+  ctx.setTransform(DPR,0,0,DPR,0,0);
+  computeField();
+}
+window.addEventListener('resize',resize);
+
+/* ---------- Grid / field ---------- */
+const COLS=11, ROWS=13;
+let CELL=32, OX=0, OY=0, FW=0, FH=0;
+function computeField(){
+  CELL=Math.min(W/COLS, H/ROWS);
+  FW=CELL*COLS; FH=CELL*ROWS;
+  OX=(W-FW)/2; OY=(H-FH)/2;
+}
+function colToX(c){return OX+(c+0.5)*CELL;}
+function rowToY(r){return OY+(r+0.5)*CELL;}
+function pxToCol(x){return Math.floor((x-OX)/CELL);}
+function clamp(v,a,b){return v<a?a:(v>b?b:v);}
+
+/* Row layout: 0 goal, 1-5 river, 6 median, 7-11 road, 12 start */
+const GOAL_COLS=[1,3,5,7,9];
+const LANES=[
+  // river rows 1..5 — dir, base speed (cells/sec), length range
+  {row:1,type:'river',dir: 1,speed:1.35,lenMin:3,lenMax:5},
+  {row:2,type:'river',dir:-1,speed:1.85,lenMin:3,lenMax:4},
+  {row:3,type:'river',dir: 1,speed:1.15,lenMin:4,lenMax:5},
+  {row:4,type:'river',dir:-1,speed:2.15,lenMin:3,lenMax:4},
+  {row:5,type:'river',dir: 1,speed:1.60,lenMin:3,lenMax:5},
+  // road rows 7..11
+  {row:7, type:'road',dir:-1,speed:1.90,lenMin:1,lenMax:2},
+  {row:8, type:'road',dir: 1,speed:2.55,lenMin:1,lenMax:2},
+  {row:9, type:'road',dir:-1,speed:3.10,lenMin:1,lenMax:3},
+  {row:10,type:'road',dir: 1,speed:2.20,lenMin:1,lenMax:2},
+  {row:11,type:'road',dir:-1,speed:1.65,lenMin:1,lenMax:2},
+];
+const VEHICLE_COLORS=['#e74c3c','#f39c12','#3498db','#9b59b6','#1abc9c','#e67e22','#ecf0f1','#f1c40f','#fd79a8','#00cec9'];
+
+/* ---------- State ---------- */
+let state='menu'; // "menu" | "play" | "over" | "win"
+let score=0, lives=3, level=1;
+let hi=0; try{hi=parseInt(localStorage.getItem('traffichopper_hi')||'0',10)||0;}catch(e){hi=0;}
+let timer=45, timerMax=45;
+let goalsFilled=[false,false,false,false,false];
+let furthestRow=12;
+let deathFlash=0, deathKind='';
+let timeAlive=0;
+let shake=0;
+
+let lanes=[]; // runtime lanes with entities
+let hero=null;
+
+function levelSpeedMul(){return Math.pow(1.12,level-1);}
+function makeHero(){
+  return {col:5,row:12,x:colToX(5),y:rowToY(12),
+    fromX:colToX(5),fromY:rowToY(12),toX:colToX(5),toY:rowToY(12),
+    toCol:5,toRow:12,hopT:1,hopping:false,face:-1};
+}
+function rand(a,b){return a+Math.random()*(b-a);}
+function randInt(a,b){return Math.floor(rand(a,b+1));}
+
+function buildLanes(){
+  lanes=LANES.map(function(def){
+    const speed=def.speed*levelSpeedMul()*rand(0.92,1.08);
+    const lane={row:def.row,type:def.type,dir:def.dir,speed:speed,
+      lenMin:def.lenMin,lenMax:def.lenMax,entities:[],spawnTimer:rand(0.3,1.2),
+      colorIdx:randInt(0,VEHICLE_COLORS.length-1)};
+    // Pre-populate with generous spacing so the field is alive but never walled.
+    const isRiver=def.type==='river';
+    let x=rand(-CELL, CELL*2);
+    while(x < FW+CELL*2){
+      const lenCells=randInt(def.lenMin,def.lenMax);
+      const w=lenCells*CELL*0.94;
+      const ex = def.dir>0 ? x : x; // stored as left edge in field coords
+      lane.entities.push(makeEntity(lane, OX+ex, lenCells));
+      // gap: at least 2.2 cells (river) / 2.6 cells (road), scaled down slightly with level but floored
+      const gapCells=Math.max(isRiver?2.0:2.4, (isRiver?3.0:3.6)-level*0.12);
+      x += w + gapCells*CELL*rand(0.9,1.5);
+    }
+    return lane;
+  });
+}
+function makeEntity(lane,leftPx,lenCells){
+  return {x:leftPx, w:lenCells*CELL*0.94, len:lenCells,
+    color:VEHICLE_COLORS[randInt(0,VEHICLE_COLORS.length-1)],
+    kind: lane.type==='road' ? (lenCells>=3?'bus':(lenCells===2?'truck':'car')) : 'log'};
+}
+function spawnIntervalFor(lane){
+  // Time for this lane to travel (entity length + minimum gap). Randomised => safe gaps.
+  const gapCells=Math.max(1.9, rand(2.2,4.2)-level*0.10);
+  const lenCells=rand(lane.lenMin,lane.lenMax);
+  return (lenCells+gapCells)/Math.max(0.4,lane.speed);
+}
+function laneSpawnClear(lane,lenCells){
+  const w=lenCells*CELL*0.94;
+  const spawnX = lane.dir>0 ? OX-w-4 : OX+FW+4;
+  const checkL=spawnX-CELL*0.6, checkR=spawnX+w+CELL*0.6;
+  for(const e of lane.entities){ if(e.x<checkR && e.x+e.w>checkL) return false; }
+  return true;
+}
+function trySpawn(lane){
+  const lenCells=randInt(lane.lenMin,lane.lenMax);
+  if(!laneSpawnClear(lane,lenCells)) return;
+  const w=lenCells*CELL*0.94;
+  const x = lane.dir>0 ? OX-w-2 : OX+FW+2;
+  lane.entities.push(makeEntity(lane,x,lenCells));
+}
+
+/* ---------- Audio: synth only ---------- */
+let AC=null, muted=false, audioReady=false;
+function ensureAudio(){
+  iosPlaybackSession();
+  if(audioReady) return;
+  try{
+    AC=new (window.AudioContext||window.webkitAudioContext)();
+    audioReady=true;
+    startMusic();
+  }catch(e){ AC=null; }
+}
+function resumeAudio(){ if(AC&&AC.state==='suspended') AC.resume(); }
+function beep(freq,dur,type,vol,slide){
+  if(!AC||muted) return;
+  type=type||'sine'; vol=(vol==null?0.15:vol);
+  const t=AC.currentTime;
+  const o=AC.createOscillator(), g=AC.createGain();
+  o.type=type; o.frequency.setValueAtTime(freq,t);
+  if(slide) o.frequency.exponentialRampToValueAtTime(Math.max(30,freq+slide),t+dur);
+  g.gain.setValueAtTime(vol,t);
+  g.gain.exponentialRampToValueAtTime(0.001,t+dur);
+  o.connect(g); g.connect(AC.destination);
+  o.start(t); o.stop(t+dur+0.02);
+}
+function noiseBurst(dur,vol,slideDown){
+  if(!AC||muted) return;
+  const t=AC.currentTime, n=Math.floor(AC.sampleRate*dur);
+  const buf=AC.createBuffer(1,n,AC.sampleRate), d=buf.getChannelData(0);
+  for(let i=0;i<n;i++) d[i]=(Math.random()*2-1)*(1-i/n);
+  const src=AC.createBufferSource(); src.buffer=buf;
+  const f=AC.createBiquadFilter(); f.type='lowpass';
+  f.frequency.setValueAtTime(1600,t);
+  if(slideDown) f.frequency.exponentialRampToValueAtTime(180,t+dur);
+  const g=AC.createGain(); g.gain.setValueAtTime(vol,t);
+  g.gain.exponentialRampToValueAtTime(0.001,t+dur);
+  src.connect(f); f.connect(g); g.connect(AC.destination); src.start(t);
+}
+function sfxHop(){ beep(520,0.09,'square',0.10,260); }
+function sfxBonk(){ beep(140,0.08,'square',0.10,-40); }
+function sfxSplash(){ noiseBurst(0.35,0.22,true); beep(700,0.32,'sine',0.12,-560); }
+function sfxCrash(){ noiseBurst(0.25,0.28,false); beep(110,0.30,'sawtooth',0.20,-70); beep(60,0.35,'square',0.16,-20); }
+function sfxGoal(){ const n=[523,659,784,1047]; n.forEach(function(f,i){ setTimeout(function(){beep(f,0.16,'triangle',0.18);},i*70); }); }
+function sfxLevel(){ const n=[523,659,784,1047,784,1047,1319]; n.forEach(function(f,i){ setTimeout(function(){beep(f,0.18,'triangle',0.18);},i*90); }); }
+function sfxOver(){ const n=[392,330,262,196]; n.forEach(function(f,i){ setTimeout(function(){beep(f,0.24,'triangle',0.16);},i*160); }); }
+
+/* ---------- Music: lookahead step-sequencer, BPM ~108, C major ---------- */
+const BPM=108, STEP_DUR=60/BPM/2; // 8th notes
+// 32-step loops; 0 = rest
+const LEAD=[72,0,76,0,79,0,76,0, 81,0,79,0,76,0,74,0, 72,0,76,0,79,0,84,0, 79,0,76,0,74,0,0,0,
+            72,0,76,0,79,0,76,0, 81,0,79,81,84,0,81,0, 79,0,76,0,74,0,72,0, 74,0,76,0,74,0,0,0];
+const BASS=[48,0,55,0,48,0,55,0, 53,0,60,0,53,0,60,0, 55,0,62,0,55,0,62,0, 48,0,55,0,48,0,55,0,
+            48,0,55,0,48,0,55,0, 53,0,60,0,53,0,60,0, 55,0,62,0,55,0,62,0, 48,0,55,0,43,0,48,0];
+let musicTimer=null, nextStepTime=0, stepIdx=0;
+function midiFreq(m){return 440*Math.pow(2,(m-69)/12);}
+function scheduleStep(step,when){
+  if(!AC||muted) return;
+  const li=step%LEAD.length, bi=step%BASS.length;
+  function tone(midi,dur,type,vol){
+    if(!midi) return;
+    const o=AC.createOscillator(), g=AC.createGain();
+    o.type=type; o.frequency.setValueAtTime(midiFreq(midi),when);
+    g.gain.setValueAtTime(0.0001,when);
+    g.gain.exponentialRampToValueAtTime(vol,when+0.015);
+    g.gain.exponentialRampToValueAtTime(0.001,when+dur);
+    o.connect(g); g.connect(AC.destination); o.start(when); o.stop(when+dur+0.03);
+  }
+  tone(LEAD[li],STEP_DUR*0.92,'triangle',0.13);
+  tone(BASS[bi],STEP_DUR*0.95,'square',0.055);
+  if(step%4===0) tone(108,0.03,'square',0.012); // tiny tick sparkle (very quiet)
+}
+function startMusic(){
+  if(!AC||musicTimer) return;
+  nextStepTime=AC.currentTime+0.06; stepIdx=0;
+  musicTimer=setInterval(function(){
+    if(!AC) return;
+    while(nextStepTime < AC.currentTime+0.12){
+      if(state==='play'||state==='menu') scheduleStep(stepIdx,nextStepTime);
+      nextStepTime+=STEP_DUR; stepIdx++;
+    }
+  },25);
+}
+
+/* ---------- Game flow ---------- */
+function saveHi(){ if(score>hi){hi=score; try{localStorage.setItem('traffichopper_hi',String(hi));}catch(e){}} }
+function resetTimer(){ timerMax=Math.max(32,45-(level-1)*2); timer=timerMax; }
+function respawn(){
+  hero=makeHero(); furthestRow=12; resetTimer();
+}
+function startGame(){
+  ensureAudio(); resumeAudio();
+  score=0; lives=3; level=1; goalsFilled=[false,false,false,false,false];
+  buildLanes(); respawn(); state='play'; timeAlive=0;
+}
+function nextLevel(){
+  level++; goalsFilled=[false,false,false,false,false];
+  buildLanes(); respawn(); state='play';
+}
+function die(kind){
+  if(state!=='play') return;
+  deathKind=kind; deathFlash=0.55; shake=kind==='crash'?0.35:0.15;
+  if(kind==='splash') sfxSplash(); else if(kind==='crash') sfxCrash(); else beep(220,0.3,'sawtooth',0.15,-140);
+  lives--;
+  if(lives<=0){
+    saveHi(); state='over'; sfxOver();
+  }else{
+    respawn();
+  }
+}
+function reachGoal(slotIdx){
+  goalsFilled[slotIdx]=true;
+  const bonus=100+Math.round(timer*2);
+  score+=bonus; saveHi(); sfxGoal();
+  if(goalsFilled.every(Boolean)){
+    score+=200; saveHi(); state='win'; sfxLevel();
+  }else{
+    respawn();
+  }
+}
+
+/* ---------- Hopping ---------- */
+function tryHop(dx,dy){
+  if(state!=='play'||!hero||hero.hopping) return;
+  const nc=clamp(hero.col+dx,0,COLS-1);
+  const nr=clamp(hero.row+dy,0,ROWS-1);
+  if(nc===hero.col&&nr===hero.row){ sfxBonk(); return; }
+  if(nr===0){
+    const gi=GOAL_COLS.indexOf(nc);
+    if(gi===-1||goalsFilled[gi]){ sfxBonk(); return; } // hedge / filled slot = wall
+  }
+  hero.fromX=hero.x; hero.fromY=hero.y;
+  hero.toCol=nc; hero.toRow=nr;
+  hero.toX=colToX(nc); hero.toY=rowToY(nr);
+  // If stepping off a log, target x is based on grid (snap), which is intended.
+  hero.hopT=0; hero.hopping=true;
+  if(dx!==0) hero.face=dx;
+  sfxHop();
+}
+function finishHop(){
+  hero.col=hero.toCol; hero.row=hero.toRow;
+  hero.x=hero.toX; hero.y=hero.toY; hero.hopping=false;
+  if(hero.row<furthestRow){
+    score+=10*(furthestRow-hero.row); furthestRow=hero.row; saveHi();
+  }
+  if(hero.row===0){
+    const gi=GOAL_COLS.indexOf(hero.col);
+    if(gi!==-1&&!goalsFilled[gi]) reachGoal(gi);
+  }
+}
+
+/* ---------- Update ---------- */
+function update(dt){
+  if(deathFlash>0) deathFlash-=dt;
+  if(shake>0) shake-=dt;
+  if(state!=='play') return;
+  timeAlive+=dt;
+  timer-=dt;
+  if(timer<=0){ die('time'); return; }
+
+  // lanes
+  for(const lane of lanes){
+    const v=lane.dir*lane.speed*CELL; // px/sec
+    lane.vel=v;
+    for(const e of lane.entities) e.x+=v*dt;
+    lane.entities=lane.entities.filter(function(e){return e.x+e.w>OX-CELL*4 && e.x<OX+FW+CELL*4;});
+    lane.spawnTimer-=dt;
+    if(lane.spawnTimer<=0){ trySpawn(lane); lane.spawnTimer=spawnIntervalFor(lane); }
+  }
+  if(!hero) return;
+
+  // hop tween (0.11s)
+  if(hero.hopping){
+    hero.hopT+=dt/0.11;
+    const t=Math.min(1,hero.hopT);
+    const e=1-Math.pow(1-t,2);
+    hero.x=hero.fromX+(hero.toX-hero.fromX)*e;
+    hero.y=hero.fromY+(hero.toY-hero.fromY)*e;
+    if(t>=1) finishHop();
+    return; // no collision / drowning mid-hop
+  }
+
+  const lane=lanes.find(function(l){return l.row===hero.row;});
+  if(lane&&lane.type==='river'){
+    let onLog=null;
+    for(const e of lane.entities){
+      if(hero.x>e.x+2&&hero.x<e.x+e.w-2){ onLog=e; break; }
+    }
+    if(!onLog){ die('splash'); return; }
+    hero.x+=lane.vel*dt;
+    hero.col=pxToCol(hero.x);
+    if(hero.x<OX-CELL*0.4||hero.x>OX+FW+CELL*0.4){ die('splash'); return; }
+  }else if(lane&&lane.type==='road'){
+    const hx=hero.x-CELL*0.30, hw=CELL*0.60, hy=hero.y-CELL*0.30, hh=CELL*0.60;
+    for(const e of lane.entities){
+      const ey=rowToY(lane.row)-CELL*0.36, eh=CELL*0.72;
+      if(hx<e.x+e.w-3&&hx+hw>e.x+3&&hy<ey+eh&&hy+hh>ey){ die('crash'); return; }
+    }
+  }
+}
+
+/* ---------- Drawing ---------- */
+function rr(x,y,w,h,r){
+  r=Math.min(r,w/2,h/2);
+  ctx.beginPath();
+  ctx.moveTo(x+r,y); ctx.arcTo(x+w,y,x+w,y+h,r); ctx.arcTo(x+w,y+h,x,y+h,r);
+  ctx.arcTo(x,y+h,x,y,r); ctx.arcTo(x,y,x+w,y,r); ctx.closePath();
+}
+function drawBackground(){
+  ctx.fillStyle='#0b1e2d'; ctx.fillRect(0,0,W,H);
+  // rows
+  for(let r=0;r<ROWS;r++){
+    const y=OY+r*CELL;
+    let c;
+    if(r===0) c='#14532d';
+    else if(r>=1&&r<=5) c=(r%2?'#1565a8':'#176fb5');
+    else if(r===6) c='#3f6212';
+    else if(r>=7&&r<=11) c='#2b2f36';
+    else c='#3f6212';
+    ctx.fillStyle=c; ctx.fillRect(OX,y,FW,CELL);
+    if(r>=7&&r<=11){ // lane dashes
+      ctx.fillStyle='rgba(255,235,150,.55)';
+      const dashW=CELL*0.55;
+      for(let x=OX+4;x<OX+FW-4;x+=CELL) ctx.fillRect(x,y+CELL-2,dashW,3);
+    }
+    if(r>=1&&r<=5){ // gentle water lines
+      ctx.strokeStyle='rgba(255,255,255,.14)'; ctx.lineWidth=2; ctx.beginPath();
+      for(let x=OX+6;x<OX+FW-6;x+=CELL*1.4){
+        const yy=y+CELL*0.5+Math.sin((x+timeAlive*40)/30+r)*2;
+        ctx.moveTo(x,yy); ctx.lineTo(x+CELL*0.5,yy);
+      }
+      ctx.stroke();
+    }
+  }
+  // goal row: hedge + slots
+  ctx.fillStyle='#14532d'; ctx.fillRect(OX,OY,FW,CELL);
+  for(let i=0;i<5;i++){
+    const c=GOAL_COLS[i], x=OX+c*CELL, y=OY;
+    if(goalsFilled[i]){
+      ctx.fillStyle='#166534'; rr(x+3,y+3,CELL-6,CELL-6,8); ctx.fill();
+      drawTurtle(x+CELL/2,y+CELL/2,CELL*0.34,1,true);
+    }else{
+      // lily pad
+      ctx.fillStyle='#22c55e';
+      ctx.beginPath(); ctx.arc(x+CELL/2,y+CELL/2,CELL*0.38,0,Math.PI*2); ctx.fill();
+      ctx.fillStyle='#14532d';
+      ctx.beginPath(); ctx.moveTo(x+CELL/2,y+CELL/2); ctx.lineTo(x+CELL-3,y+4); ctx.lineTo(x+CELL-3,y+CELL-4); ctx.closePath(); ctx.fill();
+      ctx.fillStyle='#f9a8d4';
+      ctx.beginPath(); ctx.arc(x+CELL/2,y+CELL/2,Math.max(2,CELL*0.09),0,Math.PI*2); ctx.fill();
+    }
+  }
+  // safe rows markers
+  ctx.fillStyle='rgba(255,255,255,.18)';
+  for(let c=0;c<COLS;c++){ ctx.fillRect(OX+c*CELL+CELL*0.2,OY+6*CELL+CELL*0.44,CELL*0.6,3); }
+  // start arrow hint
+  ctx.fillStyle='rgba(255,255,255,.35)';
+  const sx=colToX(5), sy=rowToY(12);
+  ctx.beginPath(); ctx.moveTo(sx,sy-CELL*0.32); ctx.lineTo(sx-CELL*0.18,sy-CELL*0.05); ctx.lineTo(sx+CELL*0.18,sy-CELL*0.05); ctx.closePath(); ctx.fill();
+  // field border
+  ctx.strokeStyle='rgba(255,255,255,.35)'; ctx.lineWidth=2; ctx.strokeRect(OX,OY,FW,FH);
+}
+function drawLog(e,row){
+  const y=OY+row*CELL;
+  ctx.fillStyle='#8b5a2b'; rr(e.x,y+CELL*0.16,e.w,CELL*0.68,CELL*0.22); ctx.fill();
+  ctx.fillStyle='#a06a35'; rr(e.x+4,y+CELL*0.24,e.w-8,CELL*0.20,CELL*0.10); ctx.fill();
+  ctx.fillStyle='#6d4420';
+  ctx.beginPath(); ctx.arc(e.x+CELL*0.32,y+CELL/2,CELL*0.13,0,Math.PI*2); ctx.fill();
+  ctx.beginPath(); ctx.arc(e.x+e.w-CELL*0.32,y+CELL/2,CELL*0.13,0,Math.PI*2); ctx.fill();
+  ctx.strokeStyle='rgba(0,0,0,.25)'; ctx.lineWidth=1;
+  for(let x=e.x+CELL*0.7;x<e.x+e.w-4;x+=CELL*0.8){ ctx.beginPath(); ctx.moveTo(x,y+CELL*0.2); ctx.lineTo(x,y+CELL*0.8); ctx.stroke(); }
+}
+function drawVehicle(e,row){
+  const y=OY+row*CELL, h=CELL*0.68, yy=y+(CELL-h)/2;
+  ctx.fillStyle='rgba(0,0,0,.25)'; rr(e.x+2,yy+3,e.w,h,8); ctx.fill();
+  ctx.fillStyle=e.color; rr(e.x,yy,e.w,h,8); ctx.fill();
+  // cabin / cargo
+  ctx.fillStyle='rgba(255,255,255,.35)';
+  if(e.kind==='car'){ rr(e.x+e.w*0.28,yy+h*0.16,e.w*0.42,h*0.42,5); ctx.fill(); }
+  else if(e.kind==='truck'){ rr(e.x+e.w*0.62,yy+h*0.10,e.w*0.30,h*0.55,4); ctx.fill(); ctx.fillStyle='rgba(0,0,0,.18)'; rr(e.x+3,yy+4,e.w*0.52,h-8,4); ctx.fill(); }
+  else { for(let i=0;i<4;i++){ rr(e.x+6+i*(e.w-12)/4,yy+h*0.16,(e.w-12)/5,h*0.36,3); ctx.fill(); } }
+  // wheels
+  ctx.fillStyle='#111';
+  const wr=Math.max(4,CELL*0.13);
+  [[e.x+e.w*0.22,yy+h],[e.x+e.w*0.78,yy+h],[e.x+e.w*0.22,yy],[e.x+e.w*0.78,yy]].forEach(function(p){
+    ctx.beginPath(); ctx.arc(p[0],p[1],wr,0,Math.PI*2); ctx.fill();
+  });
+  ctx.fillStyle='#ddd';
+  [[e.x+e.w*0.22,yy+h],[e.x+e.w*0.78,yy+h]].forEach(function(p){
+    ctx.beginPath(); ctx.arc(p[0],p[1],wr*0.45,0,Math.PI*2); ctx.fill();
+  });
+  // headlights (front depends on lane dir — use kind position approx)
+  ctx.fillStyle='#fff59d';
+  ctx.fillRect(e.x+e.w-4,yy+h*0.22,3,4); ctx.fillRect(e.x+e.w-4,yy+h*0.65,3,4);
+}
+function drawTurtle(cx,cy,s,face,small){
+  // Little green turtle — original, simple shapes.
+  ctx.save(); ctx.translate(cx,cy); if(face) ctx.scale(face,1);
+  // legs
+  ctx.fillStyle='#16a34a';
+  [[-s*0.55,-s*0.55],[s*0.55,-s*0.55],[-s*0.55,s*0.55],[s*0.55,s*0.55]].forEach(function(p){
+    ctx.beginPath(); ctx.arc(p[0],p[1],s*0.22,0,Math.PI*2); ctx.fill();
+  });
+  // head (faces up by default; circle at top)
+  ctx.beginPath(); ctx.arc(0,-s*0.78,s*0.34,0,Math.PI*2); ctx.fill();
+  ctx.fillStyle='#052e16';
+  ctx.beginPath(); ctx.arc(-s*0.11,-s*0.84,s*0.06,0,Math.PI*2); ctx.fill();
+  ctx.beginPath(); ctx.arc(s*0.11,-s*0.84,s*0.06,0,Math.PI*2); ctx.fill();
+  // shell
+  ctx.fillStyle='#15803d'; ctx.beginPath(); ctx.arc(0,0,s*0.78,0,Math.PI*2); ctx.fill();
+  ctx.fillStyle='#22c55e'; ctx.beginPath(); ctx.arc(0,0,s*0.56,0,Math.PI*2); ctx.fill();
+  ctx.strokeStyle='#14532d'; ctx.lineWidth=Math.max(1.5,s*0.08);
+  ctx.beginPath(); ctx.arc(0,0,s*0.34,0,Math.PI*2); ctx.stroke();
+  ctx.beginPath(); ctx.moveTo(-s*0.56,0); ctx.lineTo(s*0.56,0); ctx.stroke();
+  ctx.restore();
+}
+function drawHero(){
+  if(!hero) return;
+  let bob=0;
+  if(hero.hopping) bob=-Math.sin(Math.min(1,hero.hopT)*Math.PI)*CELL*0.22;
+  // shadow
+  ctx.fillStyle='rgba(0,0,0,.30)';
+  ctx.beginPath(); ctx.ellipse(hero.x,hero.y+CELL*0.30,CELL*0.30,CELL*0.12,0,0,Math.PI*2); ctx.fill();
+  drawTurtle(hero.x,hero.y+bob,CELL*0.36,0,false);
+}
+function drawHUD(){
+  ctx.textAlign='left'; ctx.textBaseline='top';
+  const pad=12;
+  ctx.fillStyle='#fff'; ctx.font='bold 18px system-ui,sans-serif';
+  ctx.fillText('Score '+score,pad,10);
+  ctx.font='14px system-ui,sans-serif'; ctx.fillStyle='rgba(255,255,255,.85)';
+  ctx.fillText('Hi '+hi,pad,32);
+  ctx.fillText('Level '+level,pad,50);
+  // lives as turtles (dots)
+  for(let i=0;i<lives;i++){
+    ctx.fillStyle='#22c55e'; ctx.beginPath(); ctx.arc(pad+10+i*24,86,8,0,Math.PI*2); ctx.fill();
+    ctx.fillStyle='#14532d'; ctx.beginPath(); ctx.arc(pad+10+i*24,86,4,0,Math.PI*2); ctx.fill();
+  }
+  if(state==='play'||state==='win'){
+    // timer bar at bottom of screen
+    const bw=Math.min(W-24,420), bx=(W-bw)/2, by=H-26;
+    ctx.fillStyle='rgba(255,255,255,.22)'; rr(bx,by,bw,12,6); ctx.fill();
+    const frac=clamp(timer/timerMax,0,1);
+    ctx.fillStyle=frac<0.25?'#ef4444':(frac<0.5?'#f59e0b':'#22c55e');
+    if(frac>0){ rr(bx,by,bw*frac,12,6); ctx.fill(); }
+    ctx.fillStyle='#fff'; ctx.font='12px system-ui,sans-serif'; ctx.textAlign='center';
+    ctx.fillText(Math.ceil(timer)+'s',W/2,by-16); ctx.textAlign='left';
+  }
+}
+function overlay(title,lines,bigColor){
+  ctx.fillStyle='rgba(4,18,30,.78)'; ctx.fillRect(0,0,W,H);
+  ctx.textAlign='center'; ctx.textBaseline='middle';
+  ctx.fillStyle=bigColor||'#fff'; ctx.font='bold 42px system-ui,sans-serif';
+  ctx.fillText(title,W/2,H/2-90);
+  ctx.fillStyle='#fff'; ctx.font='18px system-ui,sans-serif';
+  lines.forEach(function(ln,i){ ctx.fillText(ln,W/2,H/2-30+i*28); });
+  ctx.textAlign='left';
+}
+function draw(){
+  ctx.save();
+  if(shake>0) ctx.translate(rand(-1,1)*shake*14,rand(-1,1)*shake*10);
+  drawBackground();
+  for(const lane of lanes){
+    for(const e of lane.entities){
+      if(lane.type==='river') drawLog(e,lane.row); else drawVehicle(e,lane.row);
+    }
+  }
+  if(state==='play'||state==='win') drawHero();
+  if(deathFlash>0){
+    ctx.fillStyle=deathKind==='splash'?'rgba(56,189,248,'+(deathFlash*0.6)+')':'rgba(239,68,68,'+(deathFlash*0.6)+')';
+    ctx.fillRect(OX,OY,FW,FH);
+  }
+  ctx.restore();
+  drawHUD();
+  if(state==='menu'){
+    overlay('🐢 Traffic Hopper',[
+      'Hop the turtle across traffic,',
+      'ride the logs, land on all 5 lily pads!',
+      '',
+      'Swipe or tap to hop up • Arrows / WASD',
+      'Don\'t get hit, don\'t fall in the river.',
+      '',
+      'Tap or press Space to start'
+    ],'#4ade80');
+  }else if(state==='over'){
+    overlay('Game Over',[
+      'Score: '+score+'    Best: '+hi,
+      'Level reached: '+level,
+      '',
+      'Tap or press Space to play again'
+    ],'#f87171');
+  }else if(state==='win'){
+    overlay('Level '+level+' Clear! 🎉',[
+      'All 5 lily pads filled!',
+      'Score: '+score,
+      '',
+      'Next level is faster…',
+      'Tap or press Space to continue'
+    ],'#facc15');
+  }
+}
+
+/* ---------- Loop ---------- */
+let lastT=0;
+function loop(ts){
+  requestAnimationFrame(loop);
+  const dt=Math.min(0.05,(ts-lastT)/1000||0.016); lastT=ts;
+  update(dt); draw();
+}
+resize();
+buildLanes(); hero=makeHero();
+requestAnimationFrame(loop);
+
+/* ---------- Controls ---------- */
+function primaryAction(){
+  ensureAudio(); resumeAudio();
+  if(state==='menu') startGame();
+  else if(state==='over') startGame();
+  else if(state==='win') nextLevel();
+}
+let pDown=null;
+canvas.addEventListener('pointerdown',function(e){
+  e.preventDefault(); pDown={x:e.clientX,y:e.clientY,t:Date.now()};
+},{passive:false});
+canvas.addEventListener('pointerup',function(e){
+  e.preventDefault();
+  if(!pDown) return;
+  const dx=e.clientX-pDown.x, dy=e.clientY-pDown.y; pDown=null;
+  ensureAudio(); resumeAudio();
+  if(state!=='play'){ primaryAction(); return; }
+  const adx=Math.abs(dx), ady=Math.abs(dy);
+  if(Math.max(adx,ady)<24){ tryHop(0,-1); } // tap = hop up / forward
+  else if(adx>ady){ tryHop(dx>0?1:-1,0); }
+  else { tryHop(0,dy>0?1:-1); }
+},{passive:false});
+canvas.addEventListener('pointercancel',function(){pDown=null;});
+// Block page scrolling / gestures on touch
+document.addEventListener('touchmove',function(e){e.preventDefault();},{passive:false});
+
+function setMuted(m){
+  muted=m; muteBtn.textContent=muted?'🔇':'🔊';
+}
+muteBtn.addEventListener('pointerdown',function(e){ e.stopPropagation(); e.preventDefault(); },{passive:false});
+muteBtn.addEventListener('click',function(e){
+  e.stopPropagation(); ensureAudio(); setMuted(!muted);
+});
+
+window.addEventListener('keydown',function(e){
+  const k=e.key;
+  if(['ArrowUp','ArrowDown','ArrowLeft','ArrowRight',' '].includes(k)) e.preventDefault();
+  ensureAudio(); resumeAudio();
+  if(k==='m'||k==='M'){ setMuted(!muted); return; }
+  if(k==='r'||k==='R'){ startGame(); return; }
+  if(state!=='play'){
+    if(k===' '||k==='Enter') primaryAction();
+    return;
+  }
+  if(k==='ArrowUp'||k==='w'||k==='W') tryHop(0,-1);
+  else if(k==='ArrowDown'||k==='s'||k==='S') tryHop(0,1);
+  else if(k==='ArrowLeft'||k==='a'||k==='A') tryHop(-1,0);
+  else if(k==='ArrowRight'||k==='d'||k==='D') tryHop(1,0);
+  else if(k===' ') tryHop(0,-1);
+});
+
+/* Exposed for testing / automation */
+window.__game={
+  get state(){return state;},
+  get score(){return score;},
+  get lives(){return lives;},
+  get level(){return level;},
+  start:function(){ startGame(); }
+};
+</script>
+</body>
+</html>

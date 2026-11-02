@@ -1,0 +1,899 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, user-scalable=no">
+<meta name="theme-color" content="#0b1026">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<title>Bubble Shooter</title>
+<style>
+  * { margin:0; padding:0; box-sizing:border-box; }
+  html, body {
+    width:100%; height:100%; overflow:hidden; background:#0b1026;
+    font-family:system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+    touch-action:none; user-select:none; -webkit-user-select:none;
+    -webkit-tap-highlight-color:transparent;
+  }
+  canvas {
+    position:fixed; inset:0; display:block; touch-action:none;
+  }
+  #muteBtn {
+    position:fixed; top:10px; right:10px; z-index:10;
+    width:44px; height:44px; border-radius:12px;
+    border:1px solid rgba(255,255,255,.35);
+    background:rgba(10,14,34,.72); color:#fff; font-size:20px; line-height:1;
+    touch-action:none; cursor:pointer;
+  }
+  #muteBtn:active { background:rgba(40,50,100,.85); }
+</style>
+</head>
+<body>
+<canvas id="game"></canvas>
+<button id="muteBtn" type="button" aria-label="Toggle sound">🔊</button>
+<script>
+// iOS audio routing: Web Audio defaults to the "ambient" channel, which the
+// iPhone silent switch mutes entirely. Route it to the media/playback
+// channel (iOS 17+ Audio Session API) on the first user gesture and inside
+// audio init, so game music/SFX play even with silent mode on.
+function iosPlaybackSession() {
+  try { if ('audioSession' in navigator) navigator.audioSession.type = 'playback'; } catch (e) {}
+}
+document.addEventListener('pointerdown', iosPlaybackSession, true);
+document.addEventListener('touchstart', iosPlaybackSession, true);
+
+'use strict';
+/* ============================================================
+   BUBBLE SHOOTER — original, dependency-free, single file.
+   Hex-offset grid, bounce-aim launcher, match-3 pops, drops,
+   descending ceiling, danger line, levels, synth music + SFX.
+   ============================================================ */
+var canvas = document.getElementById('game');
+var ctx = canvas.getContext('2d');
+var muteBtn = document.getElementById('muteBtn');
+
+var COLS = 9;
+var SHOTS_PER_DROP = 6;
+var HI_KEY = 'bubbleshooter_hi';
+
+/* ---------- layout (CSS-pixel logic coords) ---------- */
+var W = 0, H = 0;
+var playWidth = 0, playLeft = 0;
+var gridLeft = 0, gridRight = 0, gridWidth = 0;
+var R = 20, rowH = 34, gridTop = 68;
+var shooterX = 0, shooterY = 0, dangerY = 0;
+
+function computeLayout() {
+  W = window.innerWidth; H = window.innerHeight;
+  var dpr = Math.min(window.devicePixelRatio || 1, 2);
+  canvas.width = Math.round(W * dpr);
+  canvas.height = Math.round(H * dpr);
+  canvas.style.width = W + 'px';
+  canvas.style.height = H + 'px';
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+
+  playWidth = Math.min(W, 480);
+  playLeft = (W - playWidth) / 2;
+  /* Offset (odd) rows carry one extra radius of width, so a row spans
+     (2*COLS + 1) * R. R also shrinks on short (landscape) screens. */
+  R = Math.max(9, Math.min(playWidth / (COLS * 2 + 1), H / 30));
+  rowH = R * Math.sqrt(3);
+  gridWidth = (COLS * 2 + 1) * R;
+  gridLeft = (W - gridWidth) / 2;
+  gridRight = gridLeft + gridWidth;
+  gridTop = H < 520 ? 50 : 68;
+  shooterX = W / 2;
+  shooterY = H - Math.max(52, R * 2.7);
+  dangerY = shooterY - R * 4.0;
+  if (projectile) {
+    projectile.x = Math.max(gridLeft + R, Math.min(gridRight - R, projectile.x));
+    projectile.y = Math.min(projectile.y, shooterY);
+  }
+}
+
+/* ---------- palette ---------- */
+var PALETTE = [
+  { base: '#ff4d6d', light: '#ffb3c2', dark: '#a30f2c' },  /* rose   */
+  { base: '#ffd23f', light: '#fff3b0', dark: '#a87400' },  /* sunny  */
+  { base: '#34b6ff', light: '#b0e6ff', dark: '#0a5ca8' },  /* sky    */
+  { base: '#69d84f', light: '#cdf7bd', dark: '#2a7a1a' },  /* leaf   */
+  { base: '#b388ff', light: '#e6d4ff', dark: '#5b2ea6' }   /* violet (level 2+) */
+];
+function activeColorCount() { return level >= 2 ? 5 : 4; }
+
+/* ---------- game state ---------- */
+var state = 'menu';            /* 'menu' | 'play' | 'over' */
+var win = false;
+var score = 0;
+var level = 1;
+var hi = 0;
+try { hi = parseInt(localStorage.getItem(HI_KEY) || '0', 10) || 0; } catch (e) { hi = 0; }
+
+var grid = [];                 /* rows of (colorIndex | null), every row COLS wide */
+var currentColor = 0, nextColor = 1;
+var aimAngle = -Math.PI / 2;
+var aiming = false;
+var projectile = null;
+var particles = [];
+var falling = [];
+var floaters = [];
+var shotsLeft = SHOTS_PER_DROP;
+var pendingDescend = false, descendTimer = 0;
+var keys = {};
+var elapsed = 0;
+
+function saveHi() {
+  if (score > hi) {
+    hi = score;
+    try { localStorage.setItem(HI_KEY, String(hi)); } catch (e) {}
+  }
+}
+
+/* ---------- grid helpers ---------- */
+function emptyRow() {
+  var a = [], i;
+  for (i = 0; i < COLS; i++) a.push(null);
+  return a;
+}
+function randomRow() {
+  var a = [], i, n = activeColorCount();
+  for (i = 0; i < COLS; i++) a.push(Math.floor(Math.random() * n));
+  return a;
+}
+function cellCenter(r, c) {
+  return {
+    x: gridLeft + R + (r % 2 ? R : 0) + c * 2 * R,
+    y: gridTop + R + r * rowH
+  };
+}
+function neighbors(r, c) {
+  var d = (r % 2 === 0)
+    ? [[-1, 0], [1, 0], [0, -1], [-1, -1], [0, 1], [-1, 1]]
+    : [[-1, 0], [1, 0], [1, -1], [0, -1], [1, 1], [0, 1]];
+  var out = [], i, nc, nr;
+  for (i = 0; i < d.length; i++) {
+    nc = c + d[i][0]; nr = r + d[i][1];
+    if (nr >= 0 && nr < grid.length && nc >= 0 && nc < COLS) out.push({ r: nr, c: nc });
+  }
+  return out;
+}
+function gridIsEmpty() {
+  var r, c;
+  for (r = 0; r < grid.length; r++)
+    for (c = 0; c < COLS; c++)
+      if (grid[r][c] !== null) return false;
+  return true;
+}
+function presentColors() {
+  var seen = {}, out = [], r, c, v;
+  for (r = 0; r < grid.length; r++)
+    for (c = 0; c < COLS; c++) {
+      v = grid[r][c];
+      if (v !== null && !seen[v]) { seen[v] = true; out.push(v); }
+    }
+  return out;
+}
+function pickShotColor() {
+  var p = presentColors();
+  if (!p.length) return Math.floor(Math.random() * activeColorCount());
+  return p[Math.floor(Math.random() * p.length)];
+}
+
+function buildBoard() {
+  grid = [];
+  var rows = Math.min(5 + level, 9);   /* level 1: 6 rows, then +1 per level */
+  var r, c, v, n = activeColorCount();
+  for (r = 0; r < rows; r++) {
+    var row = [];
+    for (c = 0; c < COLS; c++) {
+      var roll = Math.random();
+      if (c > 0 && roll < 0.26) v = row[c - 1];                    /* clumps to pop */
+      else if (r > 0 && roll < 0.42) v = grid[r - 1][c];
+      else v = Math.floor(Math.random() * n);
+      row.push(v);
+    }
+    grid.push(row);
+  }
+  for (r = 0; r < 8; r++) grid.push(emptyRow());  /* working room below */
+}
+
+function resetLevel() {
+  buildBoard();
+  projectile = null;
+  particles = []; falling = []; floaters = [];
+  shotsLeft = SHOTS_PER_DROP;
+  pendingDescend = false; descendTimer = 0;
+  aiming = false;
+  aimAngle = -Math.PI / 2;
+  currentColor = pickShotColor();
+  nextColor = pickShotColor();
+}
+
+function startGame() {
+  ensureAudio();
+  if (state === 'over' && win) {
+    level += 1;                 /* keep score, advance a level */
+  } else {
+    level = 1; score = 0;
+  }
+  win = false;
+  resetLevel();
+  state = 'play';
+}
+function restartRun() {
+  level = 1; score = 0; win = false;
+  resetLevel();
+  state = 'play';
+}
+function gameOver(won) {
+  win = won;
+  state = 'over';
+  projectile = null;
+  aiming = false;
+  pendingDescend = false;
+  saveHi();
+  if (won) sfxClear(); else sfxOver();
+}
+
+/* ---------- audio: synth SFX + lookahead step-sequencer music ---------- */
+var audioCtx = null, muted = false;
+var musicTimer = null, nextNoteTime = 0, seqStep = 0;
+var BPM = 100;
+var STEP_DUR = 60 / BPM / 2;   /* 8th notes */
+/* C major, bouncy: chords C - Am - F - G, one bar each */
+var LEAD = [72, 0, 76, 0, 79, 0, 76, 0,
+            69, 0, 72, 0, 76, 0, 72, 0,
+            69, 0, 72, 0, 77, 0, 72, 0,
+            71, 0, 74, 0, 79, 0, 74, 0];
+var BASS = [48, 0, 55, 0, 48, 0, 55, 0,
+            45, 0, 52, 0, 45, 0, 52, 0,
+            41, 0, 48, 0, 41, 0, 48, 0,
+            43, 0, 50, 0, 43, 0, 50, 0];
+function midiFreq(m) { return 440 * Math.pow(2, (m - 69) / 12); }
+
+function ensureAudio() {
+  iosPlaybackSession();
+  if (audioCtx) {
+    if (audioCtx.state === 'suspended') audioCtx.resume();
+    return;
+  }
+  try {
+    var AC = window.AudioContext || window.webkitAudioContext;
+    if (!AC) return;
+    audioCtx = new AC();
+  } catch (e) { audioCtx = null; return; }
+  nextNoteTime = audioCtx.currentTime + 0.08;
+  seqStep = 0;
+  musicTimer = setInterval(musicScheduler, 25);
+}
+function toneAt(freqVal, t, dur, type, vol, slideTo) {
+  if (!audioCtx || muted) return;
+  var o = audioCtx.createOscillator(), g = audioCtx.createGain();
+  o.type = type;
+  o.frequency.setValueAtTime(Math.max(20, freqVal), t);
+  if (slideTo) o.frequency.exponentialRampToValueAtTime(Math.max(20, slideTo), t + dur);
+  g.gain.setValueAtTime(vol, t);
+  g.gain.exponentialRampToValueAtTime(0.0001, t + dur);
+  o.connect(g); g.connect(audioCtx.destination);
+  o.start(t); o.stop(t + dur + 0.03);
+}
+function beep(freqVal, dur, type, vol, slideTo, delay) {
+  if (!audioCtx || muted) return;
+  toneAt(freqVal, audioCtx.currentTime + (delay || 0), dur, type || 'sine', vol || 0.1, slideTo);
+}
+function musicScheduler() {
+  if (!audioCtx) return;
+  while (nextNoteTime < audioCtx.currentTime + 0.12) {
+    if (!muted) {
+      var li = LEAD[seqStep], bi = BASS[seqStep];
+      if (li) toneAt(midiFreq(li), nextNoteTime, STEP_DUR * 0.92, 'triangle', 0.070, 0);
+      if (bi) toneAt(midiFreq(bi), nextNoteTime, STEP_DUR * 0.95, 'sine', 0.115, 0);
+      if (seqStep % 2 === 0) toneAt(midiFreq(96), nextNoteTime, 0.03, 'square', 0.012, 0); /* tick sparkle */
+    }
+    seqStep = (seqStep + 1) % LEAD.length;
+    nextNoteTime += STEP_DUR;
+  }
+}
+function toggleMute() {
+  muted = !muted;
+  muteBtn.textContent = muted ? '🔇' : '🔊';
+}
+muteBtn.addEventListener('pointerdown', function (e) {
+  e.preventDefault(); e.stopPropagation();
+  ensureAudio(); toggleMute();
+});
+
+/* --- SFX --- */
+function sfxFire()  { beep(260, 0.18, 'sawtooth', 0.05, 920); beep(540, 0.12, 'sine', 0.05, 1040, 0.02); }
+function sfxBounce(){ beep(210, 0.045, 'sine', 0.028, 170); }
+function sfxThunk() { beep(150, 0.11, 'sine', 0.16, 65); beep(90, 0.09, 'triangle', 0.10, 55, 0.01); }
+function sfxPop(n) {
+  var scale = [76, 79, 81, 84, 86, 88, 91], i, k = Math.min(n, scale.length);
+  for (i = 0; i < k; i++) beep(midiFreq(scale[i]), 0.13, 'square', 0.055, 0, i * 0.05);
+}
+function sfxDrop(n) {
+  var i, k = Math.min(Math.max(n, 1), 6);
+  for (i = 0; i < k; i++) beep(midiFreq(86 - i * 4), 0.14, 'triangle', 0.07, midiFreq(74 - i * 4), i * 0.06);
+}
+function sfxCreak() { beep(95, 0.42, 'sawtooth', 0.11, 52); beep(64, 0.36, 'square', 0.05, 44, 0.05); }
+function sfxOver()  { var n = [72, 69, 65, 60], i; for (i = 0; i < n.length; i++) beep(midiFreq(n[i]), 0.24, 'triangle', 0.10, 0, i * 0.17); }
+function sfxClear() { var n = [72, 76, 79, 84, 88, 91], i; for (i = 0; i < n.length; i++) beep(midiFreq(n[i]), 0.20, 'triangle', 0.10, 0, i * 0.09); }
+
+/* ---------- shooting & resolution ---------- */
+function setAimFromPoint(x, y) {
+  var dx = x - shooterX, dy = y - shooterY;
+  if (dy >= -4) dy = -4;
+  var a = Math.atan2(dy, dx);
+  var min = -Math.PI + 0.18, max = -0.18;
+  if (a < min) a = min;
+  if (a > max) a = max;
+  aimAngle = a;
+}
+function fire() {
+  if (state !== 'play' || projectile || pendingDescend) return;
+  var sp = Math.max(620, H * 0.92);
+  projectile = {
+    x: shooterX, y: shooterY,
+    vx: Math.cos(aimAngle) * sp, vy: Math.sin(aimAngle) * sp,
+    color: currentColor
+  };
+  currentColor = nextColor;
+  nextColor = pickShotColor();
+  aiming = false;
+  sfxFire();
+}
+
+function floodGroup(r0, c0) {
+  var color = grid[r0][c0];
+  var seen = {}, stack = [{ r: r0, c: c0 }], out = [];
+  seen[r0 + ',' + c0] = true;
+  while (stack.length) {
+    var cur = stack.pop();
+    out.push(cur);
+    var ns = neighbors(cur.r, cur.c), i, n, key;
+    for (i = 0; i < ns.length; i++) {
+      n = ns[i]; key = n.r + ',' + n.c;
+      if (!seen[key] && grid[n.r][n.c] === color) { seen[key] = true; stack.push(n); }
+    }
+  }
+  return out;
+}
+function dropDisconnected() {
+  var anchored = {}, stack = [], c, r, i, n, key;
+  for (c = 0; c < COLS; c++) {
+    if (grid[0][c] !== null) { anchored['0,' + c] = true; stack.push({ r: 0, c: c }); }
+  }
+  while (stack.length) {
+    var cur = stack.pop();
+    var ns = neighbors(cur.r, cur.c);
+    for (i = 0; i < ns.length; i++) {
+      n = ns[i]; key = n.r + ',' + n.c;
+      if (!anchored[key] && grid[n.r][n.c] !== null) { anchored[key] = true; stack.push(n); }
+    }
+  }
+  var dropped = 0;
+  for (r = 0; r < grid.length; r++) {
+    for (c = 0; c < COLS; c++) {
+      if (grid[r][c] !== null && !anchored[r + ',' + c]) {
+        var ctr = cellCenter(r, c);
+        falling.push({ x: ctr.x, y: ctr.y, vy: 30, color: grid[r][c] });
+        grid[r][c] = null;
+        dropped++;
+      }
+    }
+  }
+  if (dropped > 0) { score += dropped * 20; sfxDrop(dropped); }
+  return dropped;
+}
+function spawnPopParticles(x, y, colorIdx) {
+  var i;
+  for (i = 0; i < 9; i++) {
+    var a = Math.random() * Math.PI * 2, sp = 50 + Math.random() * 170;
+    particles.push({
+      x: x, y: y, vx: Math.cos(a) * sp, vy: Math.sin(a) * sp - 50,
+      life: 0.45 + Math.random() * 0.3, maxLife: 0.75,
+      r: 2 + Math.random() * (R * 0.22), color: colorIdx
+    });
+  }
+}
+function addFloater(x, y, text, color) {
+  floaters.push({ x: x, y: y, text: text, color: color || '#ffffff', life: 0.9 });
+}
+function anyBubblePastDanger() {
+  var r, c, ctr;
+  for (r = 0; r < grid.length; r++)
+    for (c = 0; c < COLS; c++)
+      if (grid[r][c] !== null) {
+        ctr = cellCenter(r, c);
+        if (ctr.y + R > dangerY) return true;
+      }
+  return false;
+}
+
+function snapProjectile(p) {
+  /* nearest free cell that touches the cluster (or the ceiling row) */
+  var best = null, bestD = Infinity, r, c, ctr, dx, dy, d2, i, n, ok;
+  for (r = 0; r < grid.length; r++) {
+    for (c = 0; c < COLS; c++) {
+      if (grid[r][c] !== null) continue;
+      ok = (r === 0);
+      if (!ok) {
+        var ns = neighbors(r, c);
+        for (i = 0; i < ns.length; i++) {
+          n = ns[i];
+          if (grid[n.r][n.c] !== null) { ok = true; break; }
+        }
+      }
+      if (!ok) continue;
+      ctr = cellCenter(r, c);
+      dx = ctr.x - p.x; dy = ctr.y - p.y; d2 = dx * dx + dy * dy;
+      if (d2 < bestD) { bestD = d2; best = { r: r, c: c }; }
+    }
+  }
+  if (!best) {  /* fallback: any free cell at all */
+    for (r = 0; r < grid.length && !best; r++)
+      for (c = 0; c < COLS; c++)
+        if (grid[r][c] === null) { best = { r: r, c: c }; break; }
+  }
+  if (!best) { projectile = null; return; }
+  if (best.r >= grid.length - 1) grid.push(emptyRow());
+  grid[best.r][best.c] = p.color;
+  var placed = cellCenter(best.r, best.c);
+  projectile = null;
+
+  var group = floodGroup(best.r, best.c);
+  if (group.length >= 3) {
+    for (i = 0; i < group.length; i++) {
+      var gp = cellCenter(group[i].r, group[i].c);
+      spawnPopParticles(gp.x, gp.y, p.color);
+      grid[group[i].r][group[i].c] = null;
+    }
+    score += group.length * 10;
+    addFloater(placed.x, placed.y, '+' + (group.length * 10), '#ffe066');
+    sfxPop(group.length);
+    dropDisconnected();
+  } else {
+    sfxThunk();
+    spawnPopParticles(placed.x, placed.y, p.color);
+    particles.length = Math.max(0, particles.length - 6); /* thunk = tiny puff only */
+  }
+  saveHi();
+
+  if (gridIsEmpty()) {
+    var bonus = 100 * level + shotsLeft * 5;
+    score += bonus;
+    saveHi();
+    addFloater(W / 2, H * 0.4, 'BONUS +' + bonus, '#7bed6a');
+    gameOver(true);
+    return;
+  }
+  if (anyBubblePastDanger()) { gameOver(false); return; }
+
+  shotsLeft -= 1;
+  if (shotsLeft <= 0) {
+    pendingDescend = true;
+    descendTimer = 0.5;         /* creak + shudder first, then it drops */
+    sfxCreak();
+  }
+}
+function descendNow() {
+  pendingDescend = false;
+  grid.unshift(randomRow());
+  var last = grid[grid.length - 1], allEmpty = true, i;
+  for (i = 0; i < COLS; i++) if (last[i] !== null) { allEmpty = false; break; }
+  if (allEmpty && grid.length > 12) grid.pop();
+  shotsLeft = SHOTS_PER_DROP;
+  beep(120, 0.16, 'sine', 0.14, 60);
+  if (anyBubblePastDanger()) gameOver(false);
+}
+
+/* ---------- update ---------- */
+function updateProjectile(dt) {
+  var p = projectile;
+  var dist = Math.sqrt(p.vx * p.vx + p.vy * p.vy) * dt;
+  var steps = Math.max(1, Math.ceil(dist / (R * 0.45)));
+  var sdt = dt / steps, s;
+  for (s = 0; s < steps; s++) {
+    p.x += p.vx * sdt;
+    p.y += p.vy * sdt;
+    if (p.x < gridLeft + R) { p.x = gridLeft + R; p.vx = Math.abs(p.vx); sfxBounce(); }
+    else if (p.x > gridRight - R) { p.x = gridRight - R; p.vx = -Math.abs(p.vx); sfxBounce(); }
+    if (p.y - R <= gridTop) { p.y = gridTop + R; snapProjectile(p); return; }
+    var r, c, ctr, dx, dy, rr = (2 * R - 2) * (2 * R - 2);
+    for (r = 0; r < grid.length; r++) {
+      var hit = false;
+      for (c = 0; c < COLS; c++) {
+        if (grid[r][c] === null) continue;
+        ctr = cellCenter(r, c);
+        dx = ctr.x - p.x; dy = ctr.y - p.y;
+        if (dx * dx + dy * dy < rr) { hit = true; break; }
+      }
+      if (hit) { snapProjectile(p); return; }
+    }
+  }
+}
+function update(dt) {
+  elapsed += dt;
+  if (state === 'play') {
+    var turn = 1.9 * dt;
+    if (keys.ArrowLeft || keys.KeyA) aimAngle = Math.max(-Math.PI + 0.18, aimAngle - turn);
+    if (keys.ArrowRight || keys.KeyD) aimAngle = Math.min(-0.18, aimAngle + turn);
+    if (projectile) updateProjectile(dt);
+    if (pendingDescend) {
+      descendTimer -= dt;
+      if (descendTimer <= 0 && !projectile) descendNow();
+    }
+  }
+  var i;
+  for (i = particles.length - 1; i >= 0; i--) {
+    var pt = particles[i];
+    pt.life -= dt;
+    if (pt.life <= 0) { particles.splice(i, 1); continue; }
+    pt.vy += 520 * dt;
+    pt.x += pt.vx * dt; pt.y += pt.vy * dt;
+  }
+  for (i = falling.length - 1; i >= 0; i--) {
+    var f = falling[i];
+    f.vy += 1750 * dt;
+    f.y += f.vy * dt;
+    if (f.y - R > H + 30) falling.splice(i, 1);
+  }
+  for (i = floaters.length - 1; i >= 0; i--) {
+    var fl = floaters[i];
+    fl.life -= dt; fl.y -= 42 * dt;
+    if (fl.life <= 0) floaters.splice(i, 1);
+  }
+}
+
+/* ---------- drawing ---------- */
+function drawBubble(x, y, r, colorIdx, alpha) {
+  var pal = PALETTE[colorIdx];
+  ctx.save();
+  ctx.globalAlpha = (alpha == null ? 1 : alpha);
+  ctx.beginPath();
+  ctx.arc(x, y + r * 0.10, r * 0.96, 0, Math.PI * 2);
+  ctx.fillStyle = 'rgba(0,0,0,0.30)';
+  ctx.fill();
+  var g = ctx.createRadialGradient(x - r * 0.38, y - r * 0.42, r * 0.12, x, y, r);
+  g.addColorStop(0, pal.light);
+  g.addColorStop(0.45, pal.base);
+  g.addColorStop(1, pal.dark);
+  ctx.beginPath();
+  ctx.arc(x, y, r * 0.94, 0, Math.PI * 2);
+  ctx.fillStyle = g;
+  ctx.fill();
+  ctx.lineWidth = Math.max(1, r * 0.07);
+  ctx.strokeStyle = pal.dark;
+  ctx.stroke();
+  ctx.beginPath();
+  ctx.ellipse(x - r * 0.36, y - r * 0.44, r * 0.26, r * 0.15, -0.6, 0, Math.PI * 2);
+  ctx.fillStyle = 'rgba(255,255,255,0.85)';
+  ctx.fill();
+  ctx.beginPath();
+  ctx.arc(x + r * 0.30, y + r * 0.34, r * 0.10, 0, Math.PI * 2);
+  ctx.fillStyle = 'rgba(255,255,255,0.28)';
+  ctx.fill();
+  ctx.restore();
+}
+function rr(x, y, w, h, rad) {
+  ctx.beginPath();
+  ctx.moveTo(x + rad, y);
+  ctx.arcTo(x + w, y, x + w, y + h, rad);
+  ctx.arcTo(x + w, y + h, x, y + h, rad);
+  ctx.arcTo(x, y + h, x, y, rad);
+  ctx.arcTo(x, y, x + w, y, rad);
+  ctx.closePath();
+}
+function drawAimGuide() {
+  var x = shooterX, y = shooterY;
+  var dx = Math.cos(aimAngle), dy = Math.sin(aimAngle);
+  var remaining = R * 14, bounces = 1, guard = 0;
+  ctx.save();
+  ctx.fillStyle = 'rgba(255,255,255,0.75)';
+  while (remaining > 0 && guard++ < 4) {
+    var tWall = Infinity, tTop = Infinity;
+    if (dx > 0.0001) tWall = (gridRight - R - x) / dx;
+    else if (dx < -0.0001) tWall = (gridLeft + R - x) / dx;
+    if (dy < -0.0001) tTop = (gridTop + R - y) / dy;
+    var seg = Math.min(remaining, tWall, tTop);
+    if (!(seg > 0)) break;
+    var stepLen = R * 0.92, d;
+    for (d = stepLen * 0.6; d < seg; d += stepLen) {
+      ctx.beginPath();
+      ctx.arc(x + dx * d, y + dy * d, Math.max(2, R * 0.11), 0, Math.PI * 2);
+      ctx.fill();
+    }
+    x += dx * seg; y += dy * seg;
+    remaining -= seg;
+    if (seg === tTop || remaining <= 0) break;
+    if (seg === tWall && bounces > 0) { dx = -dx; bounces--; continue; }
+    break;
+  }
+  ctx.restore();
+}
+function drawLauncher() {
+  /* base */
+  ctx.save();
+  ctx.fillStyle = '#232a4d';
+  ctx.strokeStyle = '#46508a';
+  ctx.lineWidth = 2;
+  rr(shooterX - R * 2.1, shooterY + R * 0.75, R * 4.2, R * 1.05, R * 0.4);
+  ctx.fill(); ctx.stroke();
+  ctx.fillStyle = '#39406e';
+  ctx.beginPath();
+  ctx.arc(shooterX, shooterY + R * 0.35, R * 1.15, 0, Math.PI * 2);
+  ctx.fill(); ctx.stroke();
+  /* barrel, rotated to aim */
+  ctx.translate(shooterX, shooterY);
+  ctx.rotate(aimAngle + Math.PI / 2);
+  ctx.fillStyle = '#59639c';
+  rr(-R * 0.34, -R * 1.7, R * 0.68, R * 1.7, R * 0.3);
+  ctx.fill();
+  ctx.fillStyle = '#7c88c4';
+  rr(-R * 0.34, -R * 1.7, R * 0.68, R * 0.34, R * 0.16);
+  ctx.fill();
+  ctx.restore();
+  /* loaded + next bubble */
+  if (state === 'play' && !projectile) drawBubble(shooterX, shooterY, R, currentColor, 1);
+  else if (state === 'menu') drawBubble(shooterX, shooterY, R, currentColor, 1);
+  if (state === 'play') {
+    var nx = shooterX + R * 3.35, ny = shooterY + R * 0.55;
+    ctx.save();
+    ctx.fillStyle = 'rgba(255,255,255,0.65)';
+    ctx.font = '700 ' + Math.max(9, R * 0.5) + 'px system-ui, sans-serif';
+    ctx.textAlign = 'center'; ctx.textBaseline = 'bottom';
+    ctx.fillText('NEXT', nx, ny - R * 0.72);
+    ctx.restore();
+    drawBubble(nx, ny, R * 0.62, nextColor, 1);
+  }
+}
+function drawHUD() {
+  ctx.save();
+  ctx.fillStyle = 'rgba(4,6,18,0.55)';
+  ctx.fillRect(0, 0, W, 46);
+  ctx.fillStyle = '#ffffff';
+  ctx.textBaseline = 'middle';
+  ctx.textAlign = 'left';
+  ctx.font = '700 16px system-ui, sans-serif';
+  ctx.fillText('Score ' + score, 12, 16);
+  ctx.font = '500 11px system-ui, sans-serif';
+  ctx.fillStyle = 'rgba(255,255,255,0.65)';
+  ctx.fillText('Best ' + hi, 12, 34);
+  ctx.textAlign = 'center';
+  ctx.fillStyle = '#ffffff';
+  ctx.font = '700 16px system-ui, sans-serif';
+  ctx.fillText('Level ' + level, W / 2, 16);
+  ctx.font = '500 11px system-ui, sans-serif';
+  ctx.fillStyle = 'rgba(255,255,255,0.65)';
+  ctx.fillText(activeColorCount() + ' colors', W / 2, 34);
+  ctx.textAlign = 'right';
+  ctx.fillStyle = shotsLeft <= 2 ? '#ff8080' : '#ffffff';
+  ctx.font = '700 16px system-ui, sans-serif';
+  ctx.fillText('Drop in ' + shotsLeft, W - 64, 16);
+  var i, px;
+  for (i = 0; i < SHOTS_PER_DROP; i++) {
+    px = W - 70 - (SHOTS_PER_DROP - 1 - i) * 11;
+    ctx.beginPath();
+    ctx.arc(px, 34, 4, 0, Math.PI * 2);
+    ctx.fillStyle = i < shotsLeft ? '#ffd23f' : 'rgba(255,255,255,0.22)';
+    ctx.fill();
+  }
+  ctx.restore();
+}
+function drawPanel(title, titleColor, lines, prompt) {
+  var pw = Math.min(W - 28, 430), ph = 64 + lines.length * 26 + 58;
+  var px = (W - pw) / 2, py = (H - ph) / 2;
+  ctx.save();
+  ctx.fillStyle = 'rgba(3,5,16,0.66)';
+  ctx.fillRect(0, 0, W, H);
+  rr(px, py, pw, ph, 18);
+  ctx.fillStyle = 'rgba(16,20,46,0.96)';
+  ctx.fill();
+  ctx.lineWidth = 2; ctx.strokeStyle = 'rgba(140,160,255,0.55)'; ctx.stroke();
+  ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+  ctx.fillStyle = titleColor;
+  ctx.font = '800 ' + Math.min(40, pw * 0.105) + 'px system-ui, sans-serif';
+  ctx.fillText(title, W / 2, py + 40);
+  ctx.font = '500 15px system-ui, sans-serif';
+  ctx.fillStyle = 'rgba(255,255,255,0.88)';
+  var i;
+  for (i = 0; i < lines.length; i++) ctx.fillText(lines[i], W / 2, py + 78 + i * 26);
+  if (Math.floor(elapsed * 1.6) % 2 === 0) {
+    ctx.font = '700 16px system-ui, sans-serif';
+    ctx.fillStyle = '#ffd23f';
+    ctx.fillText(prompt, W / 2, py + ph - 26);
+  }
+  ctx.restore();
+}
+function draw() {
+  var g = ctx.createLinearGradient(0, 0, 0, H);
+  g.addColorStop(0, '#131a3d');
+  g.addColorStop(0.55, '#0b1026');
+  g.addColorStop(1, '#070a1a');
+  ctx.fillStyle = g;
+  ctx.fillRect(0, 0, W, H);
+  /* decorative star-dots (deterministic) */
+  ctx.save();
+  ctx.fillStyle = 'rgba(255,255,255,0.20)';
+  var i, sx, sy;
+  for (i = 0; i < 42; i++) {
+    sx = (Math.sin(i * 127.1) * 0.5 + 0.5) * W;
+    sy = (Math.sin(i * 311.7) * 0.5 + 0.5) * H;
+    ctx.fillRect(sx, sy, 2, 2);
+  }
+  ctx.restore();
+
+  /* play field + walls */
+  ctx.save();
+  rr(gridLeft - 7, gridTop - 6, gridWidth + 14, shooterY - gridTop + R * 1.6, 12);
+  ctx.fillStyle = 'rgba(255,255,255,0.045)';
+  ctx.fill();
+  ctx.lineWidth = 2;
+  ctx.strokeStyle = 'rgba(150,170,255,0.30)';
+  ctx.stroke();
+  ctx.beginPath();
+  ctx.moveTo(gridLeft - 7, gridTop - 4);
+  ctx.lineTo(gridRight + 7, gridTop - 4);
+  ctx.strokeStyle = 'rgba(255,255,255,0.5)';
+  ctx.stroke();
+  /* danger line */
+  ctx.setLineDash([9, 7]);
+  ctx.beginPath();
+  ctx.moveTo(gridLeft - 4, dangerY);
+  ctx.lineTo(gridRight + 4, dangerY);
+  ctx.lineWidth = 2;
+  ctx.strokeStyle = (state === 'play' && Math.floor(elapsed * 2) % 2 === 0) ? 'rgba(255,70,80,0.95)' : 'rgba(255,70,80,0.55)';
+  ctx.stroke();
+  ctx.setLineDash([]);
+  ctx.font = '700 10px system-ui, sans-serif';
+  ctx.textAlign = 'left'; ctx.textBaseline = 'bottom';
+  ctx.fillStyle = 'rgba(255,120,130,0.9)';
+  ctx.fillText('DANGER', gridLeft, dangerY - 3);
+  ctx.restore();
+
+  if (state === 'play' && !projectile && !pendingDescend) drawAimGuide();
+
+  /* settled bubbles (shudder while a descent is warning) */
+  ctx.save();
+  if (pendingDescend) ctx.translate((Math.random() - 0.5) * 4, (Math.random() - 0.5) * 2);
+  var r, c, ctr;
+  for (r = 0; r < grid.length; r++)
+    for (c = 0; c < COLS; c++)
+      if (grid[r][c] !== null) {
+        ctr = cellCenter(r, c);
+        drawBubble(ctr.x, ctr.y, R, grid[r][c], 1);
+      }
+  ctx.restore();
+
+  for (i = 0; i < falling.length; i++)
+    drawBubble(falling[i].x, falling[i].y, R, falling[i].color, 0.95);
+
+  if (projectile) drawBubble(projectile.x, projectile.y, R, projectile.color, 1);
+
+  for (i = 0; i < particles.length; i++) {
+    var pt = particles[i];
+    ctx.save();
+    ctx.globalAlpha = Math.max(0, pt.life / pt.maxLife);
+    ctx.beginPath();
+    ctx.arc(pt.x, pt.y, pt.r, 0, Math.PI * 2);
+    ctx.fillStyle = PALETTE[pt.color].base;
+    ctx.fill();
+    ctx.restore();
+  }
+
+  drawLauncher();
+
+  ctx.save();
+  ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+  for (i = 0; i < floaters.length; i++) {
+    var fl = floaters[i];
+    ctx.globalAlpha = Math.min(1, fl.life * 1.6);
+    ctx.font = '800 17px system-ui, sans-serif';
+    ctx.fillStyle = fl.color;
+    ctx.fillText(fl.text, fl.x, fl.y);
+  }
+  ctx.restore();
+
+  drawHUD();
+
+  if (state === 'play') {
+    ctx.save();
+    ctx.textAlign = 'center'; ctx.textBaseline = 'bottom';
+    ctx.font = '500 11px system-ui, sans-serif';
+    ctx.fillStyle = 'rgba(255,255,255,0.45)';
+    ctx.fillText('Drag to aim · release to shoot · ←/→ fine aim', W / 2, H - 4);
+    ctx.restore();
+  }
+
+  if (state === 'menu') {
+    var deco = [0, 1, 2, 3, 1];
+    for (i = 0; i < deco.length; i++)
+      drawBubble(W / 2 + (i - 2) * R * 2.15, H * 0.20, R * 0.92, deco[i], 1);
+    drawPanel('BUBBLE SHOOTER', '#ffd23f', [
+      'Drag to aim — the guide bounces off walls.',
+      'Release to shoot. Match 3+ of a color to pop.',
+      'Cut bubbles loose from the ceiling: +20 each.',
+      'Every ' + SHOTS_PER_DROP + ' shots the ceiling drops a row!',
+      'If a bubble crosses the DANGER line, it is over.',
+      'Best score: ' + hi
+    ], 'Tap or press Space to play');
+  } else if (state === 'over' && win) {
+    drawPanel('LEVEL ' + level + ' CLEARED! 🎉', '#7bed6a', [
+      'The whole cluster is gone.',
+      'Score: ' + score,
+      'Best:  ' + hi,
+      'Next level: one more row' + (level === 1 ? ' and a 5th color!' : '.')
+    ], 'Tap or press Space for Level ' + (level + 1));
+  } else if (state === 'over') {
+    drawPanel('GAME OVER', '#ff6b81', [
+      'A bubble crossed the danger line.',
+      'You reached Level ' + level + '.',
+      'Score: ' + score,
+      'Best:  ' + hi
+    ], 'Tap or press Space to try again');
+  }
+}
+
+/* ---------- main loop ---------- */
+var lastTime = performance.now();
+function frame(now) {
+  var dt = Math.min((now - lastTime) / 1000, 0.033);
+  if (dt < 0) dt = 0;
+  lastTime = now;
+  update(dt);
+  draw();
+  requestAnimationFrame(frame);
+}
+
+/* ---------- input ---------- */
+canvas.addEventListener('pointerdown', function (e) {
+  e.preventDefault();
+  ensureAudio();
+  if (state !== 'play') { startGame(); return; }
+  aiming = true;
+  setAimFromPoint(e.clientX, e.clientY);
+});
+window.addEventListener('pointermove', function (e) {
+  if (state !== 'play') return;
+  if (aiming || e.pointerType === 'mouse') setAimFromPoint(e.clientX, e.clientY);
+});
+window.addEventListener('pointerup', function (e) {
+  if (e.target === muteBtn) { aiming = false; return; }
+  if (state !== 'play' || !aiming) return;
+  setAimFromPoint(e.clientX, e.clientY);
+  aiming = false;
+  fire();
+});
+window.addEventListener('pointercancel', function () { aiming = false; });
+canvas.addEventListener('contextmenu', function (e) { e.preventDefault(); });
+
+window.addEventListener('keydown', function (e) {
+  if (e.code === 'Space' || e.code.indexOf('Arrow') === 0) e.preventDefault();
+  ensureAudio();
+  keys[e.code] = true;
+  if (e.repeat) return;
+  if (e.code === 'Space') {
+    if (state !== 'play') startGame(); else fire();
+  } else if (e.code === 'KeyR') {
+    restartRun();
+  } else if (e.code === 'KeyM') {
+    toggleMute();
+  }
+});
+window.addEventListener('keyup', function (e) { keys[e.code] = false; });
+
+window.addEventListener('resize', computeLayout);
+window.addEventListener('orientationchange', function () { setTimeout(computeLayout, 60); });
+
+/* ---------- boot ---------- */
+computeLayout();
+resetLevel();
+window.__game = {
+  get state() { return state; },
+  get score() { return score; },
+  start: function () { startGame(); }
+};
+requestAnimationFrame(frame);
+</script>
+</body>
+</html>
