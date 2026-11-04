@@ -1,0 +1,405 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, user-scalable=no">
+<meta name="theme-color" content="#79c7e3">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<title>Coast Runner</title>
+<style>
+  * { margin:0; padding:0; box-sizing:border-box; }
+  html, body { width:100%; height:100%; overflow:hidden; background:#79c7e3;
+    font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+    touch-action:none; user-select:none; -webkit-user-select:none; -webkit-tap-highlight-color: transparent; }
+  canvas { position:fixed; inset:0; display:block; touch-action:none; }
+  #muteBtn { position:fixed; top:10px; right:10px; z-index:10; width:48px; height:48px; border-radius:12px;
+    border:2px solid rgba(255,255,255,.7); background:rgba(30,60,90,.45); color:#fff; font-size:22px;
+    line-height:1; cursor:pointer; display:flex; align-items:center; justify-content:center; padding:0; }
+  .ctl { position:fixed; bottom:22px; z-index:10; width:70px; height:70px; border-radius:50%;
+    border:2px solid rgba(255,255,255,.7); background:rgba(30,60,90,.4); color:#fff; font-size:26px;
+    display:flex; align-items:center; justify-content:center; }
+  .ctl:active { background:rgba(255,255,255,.35); }
+  #btnL { left:16px; } #btnR { left:100px; }
+  #btnBrake { right:16px; width:84px; height:84px; background:rgba(220,90,40,.55); font-size:17px; font-weight:700; }
+</style>
+</head>
+<body>
+<canvas id="game"></canvas>
+<button id="muteBtn" aria-label="Toggle sound">🔊</button>
+<button class="ctl" id="btnL">◀</button>
+<button class="ctl" id="btnR">▶</button>
+<button class="ctl" id="btnBrake">BRAKE</button>
+<script>
+// iOS audio routing: Web Audio defaults to the "ambient" channel, which the
+// iPhone silent switch mutes entirely. Route it to the media/playback
+// channel (iOS 17+ Audio Session API) on the first user gesture and inside
+// audio init, so game music/SFX play even with silent mode on.
+function iosPlaybackSession() {
+  try { if ('audioSession' in navigator) navigator.audioSession.type = 'playback'; } catch (e) {}
+}
+document.addEventListener('pointerdown', iosPlaybackSession, true);
+document.addEventListener('touchstart', iosPlaybackSession, true);
+"use strict";
+/* COAST RUNNER — original pseudo-3D coastal racer. Auto-throttle, steer,
+   mind the traffic, beat the checkpoint clock.
+   Fairness (verified by the ?qa=1 self-check): the total checkpoint time
+   budget is >= 1.25x the theoretical minimum completion time at top speed,
+   and traffic is generated so a passable lateral gap always exists. */
+const VW = 420, VH = 720;
+const canvas = document.getElementById("game"), ctx = canvas.getContext("2d");
+let W = 0, H = 0, DPR = 1, scale = 1, ox = 0, oy = 0;
+function resize() {
+  DPR = Math.min(window.devicePixelRatio || 1, 2);
+  W = window.innerWidth; H = window.innerHeight;
+  canvas.width = Math.round(W * DPR); canvas.height = Math.round(H * DPR);
+  canvas.style.width = W + "px"; canvas.style.height = H + "px";
+  scale = Math.min(W / VW, H / VH) * DPR; ox = (W * DPR - VW * scale) / 2; oy = (H * DPR - VH * scale) / 2;
+}
+window.addEventListener("resize", resize); resize();
+
+/* ---------------- audio ---------------- */
+let actx = null, muted = false, musicTimer = null, mStep = 0;
+function initAudio() {
+  iosPlaybackSession();
+  if (!actx) { try { const AC = window.AudioContext || window.webkitAudioContext; if (AC) actx = new AC(); } catch (e) {} }
+  if (actx && actx.state === "suspended") actx.resume();
+  if (actx && !musicTimer) musicTimer = setInterval(musicTick, 150);
+}
+function tone(freq, dur, type, vol, when, slide) {
+  if (!actx || muted) return;
+  const t = when || actx.currentTime, o = actx.createOscillator(), g = actx.createGain();
+  o.type = type || "triangle"; o.frequency.setValueAtTime(freq, t);
+  if (slide) o.frequency.exponentialRampToValueAtTime(Math.max(40, slide), t + dur);
+  g.gain.setValueAtTime(vol || 0.15, t);
+  g.gain.exponentialRampToValueAtTime(0.001, t + dur);
+  o.connect(g); g.connect(actx.destination); o.start(t); o.stop(t + dur + 0.02);
+}
+const BASS = [131, 131, 0, 131, 0, 131, 147, 0, 165, 165, 0, 165, 0, 147, 131, 0];
+const LEAD = [330, 0, 392, 0, 494, 0, 392, 0, 440, 0, 392, 330, 294, 0, 330, 0];
+function musicTick() {
+  if (!actx || muted || state !== "race") return;
+  const b = BASS[mStep % 16], l = LEAD[mStep % 16], t = actx.currentTime;
+  if (b) tone(b, 0.13, "triangle", 0.15, t);
+  if (l) tone(l, 0.11, "square", 0.045, t);
+  mStep++;
+}
+function sfx(name) {
+  if (!actx || muted) return; const t = actx.currentTime;
+  if (name === "crash") tone(140, 0.35, "sawtooth", 0.2, t, 50);
+  else if (name === "checkpoint") { tone(660, 0.12, "square", 0.14, t); tone(990, 0.2, "square", 0.14, t + 0.1); }
+  else if (name === "finish") { [523, 659, 784, 1047, 1319].forEach((f, i) => tone(f, 0.16, "square", 0.12, t + i * 0.11)); }
+  else if (name === "go") tone(880, 0.25, "square", 0.14, t);
+}
+
+/* ---------------- course ---------------- */
+const SEG_LEN = 200;                 // world units per segment
+const MAX_SPEED = SEG_LEN * 60;      // units/s at full throttle
+const DRAW_DIST = 90, CAM_H = 1050, CAM_DEPTH = 0.84;
+const CHECKPOINT_EVERY = 150;        // segments between checkpoints
+const START_TIME = 40, CP_BONUS = 26;
+// Course sections: [segments, curve, zone] — beach, palms, desert, beach.
+const SECTIONS = [
+  [60, 0, 0], [70, 1, 0], [60, -2, 0], [70, 0, 1], [80, 3, 1], [70, -3, 1],
+  [60, 0, 2], [80, 2, 2], [70, -1, 2], [80, 0, 0], [70, 4, 0], [70, -4, 1],
+  [60, 0, 1], [80, 2, 2], [80, -2, 0], [60, 0, 0]
+];
+const segments = [];
+(function buildCourse() {
+  let curve = 0;
+  SECTIONS.forEach(([len, cv, zone], si) => {
+    for (let i = 0; i < len; i++) {
+      const n = segments.length;
+      const ease = Math.min(1, i / 25, (len - i) / 25);
+      segments.push({ i: n, curve: cv * ease, zone, cars: [], scenery: (n % 9 === 0) ? (zone === 2 ? "cactus" : zone === 1 ? "palm" : "sign") : null,
+        checkpoint: n > 0 && n % CHECKPOINT_EVERY === 0, finish: false });
+    }
+  });
+  segments[segments.length - 1].finish = true;
+  // Traffic: place cars in clusters; never let a 2-segment window span the
+  // full road width — at least one lane band stays empty so a gap exists.
+  let clusterAt = 40;
+  while (clusterAt < segments.length - 30) {
+    const lanes = [-0.62, 0, 0.62];
+    const used = new Set();
+    const nCars = 1 + Math.floor(Math.random() * 2);
+    for (let c = 0; c < nCars; c++) {
+      const lane = lanes[Math.floor(Math.random() * lanes.length)];
+      if (used.has(lane)) continue; used.add(lane);
+      segments[clusterAt + c * 2].cars.push({ offset: lane, speed: MAX_SPEED * (0.32 + Math.random() * 0.16), color: ["#e74c3c", "#f1c40f", "#9b59b6", "#ecf0f1"][Math.floor(Math.random() * 4)] });
+    }
+    clusterAt += 26 + Math.floor(Math.random() * 22);
+  }
+})();
+const COURSE_LEN = segments.length * SEG_LEN;
+// A lane band counts as occupied if a car sits within 0.42 of its centre.
+function gapExists(segIdx) {
+  const lanes = [-0.62, 0, 0.62];
+  for (const l of lanes) {
+    let blocked = false;
+    for (let d = 0; d <= 1; d++) {
+      const s = segments[segIdx + d]; if (!s) continue;
+      for (const c of s.cars) if (Math.abs(c.offset - l) < 0.42) blocked = true;
+    }
+    if (!blocked) return true;
+  }
+  return false;
+}
+function fairnessCheck() {
+  const minTime = COURSE_LEN / MAX_SPEED;
+  const nCP = Math.floor((segments.length - 1) / CHECKPOINT_EVERY);
+  const budget = START_TIME + nCP * CP_BONUS;
+  const ratio = budget / minTime;
+  let gapFail = -1;
+  for (let i = 0; i < segments.length; i++) if (segments[i].cars.length && !gapExists(i)) { gapFail = i; break; }
+  const rows = [
+    "Course: " + segments.length + " segments = " + COURSE_LEN + " units; top speed " + MAX_SPEED + " u/s",
+    "Theoretical minimum completion: " + minTime.toFixed(1) + "s",
+    "Time budget: " + START_TIME + "s start + " + nCP + " checkpoints x " + CP_BONUS + "s = " + budget + "s",
+    "Budget / minimum = " + ratio.toFixed(2) + "x (need >= 1.25) — " + (ratio >= 1.25 ? "PASS" : "FAIL"),
+    "Traffic gap scan: " + (gapFail < 0 ? "every car segment leaves a free lane band — PASS" : "FAIL at segment " + gapFail)
+  ];
+  return { ok: ratio >= 1.25 && gapFail < 0, rows };
+}
+const QA_MODE = /[?&]qa=1/.test(location.search);
+
+/* ---------------- state ---------------- */
+let state = "menu"; // menu, race, done
+let position, speed, playerX, timeLeft, cpPassed, resultMsg, totalTime;
+function resetRace() {
+  position = 0; speed = 0; playerX = 0; timeLeft = START_TIME; cpPassed = 0; totalTime = 0; resultMsg = "";
+}
+resetRace();
+const keys = { left: false, right: false, brake: false };
+let flashMsg = "", flashT = 0;
+
+/* ---------------- update ---------------- */
+function update(dt) {
+  if (state !== "race") return;
+  totalTime += dt; timeLeft -= dt;
+  if (flashT > 0) flashT -= dt;
+  const seg = segments[Math.floor(position / SEG_LEN) % segments.length];
+  const accel = MAX_SPEED / 3.2, brakeDecel = MAX_SPEED / 0.9, offRoadDecel = MAX_SPEED / 1.1;
+  if (keys.brake) speed -= brakeDecel * dt;
+  else speed += accel * dt;
+  const offRoad = Math.abs(playerX) > 1;
+  if (offRoad && speed > MAX_SPEED / 4) speed -= offRoadDecel * dt;
+  speed = Math.max(0, Math.min(MAX_SPEED, speed));
+  // steering + mild centrifugal push from curves
+  const steer = (keys.right ? 1 : 0) - (keys.left ? 1 : 0);
+  playerX += steer * dt * 2.1 * (0.35 + 0.65 * speed / MAX_SPEED);
+  playerX -= seg.curve * dt * 0.62 * (speed / MAX_SPEED);
+  playerX = Math.max(-2.4, Math.min(2.4, playerX));
+  const prevSeg = Math.floor(position / SEG_LEN);
+  position += speed * dt;
+  const newSeg = Math.floor(position / SEG_LEN);
+  // traffic movement + collision (checked on the player's segment)
+  for (let i = Math.max(0, newSeg - 1); i <= Math.min(segments.length - 1, newSeg + 1); i++) {
+    for (const c of segments[i].cars) { /* cars are static per segment for simplicity of fairness scan */ }
+  }
+  const pSeg = segments[Math.min(segments.length - 1, newSeg)];
+  if (pSeg) for (const c of pSeg.cars) {
+    if (Math.abs(c.offset - playerX) < 0.34 && speed > c.speed + 60) {
+      speed = c.speed * 0.55; flashMsg = "CRASH!"; flashT = 0.9; sfx("crash");
+    }
+  }
+  // checkpoints & finish
+  for (let i = prevSeg + 1; i <= newSeg && i < segments.length; i++) {
+    if (segments[i].checkpoint) { timeLeft += CP_BONUS; cpPassed++; flashMsg = "CHECKPOINT +" + CP_BONUS + "s"; flashT = 1.2; sfx("checkpoint"); }
+    if (segments[i].finish) {
+      state = "done";
+      const best = parseFloat(localStorage.getItem("coastRunnerBest") || "0");
+      if (!best || totalTime < best) localStorage.setItem("coastRunnerBest", totalTime.toFixed(1));
+      resultMsg = "FINISH! Time " + totalTime.toFixed(1) + "s" + (best && totalTime >= best ? " (best " + best.toFixed(1) + "s)" : " — NEW BEST!");
+      sfx("finish");
+    }
+  }
+  if (timeLeft <= 0 && state === "race") { state = "done"; resultMsg = "OUT OF TIME at checkpoint " + cpPassed + ". Tap to try again."; }
+}
+
+/* ---------------- render ---------------- */
+function project(p, camX, camY, camZ) {
+  p.camera.x = (p.world.x || 0) - camX; p.camera.y = (p.world.y || 0) - camY; p.camera.z = (p.world.z || 0) - camZ;
+  p.screen.scale = CAM_DEPTH / Math.max(1, p.camera.z);
+  p.screen.x = Math.round(VW / 2 + p.screen.scale * p.camera.x * VW / 2);
+  p.screen.y = Math.round(VH * 0.62 - p.screen.scale * p.camera.y * VH / 2);
+  p.screen.w = Math.round(p.screen.scale * 2100 * VW / 2);
+}
+const projCache = segments.map(s => ({ world: { x: 0, y: 0, z: s.i * SEG_LEN }, camera: {}, screen: {} }));
+function renderRoad() {
+  const baseSeg = segments[Math.floor(position / SEG_LEN) % segments.length];
+  const basePct = (position % SEG_LEN) / SEG_LEN;
+  let x = 0, dx = -(baseSeg.curve * basePct);
+  const horizon = VH * 0.62;
+  // sky & sea / scenery backdrop by zone
+  const zone = baseSeg.zone;
+  ctx.fillStyle = zone === 2 ? "#f7d774" : "#79c7e3"; ctx.fillRect(0, 0, VW, horizon);
+  ctx.fillStyle = zone === 2 ? "#e8b04b" : "#3d9bc4";
+  ctx.fillRect(0, horizon - 46, VW, 46); // distant band: dunes or sea
+  ctx.fillStyle = zone === 2 ? "#d99b35" : "#2e86ab"; ctx.fillRect(0, horizon - 8, VW, 8);
+  let maxY = VH;
+  for (let n = 0; n < DRAW_DIST; n++) {
+    const idx = baseSeg.i + n;
+    if (idx >= segments.length) break;
+    const seg = segments[idx], p1 = projCache[idx], p2 = projCache[Math.min(segments.length - 1, idx + 1)];
+    const looped = idx >= segments.length;
+    const camZ = position - 0;
+    project(p1, playerX * 2100 - x, CAM_H, camZ - (looped ? COURSE_LEN : 0));
+    project(p2, playerX * 2100 - x - dx, CAM_H, camZ - (looped ? COURSE_LEN : 0));
+    x += dx; dx += seg.curve;
+    if (p1.camera.z <= CAM_H * CAM_DEPTH || p2.screen.y >= p1.screen.y || p2.screen.y >= maxY) continue;
+    const y1 = p1.screen.y, y2 = p2.screen.y;
+    // ground
+    ctx.fillStyle = seg.zone === 2 ? (Math.floor(idx / 3) % 2 ? "#e0aa4e" : "#e8b45a") : (Math.floor(idx / 3) % 2 ? "#58a84f" : "#62b458");
+    ctx.fillRect(0, y2, VW, y1 - y2);
+    // road trapezoid
+    const r1 = p1.screen.w, r2 = p2.screen.w, cx1 = p1.screen.x, cx2 = p2.screen.x;
+    ctx.fillStyle = Math.floor(idx / 3) % 2 ? "#6b6b74" : "#74747e";
+    poly(cx1 - r1, y1, cx1 + r1, y1, cx2 + r2, y2, cx2 - r2, y2);
+    // rumble strips
+    ctx.fillStyle = Math.floor(idx / 3) % 2 ? "#e8e8e8" : "#d43a2f";
+    poly(cx1 - r1 * 1.14, y1, cx1 - r1, y1, cx2 - r2, y2, cx2 - r2 * 1.14, y2);
+    poly(cx1 + r1, y1, cx1 + r1 * 1.14, y1, cx2 + r2 * 1.14, y2, cx2 + r2, y2);
+    // lane line
+    if (Math.floor(idx / 3) % 2) {
+      ctx.fillStyle = "#f5f5f5";
+      poly(cx1 - r1 * 0.02, y1, cx1 + r1 * 0.02, y1, cx2 + r2 * 0.02, y2, cx2 - r2 * 0.02, y2);
+    }
+    if (seg.checkpoint) {
+      ctx.fillStyle = "#ffd23e"; ctx.font = "bold " + Math.max(8, p1.screen.w * 0.14) + "px sans-serif"; ctx.textAlign = "center";
+      ctx.fillText("▼ CHECKPOINT ▼", cx1, y1 - p1.screen.w * 0.5);
+    }
+    if (seg.finish) {
+      ctx.fillStyle = "#fff"; ctx.font = "bold " + Math.max(8, p1.screen.w * 0.16) + "px sans-serif"; ctx.textAlign = "center";
+      ctx.fillText("🏁 FINISH 🏁", cx1, y1 - p1.screen.w * 0.5);
+    }
+    seg._sx = cx1; seg._sy = y1; seg._sw = r1; seg._vis = true;
+    maxY = y2;
+  }
+  // sprites back-to-front
+  for (let n = DRAW_DIST - 1; n >= 0; n--) {
+    const idx = baseSeg.i + n; if (idx >= segments.length) break;
+    const seg = segments[idx]; if (!seg._vis) continue;
+    if (seg.scenery) drawScenery(seg);
+    for (const c of seg.cars) drawCar(seg._sx + c.offset * seg._sw, seg._sy, seg._sw * 0.34, c.color, false);
+    seg._vis = false;
+  }
+}
+function poly(x1, y1, x2, y2, x3, y3, x4, y4) {
+  ctx.beginPath(); ctx.moveTo(x1, y1); ctx.lineTo(x2, y2); ctx.lineTo(x3, y3); ctx.lineTo(x4, y4); ctx.closePath(); ctx.fill();
+}
+function drawScenery(seg) {
+  const side = seg.i % 2 ? 1 : -1, x = seg._sx + side * seg._sw * 1.5, y = seg._sy, s = seg._sw;
+  if (s < 4) return;
+  if (seg.scenery === "palm") {
+    ctx.strokeStyle = "#7a5230"; ctx.lineWidth = Math.max(1, s * 0.05);
+    ctx.beginPath(); ctx.moveTo(x, y); ctx.quadraticCurveTo(x + s * 0.1, y - s * 0.5, x + s * 0.22, y - s * 0.72); ctx.stroke();
+    ctx.strokeStyle = "#2e9e4f"; ctx.lineWidth = Math.max(1, s * 0.04);
+    for (let f = -2; f <= 2; f++) { ctx.beginPath(); ctx.moveTo(x + s * 0.22, y - s * 0.72); ctx.quadraticCurveTo(x + s * (0.22 + f * 0.16), y - s * (0.86 - Math.abs(f) * 0.05), x + s * (0.22 + f * 0.3), y - s * 0.68); ctx.stroke(); }
+  } else if (seg.scenery === "cactus") {
+    ctx.fillStyle = "#2e8b57"; const w = s * 0.12, h = s * 0.55;
+    ctx.fillRect(x - w / 2, y - h, w, h); ctx.fillRect(x - w * 1.5, y - h * 0.7, w * 0.7, h * 0.18); ctx.fillRect(x + w * 0.8, y - h * 0.55, w * 0.7, h * 0.18);
+  } else {
+    ctx.fillStyle = "#fff"; ctx.fillRect(x - s * 0.16, y - s * 0.3, s * 0.32, s * 0.2);
+    ctx.fillStyle = "#d43a2f"; ctx.fillRect(x - s * 0.16, y - s * 0.3, s * 0.32, s * 0.06);
+  }
+}
+function drawCar(cx, baseY, w, color, isPlayer) {
+  const h = w * 0.52;
+  ctx.fillStyle = "rgba(0,0,0,.25)"; ctx.beginPath(); ctx.ellipse(cx, baseY, w * 0.55, h * 0.16, 0, 0, 7); ctx.fill();
+  ctx.fillStyle = color; ctx.beginPath(); ctx.roundRect(cx - w / 2, baseY - h, w, h * 0.62, w * 0.08); ctx.fill();
+  ctx.fillStyle = isPlayer ? "#ffe27a" : "#bfe8f5"; ctx.beginPath(); ctx.roundRect(cx - w * 0.32, baseY - h * 1.28, w * 0.64, h * 0.5, w * 0.07); ctx.fill();
+  ctx.fillStyle = "#222"; ctx.fillRect(cx - w * 0.46, baseY - h * 0.42, w * 0.2, h * 0.3); ctx.fillRect(cx + w * 0.26, baseY - h * 0.42, w * 0.2, h * 0.3);
+  ctx.fillStyle = isPlayer ? "#ffd23e" : "#ffef9e"; ctx.fillRect(cx - w * 0.4, baseY - h * 0.6, w * 0.16, h * 0.14); ctx.fillRect(cx + w * 0.24, baseY - h * 0.6, w * 0.16, h * 0.14);
+  if (isPlayer) { ctx.fillStyle = "#fff"; ctx.font = "bold " + Math.round(w * 0.2) + "px sans-serif"; ctx.textAlign = "center"; ctx.fillText("YOU", cx, baseY - h * 0.82); }
+}
+function draw() {
+  ctx.setTransform(1, 0, 0, 1, 0, 0);
+  ctx.fillStyle = "#79c7e3"; ctx.fillRect(0, 0, canvas.width, canvas.height);
+  ctx.setTransform(scale, 0, 0, scale, ox, oy);
+  if (state === "menu") {
+    const g = ctx.createLinearGradient(0, 0, 0, VH); g.addColorStop(0, "#79c7e3"); g.addColorStop(0.6, "#cfeefb"); g.addColorStop(0.61, "#62b458"); g.addColorStop(1, "#58a84f");
+    ctx.fillStyle = g; ctx.fillRect(0, 0, VW, VH);
+    ctx.fillStyle = "#6b6b74"; poly(120, VH, 300, VH, 250, 430, 170, 430);
+    drawCar(VW / 2, 640, 150, "#2255aa", true);
+    ctx.fillStyle = "#123"; ctx.font = "bold 42px sans-serif"; ctx.textAlign = "center";
+    ctx.fillText("COAST RUNNER", VW / 2, 130);
+    ctx.font = "16px sans-serif";
+    ctx.fillText("Auto-throttle cruising: ◀ ▶ steer, BRAKE for traffic.", VW / 2, 168);
+    ctx.fillText("Cross checkpoints to refill the clock.", VW / 2, 192);
+    ctx.fillText("Grassy shoulders slow you down — stay on the road!", VW / 2, 216);
+    const best = localStorage.getItem("coastRunnerBest");
+    if (best) { ctx.font = "bold 17px sans-serif"; ctx.fillText("Best finish: " + best + "s", VW / 2, 258); }
+    ctx.font = "bold 20px sans-serif"; ctx.fillText("TAP TO START", VW / 2, 330);
+    if (QA_MODE) drawQA();
+    return;
+  }
+  renderRoad();
+  // player car (fixed at bottom, shifts with playerX)
+  drawCar(VW / 2 + playerX * 62, VH - 118, 128, "#2255aa", true);
+  // HUD
+  ctx.fillStyle = "rgba(0,0,0,.4)"; ctx.fillRect(10, 10, 168, 58);
+  ctx.fillStyle = timeLeft < 10 ? "#ff7b72" : "#fff"; ctx.font = "bold 24px sans-serif"; ctx.textAlign = "left";
+  ctx.fillText("⏱ " + Math.max(0, timeLeft).toFixed(1), 20, 40);
+  ctx.font = "14px sans-serif"; ctx.fillStyle = "#ffd23e";
+  ctx.fillText("Checkpoints: " + cpPassed, 20, 60);
+  ctx.fillStyle = "rgba(0,0,0,.4)"; ctx.fillRect(VW - 128, 10, 118, 58);
+  ctx.fillStyle = "#fff"; ctx.font = "bold 24px sans-serif"; ctx.textAlign = "right";
+  ctx.fillText(Math.round(speed / MAX_SPEED * 180) + "", VW - 20, 40);
+  ctx.font = "12px sans-serif"; ctx.fillText("km/h", VW - 20, 58);
+  if (flashT > 0) { ctx.fillStyle = "#ffd23e"; ctx.font = "bold 30px sans-serif"; ctx.textAlign = "center"; ctx.fillText(flashMsg, VW / 2, 130); }
+  if (state === "done") {
+    ctx.fillStyle = "rgba(0,0,0,.55)"; ctx.fillRect(0, 0, VW, VH);
+    ctx.fillStyle = "#fff"; ctx.font = "bold 26px sans-serif"; ctx.textAlign = "center";
+    ctx.fillText(resultMsg, VW / 2, 330);
+    ctx.font = "16px sans-serif"; ctx.fillText("Tap to race again", VW / 2, 366);
+  }
+}
+function drawQA() {
+  const r = fairnessCheck();
+  ctx.fillStyle = "rgba(0,0,0,.88)"; ctx.fillRect(6, 380, VW - 12, 240);
+  ctx.fillStyle = r.ok ? "#7ee787" : "#ff7b72"; ctx.font = "bold 16px sans-serif"; ctx.textAlign = "left";
+  ctx.fillText("QA FAIRNESS: " + (r.ok ? "PASS" : "FAIL"), 16, 410);
+  ctx.fillStyle = "#fff"; ctx.font = "12.5px sans-serif";
+  r.rows.forEach((row, i) => ctx.fillText(row, 16, 438 + i * 24));
+}
+
+/* ---------------- loop & input ---------------- */
+let last = 0;
+function frame(ts) {
+  const dt = Math.min(0.05, (ts - (last || ts)) / 1000); last = ts;
+  update(dt); draw();
+  requestAnimationFrame(frame);
+}
+requestAnimationFrame(frame);
+canvas.addEventListener("pointerdown", () => {
+  initAudio();
+  if (state === "menu") { resetRace(); state = "race"; sfx("go"); }
+  else if (state === "done") { state = "menu"; }
+});
+function bindHold(id, key) {
+  const el = document.getElementById(id);
+  const on = e => { e.preventDefault(); initAudio(); keys[key] = true; };
+  const off = () => { keys[key] = false; };
+  el.addEventListener("pointerdown", on); el.addEventListener("pointerup", off);
+  el.addEventListener("pointerleave", off); el.addEventListener("pointercancel", off);
+}
+bindHold("btnL", "left"); bindHold("btnR", "right"); bindHold("btnBrake", "brake");
+document.getElementById("muteBtn").addEventListener("click", e => { e.stopPropagation(); muted = !muted; e.target.textContent = muted ? "🔇" : "🔊"; });
+window.addEventListener("keydown", e => {
+  initAudio();
+  if (e.code === "ArrowLeft") keys.left = true;
+  if (e.code === "ArrowRight") keys.right = true;
+  if (e.code === "ArrowDown" || e.code === "Space") keys.brake = true;
+  if ((e.code === "Enter" || e.code === "Space") && state !== "race") { resetRace(); state = "race"; }
+  if (["ArrowLeft", "ArrowRight", "ArrowDown", "Space"].includes(e.code)) e.preventDefault();
+});
+window.addEventListener("keyup", e => {
+  if (e.code === "ArrowLeft") keys.left = false;
+  if (e.code === "ArrowRight") keys.right = false;
+  if (e.code === "ArrowDown" || e.code === "Space") keys.brake = false;
+});
+if (QA_MODE) { window.__qaFairness = fairnessCheck(); }
+</script>
+</body>
+</html>

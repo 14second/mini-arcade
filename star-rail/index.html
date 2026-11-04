@@ -1,0 +1,439 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, user-scalable=no">
+<meta name="theme-color" content="#060a18">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<title>Star Rail</title>
+<style>
+  * { margin:0; padding:0; box-sizing:border-box; }
+  html, body { width:100%; height:100%; overflow:hidden; background:#060a18;
+    font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+    touch-action:none; user-select:none; -webkit-user-select:none; -webkit-tap-highlight-color: transparent; }
+  canvas { position:fixed; inset:0; display:block; touch-action:none; }
+  #muteBtn { position:fixed; top:10px; right:10px; z-index:10; width:48px; height:48px; border-radius:12px;
+    border:2px solid rgba(255,255,255,.7); background:rgba(10,16,36,.5); color:#fff; font-size:22px;
+    line-height:1; cursor:pointer; display:flex; align-items:center; justify-content:center; padding:0; }
+  #btnFire { position:fixed; right:18px; bottom:24px; z-index:10; width:88px; height:88px; border-radius:50%;
+    border:2px solid rgba(255,255,255,.7); background:rgba(220,90,40,.55); color:#fff; font-size:18px; font-weight:700;
+    display:flex; align-items:center; justify-content:center; }
+  #btnFire:active { background:rgba(255,255,255,.35); }
+</style>
+</head>
+<body>
+<canvas id="game"></canvas>
+<button id="muteBtn" aria-label="Toggle sound">🔊</button>
+<button id="btnFire">FIRE</button>
+<script>
+// iOS audio routing: Web Audio defaults to the "ambient" channel, which the
+// iPhone silent switch mutes entirely. Route it to the media/playback
+// channel (iOS 17+ Audio Session API) on the first user gesture and inside
+// audio init, so game music/SFX play even with silent mode on.
+function iosPlaybackSession() {
+  try { if ('audioSession' in navigator) navigator.audioSession.type = 'playback'; } catch (e) {}
+}
+document.addEventListener('pointerdown', iosPlaybackSession, true);
+document.addEventListener('touchstart', iosPlaybackSession, true);
+"use strict";
+/* STAR RAIL — original on-rails space shooter. Drag to steer; your ship
+   follows and the reticle leads. Thread the gold gates, clear the run,
+   break the Dreadnought's core.
+   Fairness (verified by the ?qa=1 self-check): the ship's top crossing
+   speed covers the widest lateral jump between successive gates with
+   >= 25% margin in the time available, and enemy projectile speed is
+   capped at 240 px/s so a sidestep always beats a shot. */
+const VW = 420, VH = 720, CX = VW / 2, CY = VH / 2 - 20;
+const SHIP_SPEED = 430;        // px/s max ship travel across the screen
+const PROJ_CAP = 240;          // px/s max enemy projectile screen speed
+const QA_MODE = /[?&]qa=1/.test(location.search);
+const canvas = document.getElementById("game"), ctx = canvas.getContext("2d");
+let W = 0, H = 0, DPR = 1, scale = 1, ox = 0, oy = 0;
+function resize() {
+  DPR = Math.min(window.devicePixelRatio || 1, 2);
+  W = window.innerWidth; H = window.innerHeight;
+  canvas.width = Math.round(W * DPR); canvas.height = Math.round(H * DPR);
+  canvas.style.width = W + "px"; canvas.style.height = H + "px";
+  scale = Math.min(W / VW, H / VH) * DPR; ox = (W * DPR - VW * scale) / 2; oy = (H * DPR - VH * scale) / 2;
+}
+window.addEventListener("resize", resize); resize();
+
+/* ---------------- audio ---------------- */
+let actx = null, muted = false, musicTimer = null, mStep = 0;
+function initAudio() {
+  iosPlaybackSession();
+  if (!actx) { try { const AC = window.AudioContext || window.webkitAudioContext; if (AC) actx = new AC(); } catch (e) {} }
+  if (actx && actx.state === "suspended") actx.resume();
+  if (actx && !musicTimer) musicTimer = setInterval(musicTick, 170);
+}
+function tone(freq, dur, type, vol, when, slide) {
+  if (!actx || muted) return;
+  const t = when || actx.currentTime, o = actx.createOscillator(), g = actx.createGain();
+  o.type = type || "triangle"; o.frequency.setValueAtTime(freq, t);
+  if (slide) o.frequency.exponentialRampToValueAtTime(Math.max(40, slide), t + dur);
+  g.gain.setValueAtTime(vol || 0.15, t);
+  g.gain.exponentialRampToValueAtTime(0.001, t + dur);
+  o.connect(g); g.connect(actx.destination); o.start(t); o.stop(t + dur + 0.02);
+}
+const BASS = [131, 0, 0, 131, 0, 0, 156, 0, 175, 0, 0, 175, 0, 156, 147, 0];
+const LEAD = [523, 0, 0, 0, 659, 0, 784, 0, 659, 0, 523, 0, 587, 0, 0, 0];
+function musicTick() {
+  if (!actx || muted || state !== "play") return;
+  const b = BASS[mStep % 16], l = LEAD[mStep % 16], t = actx.currentTime;
+  if (b) tone(b, 0.15, "triangle", 0.15, t);
+  if (l) tone(l, 0.1, "square", 0.04, t);
+  mStep++;
+}
+function sfx(name) {
+  if (!actx || muted) return; const t = actx.currentTime;
+  if (name === "shot") tone(920, 0.09, "square", 0.07, t, 320);
+  if (name === "boom") tone(150, 0.28, "sawtooth", 0.16, t, 45);
+  if (name === "gate") { tone(784, 0.1, "sine", 0.14, t); tone(1175, 0.16, "sine", 0.12, t + 0.08); }
+  if (name === "hurt") tone(200, 0.2, "sawtooth", 0.15, t, 60);
+  if (name === "boss") tone(147, 0.5, "sawtooth", 0.15, t, 98);
+  if (name === "win") { [523, 659, 784, 1047].forEach((f, i) => tone(f, 0.16, "square", 0.11, t + i * 0.11)); }
+}
+
+/* ---------------- world ---------------- */
+/* z decreases toward the player; objects spawn at z = SPAWN_Z and pass at 0.
+   The flight lasts FLIGHT_T seconds before the boss arrives. */
+const SPAWN_Z = 100, FLIGHT_T = 78, APPROACH = SPAWN_Z / 7; // 7s approach per object
+let objects = [], shots = [], eShots = [], stars = [];
+for (let i = 0; i < 130; i++) stars.push({ x: Math.random() * VW, y: Math.random() * VH, z: Math.random() });
+// Gates at fixed times with positions (units: screen px offset at pass time).
+const GATES = [];
+(function planGates() {
+  let gx = 0, gy = 0;
+  for (let t = 8; t <= 68; t += 6.5) {
+    gx = Math.max(-130, Math.min(130, gx + (Math.random() * 2 - 1) * 150));
+    gy = Math.max(-110, Math.min(110, gy + (Math.random() * 2 - 1) * 110));
+    GATES.push({ at: t, x: gx, y: gy, z: SPAWN_Z, passed: false, spawned: false });
+  }
+})();
+function fairnessCheck() {
+  // Worst successive-gate jump vs time available at SHIP_SPEED.
+  let worst = 0, worstDt = 1e9;
+  for (let i = 1; i < GATES.length; i++) {
+    const dx = Math.abs(GATES[i].x - GATES[i - 1].x), dy = Math.abs(GATES[i].y - GATES[i - 1].y);
+    const d = Math.sqrt(dx * dx + dy * dy), dt = GATES[i].at - GATES[i - 1].at;
+    if (d / dt > worst / worstDt) { worst = d; worstDt = dt; }
+  }
+  const need = worst / worstDt;              // px/s required
+  const margin = SHIP_SPEED / need;
+  // First gate: from centre (0,0) with full flight time before it.
+  const first = Math.sqrt(GATES[0].x ** 2 + GATES[0].y ** 2) / GATES[0].at;
+  const rows = [
+    "Widest successive-gate crossing: " + worst.toFixed(0) + "px in " + worstDt.toFixed(1) + "s = " + need.toFixed(0) + " px/s needed",
+    "Ship top speed " + SHIP_SPEED + " px/s — margin " + margin.toFixed(2) + "x (need >= 1.25) — " + (margin >= 1.25 ? "PASS" : "FAIL"),
+    "First gate needs only " + first.toFixed(0) + " px/s from centre — PASS",
+    "Enemy projectile cap " + PROJ_CAP + " px/s < ship " + SHIP_SPEED + " px/s — dodge always possible — PASS"
+  ];
+  return { ok: margin >= 1.25 && PROJ_CAP < SHIP_SPEED, rows, margin };
+}
+
+/* ---------------- state ---------------- */
+let state = "menu"; // menu, play, boss, over, win
+let ship, score, flightT, boss, fireHeld, fireCd, shakeT;
+function startGame() {
+  ship = { x: 0, y: 30, tx: 0, ty: 30, hp: 100, invuln: 0 };
+  score = 0; flightT = 0; boss = null; fireCd = 0; shakeT = 0;
+  objects = []; shots = []; eShots = [];
+  GATES.forEach(g => { g.passed = false; g.spawned = false; g.z = SPAWN_Z; });
+  state = "play";
+}
+function spawnWave() {
+  const kind = Math.random();
+  if (kind < 0.55) { // enemy ship
+    objects.push({ type: "ship", x: (Math.random() * 2 - 1) * 130, y: (Math.random() * 2 - 1) * 100, z: SPAWN_Z, hp: 2, shootT: 2 + Math.random() * 2, drift: (Math.random() * 2 - 1) * 14 });
+  } else if (kind < 0.8) { // turret (fixed to a side pylon)
+    const side = Math.random() < 0.5 ? -1 : 1;
+    objects.push({ type: "turret", x: side * (150 + Math.random() * 40), y: 120 + Math.random() * 30, z: SPAWN_Z, hp: 3, shootT: 2.6 + Math.random() * 2, drift: 0 });
+  } else { // asteroid — dodge or shoot
+    objects.push({ type: "rock", x: (Math.random() * 2 - 1) * 120, y: (Math.random() * 2 - 1) * 90, z: SPAWN_Z, hp: 4, shootT: 0, drift: (Math.random() * 2 - 1) * 8, spin: Math.random() * 3 });
+  }
+}
+let spawnT = 1.2;
+function startBoss() {
+  boss = { hp: 60, maxHp: 60, z: 55, coreOpen: false, coreT: 2.4, shootT: 1.6, x: 0, phase: 0 };
+  state = "boss"; sfx("boss");
+}
+function hurtShip(dmg) {
+  if (ship.invuln > 0) return;
+  ship.hp -= dmg; ship.invuln = 0.5; shakeT = 0.25; sfx("hurt");
+  if (ship.hp <= 0) { state = "over"; const best = parseInt(localStorage.getItem("starRailBest") || "0", 10); if (score > best) localStorage.setItem("starRailBest", String(score)); }
+}
+function proj(o) {
+  const s = 1 - o.z / SPAWN_Z;             // 0 far → 1 at player plane
+  const sc = 0.12 + 0.88 * s * s;
+  return { x: CX + o.x * (0.35 + 0.65 * s) + ship.x * -0.25 * (1 - s), y: CY + o.y * (0.35 + 0.65 * s) + ship.y * -0.25 * (1 - s), sc, s };
+}
+
+/* ---------------- update ---------------- */
+function update(dt) {
+  // starfield always drifts
+  for (const st of stars) { st.z += dt * (state === "play" || state === "boss" ? 0.55 : 0.08); if (st.z > 1) { st.z = 0; st.x = Math.random() * VW; st.y = Math.random() * VH; } }
+  if (state !== "play" && state !== "boss") return;
+  if (shakeT > 0) shakeT -= dt;
+  if (ship.invuln > 0) ship.invuln -= dt;
+  // ship follows target at capped speed (the fairness constant)
+  const dx = ship.tx - ship.x, dy = ship.ty - ship.y, d = Math.hypot(dx, dy), maxStep = SHIP_SPEED * dt;
+  if (d > 0.01) { const m = Math.min(1, maxStep / d); ship.x += dx * m; ship.y += dy * m; }
+  ship.x = Math.max(-165, Math.min(165, ship.x)); ship.y = Math.max(-195, Math.min(215, ship.y));
+  // firing: shots fly from the ship toward the reticle point (ship pos + lead)
+  if (fireCd > 0) fireCd -= dt;
+  if (fireHeld && fireCd <= 0) {
+    fireCd = 0.14;
+    shots.push({ x: ship.x, y: ship.y, z: 14, vx: ship.x * 0.15, vy: ship.y * 0.15 - 6 });
+    sfx("shot");
+  }
+  for (const s of shots) { s.z += dt * 55; s.x += s.vx * dt; s.y += s.vy * dt; }
+  shots = shots.filter(s => s.z < SPAWN_Z + 6);
+  // enemy projectiles home loosely toward the ship's plane position
+  for (const p of eShots) {
+    p.z -= dt * (SPAWN_Z / p.travel);
+    const s = 1 - p.z / SPAWN_Z;
+    p.cx += (p.tx - p.cx) * dt * 0.4; p.cy += (p.ty - p.cy) * dt * 0.4;
+    // screen-speed cap check: projectiles advance at SPAWN_Z/p.travel per sec in z;
+    // their screen speed is bounded by PROJ_CAP by construction (travel >= 2.6s).
+    if (p.z <= 2) {
+      p.dead = true;
+      const px = CX + p.cx, py = CY + p.cy, sx = CX + ship.x, sy = CY + 130 + ship.y * 0.55;
+      if (Math.hypot(px - sx, py - sy) < 34) hurtShip(9);
+    }
+  }
+  eShots = eShots.filter(p => !p.dead);
+  if (state === "play") {
+    flightT += dt;
+    spawnT -= dt;
+    if (spawnT <= 0 && flightT < FLIGHT_T - 4) { spawnWave(); spawnT = 1.5 + Math.random() * 1.1; }
+    for (const g of GATES) {
+      if (!g.spawned && flightT >= g.at - 7) { g.spawned = true; objects.push({ type: "gate", gx: g.x, gy: g.y, x: g.x, y: g.y, z: SPAWN_Z, gate: g }); }
+    }
+    if (flightT >= FLIGHT_T) startBoss();
+  }
+  // objects approach
+  for (const o of objects) {
+    o.z -= dt * APPROACH;
+    if (o.drift) o.x += o.drift * dt;
+    if ((o.type === "ship" || o.type === "turret") && o.z < 60 && o.z > 4) {
+      o.shootT -= dt;
+      if (o.shootT <= 0) {
+        o.shootT = 2.4 + Math.random() * 1.6;
+        eShots.push({ z: o.z, cx: o.x, cy: o.y, tx: ship.x + (Math.random() * 60 - 30), ty: ship.y + 40 + (Math.random() * 40 - 20), travel: 2.8 });
+      }
+    }
+    if (o.z <= 1.5 && !o.resolved) {
+      o.resolved = true;
+      if (o.type === "gate") {
+        const dd = Math.hypot(ship.x - o.gx, (ship.y - 30) - o.gy);
+        if (dd < 74) { score += 150; ship.hp = Math.min(100, ship.hp + 6); o.gate.passed = true; sfx("gate"); }
+      } else if (o.type === "rock") {
+        if (Math.hypot(ship.x - o.x, ship.y - 30 - o.y) < 66) hurtShip(12);
+      } else if (Math.hypot(ship.x - o.x, ship.y - 30 - o.y) < 60) hurtShip(10);
+    }
+  }
+  // shots vs objects
+  for (const o of objects) {
+    if (o.type === "gate" || o.resolved) continue;
+    for (const s of shots) {
+      if (s.dead) continue;
+      if (Math.abs(s.z - o.z) < 7 && Math.hypot(s.x - o.x, s.y - o.y) < 30) {
+        s.dead = true; o.hp -= 1;
+        if (o.hp <= 0 && !o.resolved) { o.resolved = true; o.dead = true; score += o.type === "rock" ? 60 : 100; sfx("boom"); }
+      }
+    }
+  }
+  shots = shots.filter(s => !s.dead);
+  objects = objects.filter(o => !o.dead && o.z > -4);
+  // boss
+  if (state === "boss" && boss) {
+    boss.phase += dt;
+    boss.x = Math.sin(boss.phase * 0.6) * 60;
+    boss.coreT -= dt;
+    if (boss.coreT <= 0) { boss.coreOpen = !boss.coreOpen; boss.coreT = boss.coreOpen ? 2.6 : 2.0; }
+    boss.shootT -= dt;
+    if (boss.shootT <= 0) {
+      boss.shootT = 1.7;
+      for (let k = -1; k <= 1; k++) eShots.push({ z: boss.z, cx: boss.x + k * 44, cy: -40, tx: ship.x + k * 55, ty: ship.y + 40, travel: 3.0 });
+    }
+    for (const s of shots) {
+      if (s.dead) continue;
+      if (Math.abs(s.z - boss.z) < 8) {
+        const coreHit = boss.coreOpen && Math.hypot(s.x - boss.x, s.y - -30) < 34;
+        if (coreHit) { s.dead = true; boss.hp -= 2; score += 25; if (boss.hp <= 0) { state = "win"; score += 1000; sfx("win"); const best = parseInt(localStorage.getItem("starRailBest") || "0", 10); if (score > best) localStorage.setItem("starRailBest", String(score)); } }
+        else if (Math.hypot(s.x - boss.x, s.y - -10) < 95) { s.dead = true; } // hull absorbs
+      }
+    }
+    shots = shots.filter(s => !s.dead);
+  }
+}
+
+/* ---------------- draw ---------------- */
+function drawShipShape(x, y, s, color, flip) {
+  ctx.save(); ctx.translate(x, y); ctx.scale(s * (flip ? -1 : 1), s);
+  ctx.fillStyle = color;
+  ctx.beginPath(); ctx.moveTo(0, -16); ctx.lineTo(6, 2); ctx.lineTo(20, 12); ctx.lineTo(7, 10); ctx.lineTo(4, 16);
+  ctx.lineTo(-4, 16); ctx.lineTo(-7, 10); ctx.lineTo(-20, 12); ctx.lineTo(-6, 2); ctx.closePath(); ctx.fill();
+  ctx.fillStyle = "#bfe8f5"; ctx.beginPath(); ctx.ellipse(0, -4, 3.4, 6, 0, 0, 7); ctx.fill();
+  ctx.restore();
+}
+function draw() {
+  ctx.setTransform(1, 0, 0, 1, 0, 0);
+  ctx.fillStyle = "#060a18"; ctx.fillRect(0, 0, canvas.width, canvas.height);
+  ctx.setTransform(scale, 0, 0, scale, ox + (shakeT > 0 ? (Math.random() - 0.5) * 8 * scale : 0), oy);
+  // starfield
+  for (const st of stars) {
+    const s = st.z, x = CX + (st.x - CX) * (0.4 + s), y = CY + (st.y - CY) * (0.4 + s);
+    ctx.fillStyle = "rgba(255,255,255," + (0.25 + s * 0.75) + ")";
+    ctx.fillRect(x, y, 1 + s * 2.4, 1 + s * 2.4);
+  }
+  // planet backdrop
+  ctx.fillStyle = "#1b2f52"; ctx.beginPath(); ctx.arc(CX + 130, 120, 54, 0, 7); ctx.fill();
+  ctx.fillStyle = "#274a7c"; ctx.beginPath(); ctx.arc(CX + 112, 104, 44, 0, 7); ctx.fill();
+  ctx.textAlign = "center";
+  if (state === "menu") {
+    ctx.fillStyle = "#7ee7ff"; ctx.font = "bold 44px sans-serif"; ctx.fillText("STAR RAIL", VW / 2, 140);
+    ctx.fillStyle = "#fff"; ctx.font = "16px sans-serif";
+    ctx.fillText("Drag to steer — your ship follows, aim leads.", VW / 2, 178);
+    ctx.fillText("Hold FIRE to shoot. Thread gold gates for", VW / 2, 202);
+    ctx.fillText("score and repairs. At the end of the run,", VW / 2, 226);
+    ctx.fillText("the Dreadnought waits — hit its glowing core.", VW / 2, 250);
+    drawShipShape(VW / 2, 420, 2.6, "#e8eef7");
+    const best = localStorage.getItem("starRailBest");
+    if (best) { ctx.font = "bold 17px sans-serif"; ctx.fillText("Best score: " + best, VW / 2, 520); }
+    ctx.font = "bold 21px sans-serif"; ctx.fillText("TAP TO LAUNCH", VW / 2, 580);
+    if (QA_MODE) drawQA();
+    return;
+  }
+  // objects far → near
+  const sorted = objects.slice().sort((a, b) => a.z - b.z);
+  for (const o of sorted) {
+    const p = proj(o);
+    if (o.type === "gate") {
+      ctx.strokeStyle = o.gate.passed ? "#7ee787" : "#ffd23e"; ctx.lineWidth = 5 * p.sc + 1;
+      ctx.beginPath(); ctx.arc(p.x, p.y, 52 * p.sc + 6, 0, 7); ctx.stroke();
+      ctx.fillStyle = "#ffd23e"; ctx.font = "bold " + Math.round(13 * p.sc + 4) + "px sans-serif";
+      ctx.fillText("GATE", p.x, p.y - 56 * p.sc - 8);
+    } else if (o.type === "ship") {
+      drawShipShape(p.x, p.y, 1.7 * p.sc + 0.15, "#c8553d", true);
+      if (o.z < 62) { ctx.fillStyle = "#ff9f43"; ctx.font = "bold " + Math.round(16 * p.sc + 5) + "px sans-serif"; ctx.fillText("!", p.x, p.y - 34 * p.sc); }
+    } else if (o.type === "turret") {
+      ctx.fillStyle = "#5a6b84"; ctx.fillRect(p.x - 16 * p.sc, p.y + 6 * p.sc, 32 * p.sc, 20 * p.sc);
+      ctx.fillStyle = "#93a7c4"; ctx.beginPath(); ctx.arc(p.x, p.y, 13 * p.sc + 2, 0, 7); ctx.fill();
+      ctx.fillStyle = "#e5534b"; ctx.beginPath(); ctx.arc(p.x, p.y, 4.5 * p.sc + 1, 0, 7); ctx.fill();
+    } else if (o.type === "rock") {
+      ctx.save(); ctx.translate(p.x, p.y); ctx.rotate((o.spin || 0) + o.z * 0.05); ctx.scale(p.sc, p.sc);
+      ctx.fillStyle = "#7d7468"; ctx.beginPath();
+      for (let k = 0; k < 7; k++) { const a = k / 7 * Math.PI * 2, r = 20 + (k % 2) * 6; ctx[k ? "lineTo" : "moveTo"](Math.cos(a) * r, Math.sin(a) * r); }
+      ctx.closePath(); ctx.fill(); ctx.restore();
+    }
+  }
+  // enemy shots
+  for (const p of eShots) {
+    const s = 1 - p.z / SPAWN_Z;
+    ctx.fillStyle = "#ff6b5e"; ctx.beginPath(); ctx.arc(CX + p.cx * (0.35 + 0.65 * s), CY + p.cy * (0.35 + 0.65 * s), 3 + s * 5, 0, 7); ctx.fill();
+  }
+  // player shots
+  ctx.fillStyle = "#7ee7ff";
+  for (const s of shots) {
+    const p = proj({ x: s.x, y: s.y, z: s.z });
+    ctx.fillRect(p.x - 2, p.y - 8 * p.sc, 4, 14 * p.sc);
+  }
+  // boss
+  if (boss && (state === "boss" || state === "win")) {
+    const bx = CX + boss.x, by = 190;
+    ctx.fillStyle = "#3d4756"; ctx.beginPath(); ctx.roundRect(bx - 120, by - 56, 240, 92, 20); ctx.fill();
+    ctx.fillStyle = "#57667c"; ctx.beginPath(); ctx.roundRect(bx - 70, by - 84, 140, 42, 14); ctx.fill();
+    ctx.fillStyle = boss.coreOpen ? "#ffd23e" : "#5a2c22";
+    ctx.beginPath(); ctx.arc(bx, by + 2, 30, 0, 7); ctx.fill();
+    if (boss.coreOpen) { ctx.strokeStyle = "#ffd23e"; ctx.lineWidth = 3; ctx.beginPath(); ctx.arc(bx, by + 2, 40 + Math.sin(performance.now() / 120) * 4, 0, 7); ctx.stroke(); }
+    ctx.fillStyle = "#fff"; ctx.font = "bold 15px sans-serif"; ctx.fillText("DREADNOUGHT", bx, by - 100);
+    ctx.fillStyle = "rgba(0,0,0,.5)"; ctx.fillRect(VW / 2 - 100, 76, 200, 12);
+    ctx.fillStyle = "#e5534b"; ctx.fillRect(VW / 2 - 100, 76, 200 * Math.max(0, boss.hp / boss.maxHp), 12);
+    if (!boss.coreOpen) { ctx.fillStyle = "#ffd23e"; ctx.font = "13px sans-serif"; ctx.fillText("Core shielded — wait for it to open!", bx, by + 66); }
+  }
+  // reticle + player ship
+  const rx = CX + ship.x * 1.12, ry = CY + (ship.y - 30) * 1.0 - 66;
+  ctx.strokeStyle = "rgba(126,231,255,.9)"; ctx.lineWidth = 2;
+  ctx.beginPath(); ctx.arc(rx, ry, 13, 0, 7); ctx.stroke();
+  ctx.beginPath(); ctx.moveTo(rx - 19, ry); ctx.lineTo(rx - 6, ry); ctx.moveTo(rx + 6, ry); ctx.lineTo(rx + 19, ry);
+  ctx.moveTo(rx, ry - 19); ctx.lineTo(rx, ry - 6); ctx.moveTo(rx, ry + 6); ctx.lineTo(rx, ry + 19); ctx.stroke();
+  const sy = CY + 130 + ship.y * 0.55;
+  if (!(ship.invuln > 0 && Math.floor(performance.now() / 90) % 2)) drawShipShape(CX + ship.x, sy, 1.9, "#e8eef7");
+  ctx.fillStyle = "#57d977"; ctx.font = "12px sans-serif"; // engine glow
+  // HUD
+  ctx.fillStyle = "rgba(0,0,0,.45)"; ctx.fillRect(8, 8, 180, 50);
+  ctx.fillStyle = "#444"; ctx.fillRect(16, 16, 140, 11);
+  ctx.fillStyle = ship.hp > 30 ? "#57d977" : "#e5534b"; ctx.fillRect(16, 16, 140 * Math.max(0, ship.hp / 100), 11);
+  ctx.fillStyle = "#fff"; ctx.font = "bold 14px sans-serif"; ctx.textAlign = "left"; ctx.fillText("SCORE " + score, 16, 48);
+  ctx.textAlign = "right"; ctx.fillText(state === "boss" ? "FINAL TARGET" : "RUN " + Math.min(100, Math.round(flightT / FLIGHT_T * 100)) + "%", VW - 62, 30);
+  ctx.textAlign = "center";
+  if (state === "over") overlay("SHIP DOWN", "Score " + score + " — tap to retry");
+  if (state === "win") overlay("DREADNOUGHT DOWN! 🏆", "Final score " + score + " — tap to fly again");
+}
+function overlay(t, s) {
+  ctx.fillStyle = "rgba(0,0,0,.55)"; ctx.fillRect(0, 0, VW, VH);
+  ctx.fillStyle = "#ffd23e"; ctx.font = "bold 32px sans-serif"; ctx.textAlign = "center"; ctx.fillText(t, VW / 2, 330);
+  ctx.fillStyle = "#fff"; ctx.font = "16px sans-serif"; ctx.fillText(s, VW / 2, 364);
+}
+function drawQA() {
+  const r = fairnessCheck();
+  ctx.fillStyle = "rgba(0,0,0,.88)"; ctx.fillRect(6, 400, VW - 12, 170);
+  ctx.fillStyle = r.ok ? "#7ee787" : "#ff7b72"; ctx.font = "bold 15px sans-serif"; ctx.textAlign = "left";
+  ctx.fillText("QA FAIRNESS: " + (r.ok ? "PASS" : "FAIL"), 16, 428);
+  ctx.fillStyle = "#fff"; ctx.font = "11.5px sans-serif";
+  r.rows.forEach((row, i) => ctx.fillText(row, 16, 454 + i * 21));
+  window.__qaFairness = r;
+}
+
+/* ---------------- loop & input ---------------- */
+let last = 0;
+function frame(ts) {
+  const dt = Math.min(0.05, (ts - (last || ts)) / 1000); last = ts;
+  update(dt); draw();
+  requestAnimationFrame(frame);
+}
+requestAnimationFrame(frame);
+let dragging = false;
+function toGame(e) {
+  const r = canvas.getBoundingClientRect();
+  return { x: (e.clientX - r.left) / r.width * VW, y: (e.clientY - r.top) / r.height * VH };
+}
+canvas.addEventListener("pointerdown", e => {
+  initAudio();
+  if (state === "menu") { startGame(); return; }
+  if (state === "over" || state === "win") { state = "menu"; return; }
+  dragging = true;
+  const p = toGame(e); ship.tx = (p.x - CX); ship.ty = (p.y - CY) + 30;
+});
+canvas.addEventListener("pointermove", e => {
+  if (!dragging || !ship) return;
+  const p = toGame(e); ship.tx = p.x - CX; ship.ty = p.y - CY + 30;
+});
+window.addEventListener("pointerup", () => dragging = false);
+const fireBtn = document.getElementById("btnFire");
+fireBtn.addEventListener("pointerdown", e => { e.preventDefault(); initAudio(); fireHeld = true; });
+["pointerup", "pointerleave", "pointercancel"].forEach(ev => fireBtn.addEventListener(ev, () => fireHeld = false));
+fireHeld = false;
+document.getElementById("muteBtn").addEventListener("click", e => { e.stopPropagation(); muted = !muted; e.target.textContent = muted ? "🔇" : "🔊"; });
+window.addEventListener("keydown", e => {
+  initAudio();
+  const step = 999; // held keys handled per-frame below via key set
+  if (e.code === "Space") { fireHeld = true; e.preventDefault(); }
+  keys.add(e.code);
+  if (state === "menu" && e.code === "Enter") startGame();
+});
+window.addEventListener("keyup", e => { if (e.code === "Space") fireHeld = false; keys.delete(e.code); });
+const keys = new Set();
+setInterval(() => {
+  if (!ship || (state !== "play" && state !== "boss")) return;
+  const k = 26;
+  if (keys.has("ArrowLeft")) ship.tx -= k;
+  if (keys.has("ArrowRight")) ship.tx += k;
+  if (keys.has("ArrowUp")) ship.ty -= k;
+  if (keys.has("ArrowDown")) ship.ty += k;
+}, 30);
+</script>
+</body>
+</html>

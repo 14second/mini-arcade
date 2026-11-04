@@ -1,0 +1,288 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, user-scalable=no">
+<meta name="theme-color" content="#3a2b10">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<title>Micro Mayhem</title>
+<style>
+  * { margin:0; padding:0; box-sizing:border-box; }
+  html, body { width:100%; height:100%; overflow:hidden; background:#3a2b10;
+    font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+    touch-action:none; user-select:none; -webkit-user-select:none; -webkit-tap-highlight-color: transparent; }
+  canvas { position:fixed; inset:0; display:block; touch-action:none; }
+  #muteBtn { position:fixed; top:10px; right:10px; z-index:10; width:48px; height:48px; border-radius:12px;
+    border:2px solid rgba(255,255,255,.7); background:rgba(60,40,10,.5); color:#fff; font-size:22px;
+    line-height:1; cursor:pointer; display:flex; align-items:center; justify-content:center; padding:0; }
+</style>
+</head>
+<body>
+<canvas id="game"></canvas>
+<button id="muteBtn" aria-label="Toggle sound">🔊</button>
+<script>
+// iOS audio routing: Web Audio defaults to the "ambient" channel, which the
+// iPhone silent switch mutes entirely. Route it to the media/playback
+// channel (iOS 17+ Audio Session API) on the first user gesture and inside
+// audio init, so game music/SFX play even with silent mode on.
+function iosPlaybackSession() {
+  try { if ('audioSession' in navigator) navigator.audioSession.type = 'playback'; } catch (e) {}
+}
+document.addEventListener('pointerdown', iosPlaybackSession, true);
+document.addEventListener('touchstart', iosPlaybackSession, true);
+"use strict";
+/* MICRO MAYHEM — original rapid-fire microgame collection. One word of
+   instruction, four seconds, faster every round; four misses ends it.
+   Fairness (logged by the ?qa=1 self-check): at the maximum speed
+   multiplier (2.0x), every microgame's demand stays within a humanly
+   possible floor — required taps <= 8 per window and the timing zone is
+   never narrower than 12% of its sweep. */
+const VW = 420, VH = 720;
+const BASE_WINDOW = 4.2, MAX_SPEEDUP = 2.0;
+const QA_MODE = /[?&]qa=1/.test(location.search);
+const canvas = document.getElementById("game"), ctx = canvas.getContext("2d");
+let W = 0, H = 0, DPR = 1, scale = 1, ox = 0, oy = 0;
+function resize() {
+  DPR = Math.min(window.devicePixelRatio || 1, 2);
+  W = window.innerWidth; H = window.innerHeight;
+  canvas.width = Math.round(W * DPR); canvas.height = Math.round(H * DPR);
+  canvas.style.width = W + "px"; canvas.style.height = H + "px";
+  scale = Math.min(W / VW, H / VH) * DPR; ox = (W * DPR - VW * scale) / 2; oy = (H * DPR - VH * scale) / 2;
+}
+window.addEventListener("resize", resize); resize();
+
+/* ---------------- audio ---------------- */
+let actx = null, muted = false, musicTimer = null, mStep = 0;
+function initAudio() {
+  iosPlaybackSession();
+  if (!actx) { try { const AC = window.AudioContext || window.webkitAudioContext; if (AC) actx = new AC(); } catch (e) {} }
+  if (actx && actx.state === "suspended") actx.resume();
+  if (actx && !musicTimer) musicTimer = setInterval(musicTick, 140);
+}
+function tone(freq, dur, type, vol, when, slide) {
+  if (!actx || muted) return;
+  const t = when || actx.currentTime, o = actx.createOscillator(), g = actx.createGain();
+  o.type = type || "triangle"; o.frequency.setValueAtTime(freq, t);
+  if (slide) o.frequency.exponentialRampToValueAtTime(Math.max(40, slide), t + dur);
+  g.gain.setValueAtTime(vol || 0.15, t);
+  g.gain.exponentialRampToValueAtTime(0.001, t + dur);
+  o.connect(g); g.connect(actx.destination); o.start(t); o.stop(t + dur + 0.02);
+}
+const BASS = [147, 0, 147, 0, 175, 0, 147, 0, 131, 0, 131, 0, 165, 0, 196, 0];
+function musicTick() {
+  if (!actx || muted || state !== "play") return;
+  const b = BASS[mStep % 16], t = actx.currentTime;
+  if (b) tone(b, 0.12, "triangle", 0.13, t);
+  if (mStep % 4 === 0) tone(262 + (mStep % 3) * 65, 0.08, "square", 0.05, t);
+  mStep++;
+}
+function sfx(name) {
+  if (!actx || muted) return; const t = actx.currentTime;
+  if (name === "good") { tone(659, 0.09, "square", 0.13, t); tone(988, 0.13, "square", 0.13, t + 0.07); }
+  if (name === "bad") tone(185, 0.25, "sawtooth", 0.14, t, 90);
+  if (name === "tap") tone(440, 0.05, "square", 0.1, t);
+  if (name === "pop") tone(300, 0.1, "square", 0.13, t, 700);
+  if (name === "next") tone(784, 0.08, "square", 0.1, t);
+}
+
+/* ---------------- microgames ---------------- */
+/* Each entry: word (instruction), taps (max discrete inputs needed at any
+   speed), zone (narrowest timing zone as a fraction of sweep, if any),
+   start(g), update(g, dt) -> true/false when decided early,
+   draw(g), tap(g, x, y), drag handling via shared pointer state. */
+const GAMES = [
+  { word: "TAP!", taps: 3, zone: null,
+    start(g) { g.n = 0; g.x = 90 + Math.random() * 240; g.y = 240 + Math.random() * 240; },
+    tap(g, x, y) { if (Math.hypot(x - g.x, y - g.y) < 64) { g.n++; sfx("tap"); g.x = 80 + Math.random() * 260; g.y = 230 + Math.random() * 260; if (g.n >= 3) g.done = true; } },
+    draw(g) { ctx.fillStyle = "#ffd23e"; ctx.beginPath(); ctx.arc(g.x, g.y, 56, 0, 7); ctx.fill(); ctx.fillStyle = "#7a5200"; ctx.font = "bold 26px sans-serif"; ctx.fillText("TAP", g.x, g.y + 4); ctx.fillStyle = "#fff"; ctx.font = "bold 20px sans-serif"; ctx.fillText(g.n + " / 3", VW / 2, 640); } },
+  { word: "MASH!", taps: 6, zone: null,
+    start(g) { g.n = 0; },
+    tap(g) { g.n++; sfx("tap"); if (g.n >= 6) g.done = true; },
+    draw(g) { const f = g.n / 6; ctx.fillStyle = "#444"; ctx.fillRect(70, 330, 280, 44); ctx.fillStyle = "#57d977"; ctx.fillRect(70, 330, 280 * f, 44); ctx.fillStyle = "#fff"; ctx.font = "bold 22px sans-serif"; ctx.fillText("TAP ANYWHERE!", VW / 2, 300); ctx.font = "44px sans-serif"; ctx.fillText("🥤", VW / 2, 470); ctx.fillText("fill the cup: " + g.n + "/6", VW / 2, 540); } },
+  { word: "CATCH!", taps: 0, zone: null,
+    start(g) { g.bx = VW / 2; g.sx = 60 + Math.random() * 300; g.sy = 130; g.caught = false; },
+    update(g, dt) { g.sy += dt * 235 * g.speed; if (g.sy > 566) { if (Math.abs(g.sx - g.bx) < 52) { g.caught = true; g.done = true; sfx("good"); } else if (g.sy > 640) { g.fail = true; g.done = true; } } },
+    move(g, x) { g.bx = Math.max(44, Math.min(VW - 44, x)); },
+    key(g, dir) { g.bx = Math.max(44, Math.min(VW - 44, g.bx + dir * 30)); },
+    draw(g) { ctx.font = "40px sans-serif"; ctx.fillText("⭐", g.sx, g.sy); ctx.fillStyle = "#c86b32"; ctx.beginPath(); ctx.roundRect(g.bx - 48, 560, 96, 26, 8); ctx.fill(); ctx.fillStyle = "#fff"; ctx.font = "15px sans-serif"; ctx.fillText("◀ drag or arrow keys ▶", VW / 2, 660); } },
+  { word: "DODGE!", taps: 0, zone: null,
+    start(g) { g.px = VW / 2; g.barrels = [0, 1, 2].map(i => ({ x: 60 + Math.random() * 300, y: -60 - i * 210, s: 200 + Math.random() * 60 })); },
+    update(g, dt) {
+      for (const b of g.barrels) { b.y += b.s * g.speed * dt; if (b.y > 520 && b.y < 592 && Math.abs(b.x - g.px) < 46) { g.fail = true; g.done = true; } }
+      if (g.barrels.every(b => b.y > 640)) g.done = true;
+    },
+    move(g, x) { g.px = Math.max(30, Math.min(VW - 30, x)); },
+    key(g, dir) { g.px = Math.max(30, Math.min(VW - 30, g.px + dir * 34)); },
+    draw(g) { for (const b of g.barrels) { ctx.font = "42px sans-serif"; ctx.fillText("🛢️", b.x, b.y); } ctx.font = "40px sans-serif"; ctx.fillText("🐭", g.px, 580); ctx.fillStyle = "#fff"; ctx.font = "15px sans-serif"; ctx.fillText("stay out of their lane!", VW / 2, 660); } },
+  { word: "ORDER!", taps: 3, zone: null,
+    start(g) { g.next = 1; const spots = [[110, 300], [310, 300], [210, 470]]; g.order = [1, 2, 3].sort(() => Math.random() - 0.5); g.pads = spots.map((s, i) => ({ x: s[0], y: s[1], n: g.order[i] })); },
+    tap(g, x, y) { for (const p of g.pads) if (Math.hypot(x - p.x, y - p.y) < 52) { if (p.n === g.next) { p.hit = true; g.next++; sfx("tap"); if (g.next > 3) g.done = true; } else { g.fail = true; g.done = true; } } },
+    draw(g) { for (const p of g.pads) { ctx.fillStyle = p.hit ? "#57d977" : "#3a6bd7"; ctx.beginPath(); ctx.arc(p.x, p.y, 46, 0, 7); ctx.fill(); ctx.fillStyle = "#fff"; ctx.font = "bold 30px sans-serif"; ctx.fillText(String(p.n), p.x, p.y + 4); } ctx.font = "17px sans-serif"; ctx.fillText("tap 1, then 2, then 3", VW / 2, 640); } },
+  { word: "STOP!", taps: 1, zone: 0.16,
+    start(g) { g.t = 0; g.stopped = false; g.zoneC = 0.3 + Math.random() * 0.4; },
+    update(g, dt) { if (!g.stopped) g.t += dt * g.speed; },
+    tap(g) { if (g.stopped) return; g.stopped = true; const pos = (Math.sin(g.t * 2.4) + 1) / 2; if (Math.abs(pos - g.zoneC) <= 0.08) { g.done = true; sfx("good"); } else { g.fail = true; g.done = true; } },
+    key(g) { g.tap && g.tap(g); },
+    draw(g) { const pos = (Math.sin(g.t * 2.4) + 1) / 2; ctx.fillStyle = "#444"; ctx.fillRect(50, 340, 320, 30); ctx.fillStyle = "#57d977"; ctx.fillRect(50 + 320 * (g.zoneC - 0.08), 340, 320 * 0.16, 30); ctx.fillStyle = "#ffd23e"; ctx.fillRect(50 + 320 * pos - 5, 322, 10, 66); ctx.fillStyle = "#fff"; ctx.font = "17px sans-serif"; ctx.fillText("tap when the bar is in the green", VW / 2, 460); } },
+  { word: "POP!", taps: 3, zone: null,
+    start(g) { g.n = 0; g.bs = [0, 1, 2, 3].map(i => ({ x: 60 + Math.random() * 300, y: 240 + Math.random() * 260, vx: (Math.random() * 2 - 1) * 60, vy: (Math.random() * 2 - 1) * 45, dead: false })); },
+    update(g, dt) { for (const b of g.bs) { if (b.dead) continue; b.x += b.vx * dt * g.speed; b.y += b.vy * dt * g.speed; if (b.x < 44 || b.x > VW - 44) b.vx *= -1; if (b.y < 200 || b.y > 560) b.vy *= -1; } },
+    tap(g, x, y) { for (const b of g.bs) if (!b.dead && Math.hypot(x - b.x, y - b.y) < 46) { b.dead = true; g.n++; sfx("pop"); if (g.n >= 3) g.done = true; } },
+    draw(g) { for (const b of g.bs) { if (b.dead) continue; ctx.font = "46px sans-serif"; ctx.fillText("🎈", b.x, b.y); } ctx.fillStyle = "#fff"; ctx.font = "bold 20px sans-serif"; ctx.fillText("popped " + g.n + " / 3", VW / 2, 640); } },
+  { word: "HAMMER!", taps: 4, zone: null,
+    start(g) { g.n = 0; },
+    tap(g) { g.n++; sfx("tap"); if (g.n >= 4) g.done = true; },
+    draw(g) { ctx.font = "52px sans-serif"; ctx.fillText("🔨", VW / 2, 300); ctx.fillStyle = "#c0c6ce"; ctx.fillRect(VW / 2 - 5, 380, 10, 90 - g.n * 18); ctx.fillStyle = "#8a5a2b"; ctx.fillRect(VW / 2 - 70, 470, 140, 16); ctx.fillStyle = "#fff"; ctx.font = "bold 20px sans-serif"; ctx.fillText("nail: " + g.n + "/4 taps", VW / 2, 550); } },
+  { word: "SLIDE!", taps: 0, zone: null,
+    start(g) { g.px = 70; g.gx = 280 + Math.random() * 60; g.held = false; },
+    down(g, x, y) { if (Math.hypot(x - g.px, y - 420) < 52) g.held = true; },
+    move(g, x) { if (g.held) g.px = Math.max(46, Math.min(VW - 46, x)); },
+    up(g) { if (!g.held) return; g.held = false; if (Math.abs(g.px - g.gx) < 40) { g.done = true; sfx("good"); } else { g.fail = true; g.done = true; } },
+    draw(g) { ctx.fillStyle = "#57d977"; ctx.globalAlpha = 0.5; ctx.beginPath(); ctx.arc(g.gx, 420, 40, 0, 7); ctx.fill(); ctx.globalAlpha = 1; ctx.fillStyle = "#fff"; ctx.font = "14px sans-serif"; ctx.fillText("GOAL", g.gx, 424); ctx.font = "46px sans-serif"; ctx.fillText("🥌", g.px, 436); ctx.font = "15px sans-serif"; ctx.fillText("drag the stone into the goal, let go", VW / 2, 560); } }
+];
+function fairnessCheck() {
+  const winAtMax = BASE_WINDOW / MAX_SPEEDUP;
+  const rows = []; let ok = winAtMax >= 1.8;
+  rows.push("Window at max speed (" + MAX_SPEEDUP + "x): " + winAtMax.toFixed(2) + "s (floor 1.80s) — " + (winAtMax >= 1.8 ? "PASS" : "FAIL"));
+  for (const gm of GAMES) {
+    const tapOk = gm.taps <= 8, zoneOk = gm.zone === null || gm.zone >= 0.12;
+    if (!tapOk || !zoneOk) ok = false;
+    rows.push(gm.word + " needs " + gm.taps + " taps" + (gm.zone !== null ? ", zone " + Math.round(gm.zone * 100) + "% of sweep" : "") + " — " + (tapOk && zoneOk ? "PASS" : "FAIL"));
+  }
+  return { ok, rows, winAtMax };
+}
+
+/* ---------------- flow ---------------- */
+let state = "menu"; // menu, play, over
+let score, misses, cleared, g, gTime, gWindow, between, betweenT, lastResult;
+function speedup() { return Math.min(MAX_SPEEDUP, 1 + 0.25 * Math.floor(cleared / 4)); }
+function startGame() {
+  score = 0; misses = 0; cleared = 0; between = 0;
+  nextGame(); state = "play";
+}
+function nextGame() {
+  const def = GAMES[Math.floor(Math.random() * GAMES.length)];
+  g = { def, speed: speedup(), done: false, fail: false };
+  def.start && def.start(g);
+  gWindow = BASE_WINDOW / g.speed; gTime = 0; between = 0;
+  sfx("next");
+}
+function update(dt) {
+  if (state !== "play") return;
+  if (between > 0) { betweenT -= dt; if (betweenT <= 0) nextGame(); return; }
+  gTime += dt;
+  if (g.def.update) g.def.update(g, dt);
+  if (g.done || gTime >= gWindow) {
+    const won = g.done && !g.fail;
+    lastResult = won;
+    if (won) { cleared++; score = cleared; sfx("good"); }
+    else { misses++; sfx("bad"); }
+    if (misses >= 4) {
+      state = "over";
+      const best = parseInt(localStorage.getItem("microMayhemBest") || "0", 10);
+      if (score > best) localStorage.setItem("microMayhemBest", String(score));
+      return;
+    }
+    between = 1; betweenT = 0.85;
+  }
+}
+function draw() {
+  ctx.setTransform(1, 0, 0, 1, 0, 0);
+  ctx.fillStyle = "#3a2b10"; ctx.fillRect(0, 0, canvas.width, canvas.height);
+  ctx.setTransform(scale, 0, 0, scale, ox, oy);
+  ctx.textAlign = "center";
+  if (state === "menu") {
+    ctx.fillStyle = "#ffd23e"; ctx.font = "bold 42px sans-serif"; ctx.fillText("MICRO MAYHEM", VW / 2, 130);
+    ctx.fillStyle = "#fff"; ctx.font = "16px sans-serif";
+    ctx.fillText("One word. Four seconds. No mercy.", VW / 2, 168);
+    ctx.fillText(GAMES.length + " tiny games, faster every four you clear.", VW / 2, 192);
+    ctx.fillText("Four misses and the mayhem ends.", VW / 2, 216);
+    const best = localStorage.getItem("microMayhemBest");
+    if (best) { ctx.font = "bold 17px sans-serif"; ctx.fillText("Best streak: " + best, VW / 2, 262); }
+    ctx.font = "bold 21px sans-serif"; ctx.fillText("TAP TO START", VW / 2, 330);
+    if (QA_MODE) drawQA();
+    return;
+  }
+  if (state === "over") {
+    ctx.fillStyle = "#ffd23e"; ctx.font = "bold 36px sans-serif"; ctx.fillText("MAYHEM OVER", VW / 2, 300);
+    ctx.fillStyle = "#fff"; ctx.font = "20px sans-serif"; ctx.fillText("You cleared " + score + " microgames", VW / 2, 344);
+    ctx.font = "16px sans-serif"; ctx.fillText("Tap to play again", VW / 2, 384);
+    return;
+  }
+  if (between > 0) {
+    ctx.fillStyle = lastResult ? "#57d977" : "#e5534b"; ctx.font = "bold 54px sans-serif";
+    ctx.fillText(lastResult ? "✔ NICE!" : "✘ MISS", VW / 2, 350);
+    return;
+  }
+  // stage backdrop per game
+  ctx.fillStyle = "#54400f"; ctx.fillRect(24, 120, VW - 48, 520);
+  ctx.strokeStyle = "#ffd23e"; ctx.lineWidth = 3; ctx.strokeRect(24, 120, VW - 48, 520);
+  g.def.draw(g);
+  // instruction + timer + lives
+  ctx.fillStyle = "#ffd23e"; ctx.font = "bold 44px sans-serif"; ctx.fillText(g.def.word, VW / 2, 84);
+  const frac = Math.max(0, 1 - gTime / gWindow);
+  ctx.fillStyle = "#444"; ctx.fillRect(40, 668, VW - 80, 14);
+  ctx.fillStyle = frac > 0.3 ? "#57d977" : "#e5534b"; ctx.fillRect(40, 668, (VW - 80) * frac, 14);
+  ctx.fillStyle = "#fff"; ctx.font = "bold 15px sans-serif"; ctx.textAlign = "left";
+  ctx.fillText("CLEARED " + cleared, 26, 40);
+  ctx.textAlign = "right";
+  ctx.fillText("MISSES " + "✘".repeat(misses) + "·".repeat(Math.max(0, 4 - misses)), VW - 26, 40);
+  ctx.fillText("SPEED x" + speedup().toFixed(2).replace(/\.?0+$/, ""), VW - 26, 62);
+  ctx.textAlign = "center";
+}
+function drawQA() {
+  const r = fairnessCheck();
+  ctx.fillStyle = "rgba(0,0,0,.88)"; ctx.fillRect(6, 380, VW - 12, 300);
+  ctx.fillStyle = r.ok ? "#7ee787" : "#ff7b72"; ctx.font = "bold 15px sans-serif"; ctx.textAlign = "left";
+  ctx.fillText("QA FAIRNESS: " + (r.ok ? "PASS" : "FAIL"), 16, 406);
+  ctx.fillStyle = "#fff"; ctx.font = "11.5px sans-serif";
+  r.rows.forEach((row, i) => ctx.fillText(row, 16, 430 + i * 20));
+  window.__qaFairness = r;
+}
+
+/* ---------------- loop & input ---------------- */
+let last = 0;
+function frame(ts) {
+  const dt = Math.min(0.05, (ts - (last || ts)) / 1000); last = ts;
+  update(dt); draw();
+  requestAnimationFrame(frame);
+}
+requestAnimationFrame(frame);
+function toGame(e) {
+  const r = canvas.getBoundingClientRect();
+  return { x: (e.clientX - r.left) / r.width * VW, y: (e.clientY - r.top) / r.height * VH };
+}
+canvas.addEventListener("pointerdown", e => {
+  initAudio();
+  if (state === "menu") { startGame(); return; }
+  if (state === "over") { state = "menu"; return; }
+  if (between > 0) return;
+  const p = toGame(e);
+  if (g.def.down) g.def.down(g, p.x, p.y);
+  if (g.def.tap) g.def.tap(g, p.x, p.y);
+});
+canvas.addEventListener("pointermove", e => {
+  if (state !== "play" || between > 0 || !g) return;
+  const p = toGame(e);
+  if (g.def.move) g.def.move(g, p.x);
+});
+window.addEventListener("pointerup", () => {
+  if (state === "play" && between === 0 && g && g.def.up) g.def.up(g);
+});
+window.addEventListener("keydown", e => {
+  initAudio();
+  if (state === "menu" && e.code === "Enter") { startGame(); return; }
+  if (state !== "play" || between > 0 || !g) return;
+  if (e.code === "ArrowLeft" && g.def.key) g.def.key(g, -1);
+  if (e.code === "ArrowRight" && g.def.key) g.def.key(g, 1);
+  if (e.code === "Space") {
+    if (g.def.key) g.def.key(g, 0);
+    if (g.def.tap && (g.def === GAMES[1] || g.def === GAMES[5] || g.def === GAMES[7])) g.def.tap(g, VW / 2, VH / 2);
+    e.preventDefault();
+  }
+});
+document.getElementById("muteBtn").addEventListener("click", e => { e.stopPropagation(); muted = !muted; e.target.textContent = muted ? "🔇" : "🔊"; });
+</script>
+</body>
+</html>

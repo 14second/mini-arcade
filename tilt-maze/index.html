@@ -1,0 +1,423 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, user-scalable=no">
+<meta name="theme-color" content="#12321e">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<title>Tilt Maze</title>
+<style>
+  * { margin:0; padding:0; box-sizing:border-box; }
+  html, body { width:100%; height:100%; overflow:hidden; background:#12321e;
+    font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+    touch-action:none; user-select:none; -webkit-user-select:none; -webkit-tap-highlight-color: transparent; }
+  canvas { position:fixed; inset:0; display:block; touch-action:none; }
+  #muteBtn { position:fixed; top:10px; right:10px; z-index:10; width:48px; height:48px; border-radius:12px;
+    border:2px solid rgba(255,255,255,.7); background:rgba(10,40,20,.5); color:#fff; font-size:22px;
+    line-height:1; cursor:pointer; display:flex; align-items:center; justify-content:center; padding:0; }
+  #stick { position:fixed; left:50%; transform:translateX(-50%); bottom:20px; z-index:10; width:110px; height:110px; border-radius:50%;
+    border:2px solid rgba(255,255,255,.55); background:rgba(10,40,20,.35); }
+  #nub { position:absolute; left:50%; top:50%; width:48px; height:48px; border-radius:50%;
+    background:rgba(255,255,255,.5); transform:translate(-50%,-50%); }
+</style>
+</head>
+<body>
+<canvas id="game"></canvas>
+<button id="muteBtn" aria-label="Toggle sound">🔊</button>
+<div id="stick"><div id="nub"></div></div>
+<script>
+// iOS audio routing: Web Audio defaults to the "ambient" channel, which the
+// iPhone silent switch mutes entirely. Route it to the media/playback
+// channel (iOS 17+ Audio Session API) on the first user gesture and inside
+// audio init, so game music/SFX play even with silent mode on.
+function iosPlaybackSession() {
+  try { if ('audioSession' in navigator) navigator.audioSession.type = 'playback'; } catch (e) {}
+}
+document.addEventListener('pointerdown', iosPlaybackSession, true);
+document.addEventListener('touchstart', iosPlaybackSession, true);
+"use strict";
+/* TILT MAZE — original rolling-ball maze. Tilt with the joystick, a drag
+   anywhere, or the arrow keys (no sensor permission needed). Beat the
+   clock, grab the stars on the risky lines, don't fall off the edge.
+   Fairness (verified by the ?qa=1 self-check): a BFS solver proves a
+   spawn-to-goal path exists in every maze, and every corridor cell is
+   30 px wide vs the 22 px ball — diameter plus an 8 px margin. */
+const VW = 420, VH = 720, CELL = 30, BALL_R = 11, MAZE_OX = 15, MAZE_OY = 96;
+const QA_MODE = /[?&]qa=1/.test(location.search);
+const canvas = document.getElementById("game"), ctx = canvas.getContext("2d");
+let W = 0, H = 0, DPR = 1, scale = 1, ox = 0, oy = 0;
+function resize() {
+  DPR = Math.min(window.devicePixelRatio || 1, 2);
+  W = window.innerWidth; H = window.innerHeight;
+  canvas.width = Math.round(W * DPR); canvas.height = Math.round(H * DPR);
+  canvas.style.width = W + "px"; canvas.style.height = H + "px";
+  scale = Math.min(W / VW, H / VH) * DPR; ox = (W * DPR - VW * scale) / 2; oy = (H * DPR - VH * scale) / 2;
+}
+window.addEventListener("resize", resize); resize();
+
+/* ---------------- audio ---------------- */
+let actx = null, muted = false, musicTimer = null, mStep = 0;
+function initAudio() {
+  iosPlaybackSession();
+  if (!actx) { try { const AC = window.AudioContext || window.webkitAudioContext; if (AC) actx = new AC(); } catch (e) {} }
+  if (actx && actx.state === "suspended") actx.resume();
+  if (actx && !musicTimer) musicTimer = setInterval(musicTick, 200);
+}
+function tone(freq, dur, type, vol, when, slide) {
+  if (!actx || muted) return;
+  const t = when || actx.currentTime, o = actx.createOscillator(), g = actx.createGain();
+  o.type = type || "triangle"; o.frequency.setValueAtTime(freq, t);
+  if (slide) o.frequency.exponentialRampToValueAtTime(Math.max(40, slide), t + dur);
+  g.gain.setValueAtTime(vol || 0.15, t);
+  g.gain.exponentialRampToValueAtTime(0.001, t + dur);
+  o.connect(g); g.connect(actx.destination); o.start(t); o.stop(t + dur + 0.02);
+}
+const BASS = [131, 0, 0, 0, 147, 0, 0, 0, 165, 0, 0, 0, 147, 0, 131, 0];
+const LEAD = [0, 392, 0, 440, 0, 494, 0, 440, 0, 392, 0, 330, 0, 392, 0, 0];
+function musicTick() {
+  if (!actx || muted || state !== "play") return;
+  const b = BASS[mStep % 16], l = LEAD[mStep % 16], t = actx.currentTime;
+  if (b) tone(b, 0.17, "triangle", 0.13, t);
+  if (l) tone(l, 0.13, "sine", 0.09, t);
+  mStep++;
+}
+function sfx(name) {
+  if (!actx || muted) return; const t = actx.currentTime;
+  if (name === "star") { tone(880, 0.09, "sine", 0.13, t); tone(1319, 0.12, "sine", 0.11, t + 0.07); }
+  if (name === "bump") tone(160, 0.07, "square", 0.08, t, 110);
+  if (name === "fall") tone(500, 0.4, "sine", 0.14, t, 90);
+  if (name === "goal") { [523, 659, 784, 1047].forEach((f, i) => tone(f, 0.15, "square", 0.11, t + i * 0.1)); }
+  if (name === "win") { [523, 659, 784, 1047, 1319].forEach((f, i) => tone(f, 0.17, "square", 0.11, t + i * 0.12)); }
+}
+
+/* ---------------- mazes ---------------- */
+/* # wall · . floor · S spawn · G goal · * star · (space) void — falling off costs a ball */
+const MAZES = [
+  { name: "First Roll", rows: [
+    "#############",
+    "#S....#.....#",
+    "#.##..#..#..#",
+    "#..#.....#.*#",
+    "#..#.####...#",
+    "#..#....#.#.#",
+    "#.####..#.#.#",
+    "#....#..#.#.#",
+    "#.##.#..#...#",
+    "#..#.#.####.#",
+    "#..#.#....#.#",
+    "#.*..###..#G#",
+    "#############" ] },
+  { name: "The Gap", rows: [
+    "#############",
+    "#S..#.......#",
+    "#.#.#.#####.#",
+    "#.#...#...#.#",
+    "#.#####.#.#.#",
+    "#.....#.#.#.#",
+    "#.###.#.#.#.#",
+    "#...#...#.#.#",
+    "##.######.#.#",
+    "#.........#.#",
+    "#.#########.#",
+    "#.*........G#",
+    "#############" ] },
+  { name: "Thin Ice", rows: [
+    "#############",
+    "#S#.........#",
+    "#.#.#######.#",
+    "#.#.#.....#.#",
+    "#...#.###.#.#",
+    "#.###...#.#.#",
+    "#...#####.#*#",
+    "#.#.....#.#.#",
+    "#.#.###.#.#.#",
+    "#.#.#...#...#",
+    "#.#.#.#####.#",
+    "#...#......G#",
+    "#############" ] },
+  { name: "Sky Garden", rows: [
+    "##### ##### #",
+    "#S..#    *# #",
+    "#.######### #",
+    "#.#.......# #",
+    "#.#.#####.# #",
+    "#...#   #.# #",
+    "#.### ###.# #",
+    "#.#.......# #",
+    "#.#.####### #",
+    "#.#........ #",
+    "#.###########",
+    "#..........G#",
+    "#############" ] },
+  { name: "The Vault", rows: [
+    "#############",
+    "#S#.........#",
+    "#.#.##.####.#",
+    "#.#.#..#..#*#",
+    "#...#.##.##.#",
+    "#.###....#..#",
+    "#...####.#.##",
+    "##.#....#...#",
+    "#..#.####.#.#",
+    "#.##.....#..#",
+    "#..#####.##.#",
+    "#*..........G",
+    "#############" ] }
+];
+function solveMaze(m) {
+  const rows = m.rows, H = rows.length, Wd = rows[0].length;
+  let s = null, g = null;
+  for (let y = 0; y < H; y++) for (let x = 0; x < Wd; x++) {
+    if (rows[y][x] === "S") s = [x, y];
+    if (rows[y][x] === "G") g = [x, y];
+  }
+  const pass = c => c !== "#" && c !== " ";
+  const dist = new Map([[s.join(","), 0]]), q = [s];
+  while (q.length) {
+    const [x, y] = q.shift(), d = dist.get(x + "," + y);
+    if (x === g[0] && y === g[1]) return d;
+    for (const [nx, ny] of [[x + 1, y], [x - 1, y], [x, y + 1], [x, y - 1]]) {
+      if (nx < 0 || ny < 0 || nx >= Wd || ny >= H) continue;
+      if (!pass(rows[ny][nx]) || dist.has(nx + "," + ny)) continue;
+      dist.set(nx + "," + ny, d + 1); q.push([nx, ny]);
+    }
+  }
+  return -1;
+}
+function fairnessCheck() {
+  const rows = []; let ok = CELL >= BALL_R * 2 + 8;
+  rows.push("Corridor width " + CELL + "px >= ball " + (BALL_R * 2) + "px + 8px margin — " + (ok ? "PASS" : "FAIL"));
+  for (const m of MAZES) {
+    const d = solveMaze(m);
+    const pass = d > 0;
+    if (!pass) ok = false;
+    rows.push(m.name + ": BFS spawn→goal path = " + (pass ? d + " cells" : "NONE") + " — " + (pass ? "PASS" : "FAIL") +
+      " · time limit " + timeLimit(m) + "s (>= 2.2x the " + (d * 0.55).toFixed(0) + "s stroll time)");
+  }
+  return { ok, rows };
+}
+function timeLimit(m) {
+  const d = solveMaze(m);
+  return Math.round(d * 0.55 * 2.2) + 8;
+}
+
+/* ---------------- state ---------------- */
+let state = "menu"; // menu, play, mazeClear, over, win
+let mazeIdx, ball, balls, timeLeft, starsGot, totalTime, tilt, banner, bannerT;
+const keys = { up: false, down: false, left: false, right: false };
+tilt = { x: 0, y: 0 };
+function cellAt(px, py) {
+  const cx = Math.floor((px - MAZE_OX) / CELL), cy = Math.floor((py - MAZE_OY) / CELL);
+  const m = MAZES[mazeIdx];
+  if (cy < 0 || cy >= m.rows.length || cx < 0 || cx >= m.rows[0].length) return " ";
+  return m.rows[cy][cx];
+}
+function spawnBall() {
+  const m = MAZES[mazeIdx];
+  for (let y = 0; y < m.rows.length; y++) for (let x = 0; x < m.rows[0].length; x++)
+    if (m.rows[y][x] === "S") { ball = { x: MAZE_OX + x * CELL + CELL / 2, y: MAZE_OY + y * CELL + CELL / 2, vx: 0, vy: 0 }; return; }
+}
+function startGame() {
+  mazeIdx = 0; totalTime = 0; startMaze(0); state = "play";
+}
+function startMaze(i) {
+  mazeIdx = i; balls = 3; starsGot = 0; timeLeft = timeLimit(MAZES[i]);
+  takenStars = new Set();
+  spawnBall();
+  banner = "MAZE " + (i + 1) + " — " + MAZES[i].name; bannerT = 2.0;
+}
+let takenStars = new Set();
+function goalPos() {
+  const m = MAZES[mazeIdx];
+  for (let y = 0; y < m.rows.length; y++) for (let x = 0; x < m.rows[0].length; x++)
+    if (m.rows[y][x] === "G") return { x: MAZE_OX + x * CELL + CELL / 2, y: MAZE_OY + y * CELL + CELL / 2 };
+}
+function loseBall(why) {
+  balls--; sfx("fall");
+  if (balls <= 0) { state = "over"; return; }
+  banner = why + " " + balls + " left"; bannerT = 1.4;
+  spawnBall();
+}
+
+/* ---------------- update ---------------- */
+function update(dt) {
+  if (bannerT > 0) bannerT -= dt;
+  if (state !== "play") return;
+  totalTime += dt; timeLeft -= dt;
+  if (timeLeft <= 0) { state = "over"; return; }
+  // tilt input: keys override, else joystick/drag vector
+  let tx = tilt.x, ty = tilt.y;
+  if (keys.left) tx = -1; if (keys.right) tx = 1;
+  if (keys.up) ty = -1; if (keys.down) ty = 1;
+  const ACC = 620;
+  ball.vx += tx * ACC * dt; ball.vy += ty * ACC * dt;
+  ball.vx *= Math.pow(0.35, dt); ball.vy *= Math.pow(0.35, dt);
+  const spd = Math.hypot(ball.vx, ball.vy), MAXV = 330;
+  if (spd > MAXV) { ball.vx = ball.vx / spd * MAXV; ball.vy = ball.vy / spd * MAXV; }
+  // move axis-by-axis with wall collision
+  ball.x += ball.vx * dt;
+  if (hitsWall(ball.x, ball.y)) { ball.x -= ball.vx * dt; if (Math.abs(ball.vx) > 60) sfx("bump"); ball.vx = -ball.vx * 0.35; }
+  ball.y += ball.vy * dt;
+  if (hitsWall(ball.x, ball.y)) { ball.y -= ball.vy * dt; if (Math.abs(ball.vy) > 60) sfx("bump"); ball.vy = -ball.vy * 0.35; }
+  // void = falling
+  if (cellAt(ball.x, ball.y) === " ") { loseBall("Off the edge! Balls:"); return; }
+  // stars
+  const m = MAZES[mazeIdx];
+  for (let yy = 0; yy < m.rows.length; yy++) for (let xx = 0; xx < m.rows[0].length; xx++) {
+    if (m.rows[yy][xx] === "*" && !takenStars.has(xx + "," + yy)) {
+      const sx = MAZE_OX + xx * CELL + CELL / 2, sy = MAZE_OY + yy * CELL + CELL / 2;
+      if (Math.hypot(ball.x - sx, ball.y - sy) < BALL_R + 9) { takenStars.add(xx + "," + yy); starsGot++; score += 50; sfx("star"); }
+    }
+  }
+  // goal
+  const gp = goalPos();
+  if (gp && Math.hypot(ball.x - gp.x, ball.y - gp.y) < BALL_R + 10) {
+    score += 200 + Math.round(timeLeft) * 5 + starsGot * 0; sfx("goal");
+    if (mazeIdx + 1 < MAZES.length) { state = "mazeClear"; }
+    else {
+      state = "win"; sfx("win");
+      const best = parseFloat(localStorage.getItem("tiltMazeBest") || "0");
+      if (!best || totalTime < best) localStorage.setItem("tiltMazeBest", totalTime.toFixed(1));
+      const bs = parseInt(localStorage.getItem("tiltMazeScore") || "0", 10);
+      if (score > bs) localStorage.setItem("tiltMazeScore", String(score));
+    }
+  }
+}
+let score = 0;
+function hitsWall(px, py) {
+  const pts = [[px - BALL_R + 2, py], [px + BALL_R - 2, py], [px, py - BALL_R + 2], [px, py + BALL_R - 2],
+    [px - BALL_R * 0.7, py - BALL_R * 0.7], [px + BALL_R * 0.7, py - BALL_R * 0.7], [px - BALL_R * 0.7, py + BALL_R * 0.7], [px + BALL_R * 0.7, py + BALL_R * 0.7]];
+  return pts.some(([x, y]) => cellAt(x, y) === "#");
+}
+
+/* ---------------- draw ---------------- */
+function draw() {
+  ctx.setTransform(1, 0, 0, 1, 0, 0);
+  ctx.fillStyle = "#12321e"; ctx.fillRect(0, 0, canvas.width, canvas.height);
+  ctx.setTransform(scale, 0, 0, scale, ox, oy);
+  ctx.textAlign = "center";
+  if (state === "menu") {
+    ctx.fillStyle = "#ffd23e"; ctx.font = "bold 42px sans-serif"; ctx.fillText("TILT MAZE", VW / 2, 120);
+    ctx.fillStyle = "#fff"; ctx.font = "16px sans-serif";
+    ctx.fillText("Roll the marble to the gold gate before", VW / 2, 158);
+    ctx.fillText("the clock runs out. Use the joystick,", VW / 2, 182);
+    ctx.fillText("drag anywhere, or the arrow keys.", VW / 2, 206);
+    ctx.fillText("Mind the gaps — off the edge costs a ball.", VW / 2, 242);
+    ctx.fillText("5 mazes · 3 balls each · stars are risky bonus lines.", VW / 2, 268);
+    const best = localStorage.getItem("tiltMazeBest"), bs = localStorage.getItem("tiltMazeScore");
+    if (best) { ctx.font = "bold 16px sans-serif"; ctx.fillText("Best full run: " + best + "s · Best score: " + (bs || 0), VW / 2, 308); }
+    ctx.font = "bold 21px sans-serif"; ctx.fillText("TAP TO START", VW / 2, 360);
+    if (QA_MODE) drawQA();
+    return;
+  }
+  const m = MAZES[mazeIdx];
+  // board
+  for (let y = 0; y < m.rows.length; y++) for (let x = 0; x < m.rows[0].length; x++) {
+    const c = m.rows[y][x], px = MAZE_OX + x * CELL, py = MAZE_OY + y * CELL;
+    if (c === " ") continue;
+    ctx.fillStyle = c === "#" ? "#2e6b3e" : ((x + y) % 2 ? "#dcefe0" : "#cfe6d4");
+    ctx.fillRect(px, py, CELL, CELL);
+    if (c === "#") { ctx.fillStyle = "rgba(0,0,0,.22)"; ctx.fillRect(px, py + CELL - 6, CELL, 6); }
+    if (c === "G") { ctx.fillStyle = "#ffd23e"; ctx.beginPath(); ctx.arc(px + CELL / 2, py + CELL / 2, 12, 0, 7); ctx.fill(); ctx.fillStyle = "#7a5200"; ctx.font = "bold 13px sans-serif"; ctx.fillText("G", px + CELL / 2, py + CELL / 2 + 1); }
+    if (c === "*" && !takenStars.has(x + "," + y)) { ctx.font = "17px sans-serif"; ctx.fillText("⭐", px + CELL / 2, py + CELL / 2 + 2); }
+    if (c === "S") { ctx.strokeStyle = "rgba(20,80,40,.4)"; ctx.beginPath(); ctx.arc(px + CELL / 2, py + CELL / 2, 10, 0, 7); ctx.stroke(); }
+  }
+  // ball
+  const grd = ctx.createRadialGradient(ball.x - 4, ball.y - 5, 2, ball.x, ball.y, BALL_R + 2);
+  grd.addColorStop(0, "#ffffff"); grd.addColorStop(0.5, "#d43a2f"); grd.addColorStop(1, "#8c1f16");
+  ctx.fillStyle = grd; ctx.beginPath(); ctx.arc(ball.x, ball.y, BALL_R, 0, 7); ctx.fill();
+  // HUD
+  ctx.fillStyle = "rgba(0,0,0,.4)"; ctx.fillRect(8, 8, 250, 56);
+  ctx.fillStyle = timeLeft < 8 ? "#ff7b72" : "#fff"; ctx.font = "bold 21px sans-serif"; ctx.textAlign = "left";
+  ctx.fillText("⏱ " + Math.max(0, timeLeft).toFixed(0) + "s", 16, 36);
+  ctx.font = "14px sans-serif"; ctx.fillStyle = "#ffd23e";
+  ctx.fillText(MAZES[mazeIdx].name + " · Balls " + "●".repeat(Math.max(0, balls)) + " · ⭐ " + starsGot, 16, 56);
+  ctx.fillStyle = "#fff"; ctx.font = "bold 15px sans-serif"; ctx.textAlign = "right";
+  ctx.fillText("SCORE " + score, VW - 64, 36);
+  ctx.textAlign = "center";
+  if (bannerT > 0) { ctx.fillStyle = "#ffd23e"; ctx.font = "bold 22px sans-serif"; ctx.fillText(banner, VW / 2, 84); }
+  if (state === "mazeClear") overlay("MAZE CLEAR! 🎉", "Tap for the next maze");
+  if (state === "over") overlay("OUT OF TIME / BALLS", "Score " + score + " — tap to retry");
+  if (state === "win") overlay("ALL MAZES CLEARED! 🏆", "Time " + totalTime.toFixed(1) + "s · Score " + score + " — tap to play again");
+}
+function overlay(t, s) {
+  ctx.fillStyle = "rgba(0,0,0,.55)"; ctx.fillRect(0, 0, VW, VH);
+  ctx.fillStyle = "#ffd23e"; ctx.font = "bold 28px sans-serif"; ctx.textAlign = "center"; ctx.fillText(t, VW / 2, 340);
+  ctx.fillStyle = "#fff"; ctx.font = "16px sans-serif"; ctx.fillText(s, VW / 2, 374);
+}
+function drawQA() {
+  const r = fairnessCheck();
+  ctx.fillStyle = "rgba(0,0,0,.88)"; ctx.fillRect(6, 400, VW - 12, 190);
+  ctx.fillStyle = r.ok ? "#7ee787" : "#ff7b72"; ctx.font = "bold 15px sans-serif"; ctx.textAlign = "left";
+  ctx.fillText("QA FAIRNESS: " + (r.ok ? "PASS" : "FAIL"), 16, 428);
+  ctx.fillStyle = "#fff"; ctx.font = "11.5px sans-serif";
+  r.rows.forEach((row, i) => ctx.fillText(row, 16, 454 + i * 21));
+  window.__qaFairness = r;
+}
+
+/* ---------------- loop & input ---------------- */
+let last = 0;
+function frame(ts) {
+  const dt = Math.min(0.05, (ts - (last || ts)) / 1000); last = ts;
+  update(dt); draw();
+  requestAnimationFrame(frame);
+}
+requestAnimationFrame(frame);
+function toGame(e) {
+  const r = canvas.getBoundingClientRect();
+  return { x: (e.clientX - r.left) / r.width * VW, y: (e.clientY - r.top) / r.height * VH };
+}
+canvas.addEventListener("pointerdown", e => {
+  initAudio();
+  if (state === "menu") { score = 0; startGame(); return; }
+  if (state === "mazeClear") { startMaze(mazeIdx + 1); state = "play"; return; }
+  if (state === "over" || state === "win") { state = "menu"; return; }
+  const p = toGame(e); dragFrom = p;
+});
+let dragFrom = null;
+canvas.addEventListener("pointermove", e => {
+  if (state !== "play") return;
+  const p = toGame(e);
+  if (stickActive) return; // joystick sets tilt itself
+  if (dragFrom) {
+    tilt.x = Math.max(-1, Math.min(1, (p.x - dragFrom.x) / 60));
+    tilt.y = Math.max(-1, Math.min(1, (p.y - dragFrom.y) / 60));
+  }
+});
+window.addEventListener("pointerup", () => { dragFrom = null; if (!stickActive) { tilt.x = 0; tilt.y = 0; } });
+// virtual joystick
+const stick = document.getElementById("stick"), nub = document.getElementById("nub");
+let stickActive = false;
+function stickMove(e) {
+  const r = stick.getBoundingClientRect(), cx = r.left + r.width / 2, cy = r.top + r.height / 2;
+  let dx = (e.clientX - cx) / (r.width / 2), dy = (e.clientY - cy) / (r.height / 2);
+  const m = Math.hypot(dx, dy); if (m > 1) { dx /= m; dy /= m; }
+  tilt.x = dx; tilt.y = dy;
+  nub.style.transform = "translate(calc(-50% + " + dx * 30 + "px), calc(-50% + " + dy * 30 + "px))";
+}
+stick.addEventListener("pointerdown", e => { e.preventDefault(); initAudio(); stickActive = true; stickMove(e); });
+stick.addEventListener("pointermove", e => { if (stickActive) stickMove(e); });
+["pointerup", "pointerleave", "pointercancel"].forEach(ev => stick.addEventListener(ev, () => {
+  stickActive = false; tilt.x = 0; tilt.y = 0;
+  nub.style.transform = "translate(-50%,-50%)";
+}));
+document.getElementById("muteBtn").addEventListener("click", e => { e.stopPropagation(); muted = !muted; e.target.textContent = muted ? "🔇" : "🔊"; });
+window.addEventListener("keydown", e => {
+  initAudio();
+  if (e.code === "ArrowLeft") keys.left = true;
+  if (e.code === "ArrowRight") keys.right = true;
+  if (e.code === "ArrowUp") keys.up = true;
+  if (e.code === "ArrowDown") keys.down = true;
+  if (e.code === "Enter" && state === "menu") { score = 0; startGame(); }
+  if (["ArrowLeft", "ArrowRight", "ArrowUp", "ArrowDown", "Space"].includes(e.code)) e.preventDefault();
+});
+window.addEventListener("keyup", e => {
+  if (e.code === "ArrowLeft") keys.left = false;
+  if (e.code === "ArrowRight") keys.right = false;
+  if (e.code === "ArrowUp") keys.up = false;
+  if (e.code === "ArrowDown") keys.down = false;
+});
+</script>
+</body>
+</html>

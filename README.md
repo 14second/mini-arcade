@@ -30,4 +30,11 @@ Tiny browser games, each a single dependency-free HTML file. Play them in any br
 - **Duck Season** — tap the ducks before they escape.
 - **Ice Peak** — climb the ice, bonk the blocks, reach the summit.
 
+- **Title Bout** — pattern boxing: read the tell, counter, climb the ladder.
+- **Coast Runner** — pseudo-3D coastal cruise against the checkpoint clock.
+- **Alley Brawl** — street beat-'em-up: clear the waves, drop the boss.
+- **Star Rail** — on-rails space run; thread gates, break the Dreadnought.
+- **Micro Mayhem** — 4-second microgames, faster every round.
+- **Tilt Maze** — roll the marble to the gate; mind the gaps in the floor.
+
 Every game has synthesized music and sound effects generated in code — no audio files.

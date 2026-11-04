@@ -1,0 +1,542 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, user-scalable=no">
+<meta name="theme-color" content="#20304a">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<title>Title Bout</title>
+<style>
+  * { margin:0; padding:0; box-sizing:border-box; }
+  html, body { width:100%; height:100%; overflow:hidden; background:#20304a;
+    font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+    touch-action:none; user-select:none; -webkit-user-select:none; -webkit-tap-highlight-color: transparent; }
+  canvas { position:fixed; inset:0; display:block; touch-action:none; }
+  #muteBtn { position:fixed; top:10px; right:10px; z-index:10; width:48px; height:48px; border-radius:12px;
+    border:2px solid rgba(255,255,255,.7); background:rgba(20,30,50,.5); color:#fff; font-size:22px;
+    line-height:1; cursor:pointer; display:flex; align-items:center; justify-content:center; padding:0; }
+  .ctl { position:fixed; z-index:10; width:60px; height:60px; border-radius:50%;
+    border:2px solid rgba(255,255,255,.7); background:rgba(20,30,50,.45); color:#fff; font-size:16px; font-weight:700;
+    display:flex; align-items:center; justify-content:center; }
+  .ctl:active { background:rgba(255,255,255,.35); }
+  #btnDL { left:12px; bottom:96px; } #btnDR { left:84px; bottom:96px; }
+  #btnDuck { left:12px; bottom:24px; } #btnBlock { left:84px; bottom:24px; }
+  #btnJL { right:84px; bottom:96px; background:rgba(200,60,50,.5); } #btnJR { right:12px; bottom:96px; background:rgba(200,60,50,.5); }
+  #btnJL2 { display:none; }
+  #btnPower { left:50%; transform:translateX(-50%); bottom:170px; width:84px; height:84px; font-size:15px;
+    background:rgba(250,180,20,.75); color:#221a00; display:none; }
+</style>
+</head>
+<body>
+<canvas id="game"></canvas>
+<button id="muteBtn" aria-label="Toggle sound">🔊</button>
+<button class="ctl" id="btnDL">◀</button>
+<button class="ctl" id="btnDR">▶</button>
+<button class="ctl" id="btnDuck">▼</button>
+<button class="ctl" id="btnBlock">🛡</button>
+<button class="ctl" id="btnJL">L🥊</button>
+<button class="ctl" id="btnJR">R🥊</button>
+<button class="ctl" id="btnPower">⭐POW</button>
+<script>
+// iOS audio routing: Web Audio defaults to the "ambient" channel, which the
+// iPhone silent switch mutes entirely. Route it to the media/playback
+// channel (iOS 17+ Audio Session API) on the first user gesture and inside
+// audio init, so game music/SFX play even with silent mode on.
+function iosPlaybackSession() {
+  try { if ('audioSession' in navigator) navigator.audioSession.type = 'playback'; } catch (e) {}
+}
+document.addEventListener('pointerdown', iosPlaybackSession, true);
+document.addEventListener('touchstart', iosPlaybackSession, true);
+"use strict";
+/* TITLE BOUT — original pattern-boxing game. Watch the tell, dodge or duck,
+   counter during the telegraph to stun them and earn a Power Punch.
+   Fairness (verified by the ?qa=1 self-check): every attack in every
+   opponent's pattern table telegraphs >= 400 ms before impact (>= 320 ms
+   for the champion) and keeps a counter window >= 120 ms, so a prepared
+   player can always react. */
+const VW = 420, VH = 720;
+const canvas = document.getElementById("game"), ctx = canvas.getContext("2d");
+let W = 0, H = 0, DPR = 1, scale = 1, ox = 0, oy = 0;
+function resize() {
+  DPR = Math.min(window.devicePixelRatio || 1, 2);
+  W = window.innerWidth; H = window.innerHeight;
+  canvas.width = Math.round(W * DPR); canvas.height = Math.round(H * DPR);
+  canvas.style.width = W + "px"; canvas.style.height = H + "px";
+  scale = Math.min(W / VW, H / VH) * DPR; ox = (W * DPR - VW * scale) / 2; oy = (H * DPR - VH * scale) / 2;
+}
+window.addEventListener("resize", resize); resize();
+
+/* ---------------- audio ---------------- */
+let actx = null, muted = false, musicTimer = null, mStep = 0;
+function initAudio() {
+  iosPlaybackSession();
+  if (!actx) { try { const AC = window.AudioContext || window.webkitAudioContext; if (AC) actx = new AC(); } catch (e) {} }
+  if (actx && actx.state === "suspended") actx.resume();
+  if (actx && !musicTimer) musicTimer = setInterval(musicTick, 190);
+}
+function tone(freq, dur, type, vol, when, slide) {
+  if (!actx || muted) return;
+  const t = when || actx.currentTime, o = actx.createOscillator(), g = actx.createGain();
+  o.type = type || "triangle"; o.frequency.setValueAtTime(freq, t);
+  if (slide) o.frequency.exponentialRampToValueAtTime(Math.max(40, slide), t + dur);
+  g.gain.setValueAtTime(vol || 0.15, t);
+  g.gain.exponentialRampToValueAtTime(0.001, t + dur);
+  o.connect(g); g.connect(actx.destination); o.start(t); o.stop(t + dur + 0.02);
+}
+// Funky ringside loop: bass roots all >= 130 Hz (triangle), sparse lead.
+const BASS = [131, 0, 131, 0, 147, 0, 131, 0, 165, 0, 165, 0, 196, 175, 165, 147];
+const LEAD = [262, 0, 0, 330, 0, 0, 392, 0, 330, 0, 262, 0, 294, 0, 0, 0];
+function musicTick() {
+  if (!actx || muted || state !== "fight") return;
+  const b = BASS[mStep % 16], l = LEAD[mStep % 16], t = actx.currentTime;
+  if (b) tone(b, 0.16, "triangle", 0.16, t);
+  if (l) tone(l, 0.12, "square", 0.05, t);
+  mStep++;
+}
+function sfx(name) {
+  if (!actx || muted) return; const t = actx.currentTime;
+  if (name === "jab") tone(220, 0.07, "square", 0.12, t, 130);
+  else if (name === "counter") { tone(392, 0.1, "square", 0.16, t); tone(523, 0.12, "square", 0.14, t + 0.06); }
+  else if (name === "hurt") tone(150, 0.18, "sawtooth", 0.14, t, 70);
+  else if (name === "dodge") tone(520, 0.08, "sine", 0.1, t, 760);
+  else if (name === "power") { tone(196, 0.3, "sawtooth", 0.2, t, 660); tone(784, 0.22, "square", 0.12, t + 0.1); }
+  else if (name === "down") { tone(330, 0.5, "triangle", 0.2, t, 55); }
+  else if (name === "bell") { tone(880, 0.4, "sine", 0.16, t); tone(880, 0.4, "sine", 0.16, t + 0.45); }
+  else if (name === "win") { [523, 659, 784, 1047].forEach((f, i) => tone(f, 0.18, "square", 0.12, t + i * 0.12)); }
+}
+
+/* ---------------- data ---------------- */
+/* dodge: which defence avoids the hit — "side" (dodge either way),
+   "duck", "sideOnly" (duck does NOT work), "any" (dodge or duck).
+   Block always reduces damage to a quarter. counterMs: after the telegraph,
+   a jab landing in this early swing window still counts as a counter. */
+const OPPONENTS = [
+  { name: "Pops Malone", title: "The Retired Railwayman", hp: 60, color: "#8a9a5b", skin: "#e8b98a", speed: 1.0, downs: 1,
+    taunt: "Sonny, I was counterpunching before you were born.",
+    attacks: [
+      { id: "jab", telegraph: 720, counterMs: 160, dmg: 6, dodge: "any" },
+      { id: "haymaker", telegraph: 950, counterMs: 200, dmg: 12, dodge: "sideOnly" }
+    ] },
+  { name: "Disco Danny", title: "The Boogie Bruiser", hp: 75, color: "#c86bd7", skin: "#a06a3a", speed: 1.15, downs: 2,
+    taunt: "You can't hit what shimmies, baby!",
+    attacks: [
+      { id: "jab", telegraph: 560, counterMs: 150, dmg: 7, dodge: "any" },
+      { id: "hook", telegraph: 620, counterMs: 150, dmg: 10, dodge: "duck" },
+      { id: "feintJab", telegraph: 480, counterMs: 140, dmg: 8, dodge: "any", feint: true }
+    ] },
+  { name: "Vex Marlowe", title: "The Velvet Trap", hp: 90, color: "#3a7ca5", skin: "#f0c8a0", speed: 1.3, downs: 2,
+    taunt: "Every punch you throw is a door I walk through.",
+    attacks: [
+      { id: "jab", telegraph: 430, counterMs: 130, dmg: 8, dodge: "any" },
+      { id: "cross", telegraph: 470, counterMs: 130, dmg: 11, dodge: "side" },
+      { id: "upper", telegraph: 520, counterMs: 150, dmg: 13, dodge: "sideOnly" },
+      { id: "double", telegraph: 450, counterMs: 130, dmg: 6, dodge: "any", hits: 2 }
+    ] },
+  { name: "Rex Calder", title: "CHAMPION — The Cobra", hp: 115, color: "#d43a2f", skin: "#7a4a26", speed: 1.45, downs: 2, champ: true,
+    taunt: "One clean look at the Cobra Rush. That's all anyone gets.",
+    attacks: [
+      { id: "jab", telegraph: 340, counterMs: 120, dmg: 9, dodge: "any" },
+      { id: "cross", telegraph: 380, counterMs: 120, dmg: 12, dodge: "side" },
+      { id: "upper", telegraph: 430, counterMs: 130, dmg: 14, dodge: "sideOnly" },
+      { id: "cobraRush", telegraph: 820, counterMs: 160, dmg: 999, dodge: "sideOnly", special: true }
+    ] }
+];
+const QA_MODE = /[?&]qa=1/.test(location.search);
+function fairnessCheck() {
+  const rows = []; let ok = true;
+  for (const o of OPPONENTS) {
+    const floor = o.champ ? 320 : 400;
+    const minT = Math.min.apply(null, o.attacks.map(a => a.telegraph));
+    const minC = Math.min.apply(null, o.attacks.map(a => a.counterMs));
+    const pass = minT >= floor && minC >= 120;
+    if (!pass) ok = false;
+    rows.push(o.name + ": min telegraph " + minT + "ms (floor " + floor + "), min counter window " + minC + "ms (floor 120) — " + (pass ? "PASS" : "FAIL"));
+  }
+  return { ok, rows };
+}
+
+/* ---------------- state ---------------- */
+let state = "menu"; // menu, fight, downCount, roundBreak, fightOver
+let rung = parseInt(localStorage.getItem("titleBoutRung") || "0", 10); // highest beaten index; -1 none beaten => store beatenCount
+let beaten = parseInt(localStorage.getItem("titleBoutBeaten") || "0", 10);
+let oppIdx = 0, opp = null;
+let player, enemy, round, roundT, msg, msgT, shake;
+function newPlayer() { return { hp: 100, maxHp: 100, downs: 0, state: "idle", t: 0, x: 0, duck: 0, token: false, combo: 0 }; }
+function newEnemy(o) {
+  return { def: o, hp: o.hp, maxHp: o.hp, downs: 0, state: "idle", t: 0, idleFor: 900 + Math.random() * 700,
+    atk: null, hitDone: false, stunHits: 0, x: 0, flash: 0, getUpAt: 6 };
+}
+function startFight(i) {
+  oppIdx = i; opp = OPPONENTS[i];
+  player = newPlayer(); enemy = newEnemy(opp);
+  round = 1; roundT = 60; state = "fight"; msg = opp.name; msgT = 2.2; shake = 0;
+  sfx("bell");
+}
+function endFight(won, how) {
+  state = "fightOver"; msg = won ? ("KO! You beat " + opp.name + " — " + how) : ("Down for the count — " + how);
+  if (won) { sfx("win"); if (oppIdx + 1 > beaten) { beaten = oppIdx + 1; localStorage.setItem("titleBoutBeaten", String(beaten)); } }
+  else sfx("down");
+}
+
+/* ---------------- combat ---------------- */
+function pickAttack() {
+  const list = enemy.def.attacks;
+  return list[Math.floor(Math.random() * list.length)];
+}
+function playerJab() {
+  if (state !== "fight" || player.state === "down") return;
+  initAudio();
+  if (player.t > 0 && player.state !== "idle") return;
+  player.state = "jab"; player.t = 0.16;
+  // What does the jab meet?
+  if (enemy.state === "telegraph") { counterHit(); return; }
+  if (enemy.state === "attack" && enemy.t * 1000 <= enemy.atk.counterMs) { counterHit(); return; }
+  if (enemy.state === "stunned") {
+    enemy.hp -= 3; enemy.stunHits++; enemy.flash = 0.08; sfx("jab");
+    if (enemy.hp <= 0) return knockEnemyDown();
+    if (enemy.stunHits >= 8) { enemy.state = "idle"; enemy.t = 0; enemy.idleFor = 500; }
+    return;
+  }
+  if (enemy.state === "idle") {
+    enemy.hp -= 2; enemy.flash = 0.08; sfx("jab");
+    if (enemy.hp <= 0) return knockEnemyDown();
+    // Hitting a waiting opponent often wakes them straight into an attack.
+    if (Math.random() < 0.45) startTelegraph();
+    return;
+  }
+  // whiff during attack resolution — nothing.
+}
+function counterHit() {
+  enemy.hp -= 4; enemy.flash = 0.12; enemy.state = "stunned"; enemy.t = 0; enemy.stunHits = 0;
+  enemy.stunFor = 2.4; player.token = true; player.combo++;
+  document.getElementById("btnPower").style.display = "flex";
+  msg = "COUNTER! ⭐ earned"; msgT = 1.0; sfx("counter");
+  if (enemy.hp <= 0) knockEnemyDown();
+}
+function powerPunch() {
+  if (state !== "fight" || !player.token) return;
+  player.token = false; document.getElementById("btnPower").style.display = "none";
+  player.state = "power"; player.t = 0.3;
+  if (enemy.state === "idle" || enemy.state === "telegraph" || enemy.state === "stunned" || enemy.state === "attack") {
+    enemy.hp -= 18; enemy.flash = 0.2; shake = 0.35; sfx("power");
+    msg = "POWER PUNCH!"; msgT = 1.0;
+    if (enemy.hp <= 0) return knockEnemyDown();
+    enemy.state = "idle"; enemy.t = 0; enemy.idleFor = 1100;
+  }
+}
+function startTelegraph() {
+  enemy.atk = pickAttack(); enemy.state = "telegraph"; enemy.t = 0; enemy.hitDone = false;
+  enemy.feinted = false;
+}
+function resolveEnemyHit() {
+  const a = enemy.atk;
+  const dodging = player.state === "dodgeL" || player.state === "dodgeR";
+  const ducking = player.state === "duck";
+  const blocking = player.state === "block";
+  let avoided = false;
+  if (a.dodge === "any") avoided = dodging || ducking;
+  else if (a.dodge === "side" || a.dodge === "sideOnly") avoided = dodging;
+  else if (a.dodge === "duck") avoided = ducking || dodging;
+  if (avoided) { msg = "Missed!"; msgT = 0.6; sfx("dodge"); return; }
+  let dmg = a.dmg;
+  if (blocking) dmg = Math.ceil(dmg / 4);
+  if (a.special && !blocking) { // Cobra Rush: one clean hit = knockdown
+    return knockPlayerDown("The Cobra Rush lands clean!");
+  }
+  player.hp -= dmg; shake = Math.max(shake, 0.18); sfx("hurt");
+  if (player.token && !blocking) { player.token = false; document.getElementById("btnPower").style.display = "none"; msg = "Hit! ⭐ lost"; msgT = 0.9; }
+  if (player.hp <= 0) knockPlayerDown(opp.name + " puts you down!");
+}
+function knockEnemyDown() {
+  enemy.state = "down"; enemy.t = 0; enemy.downs++; enemy.getUpAt = enemy.downs <= enemy.def.downs ? 4 + Math.floor(Math.random() * 3) : 99;
+  state = "downCount"; countT = 0; countFor = "enemy"; sfx("down");
+  msg = opp.name + " is DOWN!"; msgT = 1.4;
+}
+function knockPlayerDown(why) {
+  player.state = "down"; player.downs++; state = "downCount"; countT = 0; countFor = "player";
+  mashCount = 0; downWhy = why; sfx("down");
+}
+let countT = 0, countFor = "enemy", mashCount = 0, downWhy = "";
+
+/* ---------------- update ---------------- */
+let last = 0;
+function update(dt) {
+  if (msgT > 0) msgT -= dt;
+  if (shake > 0) shake -= dt;
+  if (player && player.t > 0) { player.t -= dt; if (player.t <= 0 && player.state !== "down") player.state = "idle"; }
+  if (state === "fight") {
+    roundT -= dt;
+    if (roundT <= 0) {
+      if (round >= 3) {
+        const pf = player.hp / player.maxHp, ef = enemy.hp / enemy.maxHp;
+        return endFight(pf > ef, pf > ef ? "you take the decision on the cards." : "the judges give it to " + opp.name + ".");
+      }
+      round++; roundT = 60; state = "roundBreak"; breakT = 2.2; sfx("bell");
+      msg = "Round " + round; msgT = 2.0;
+      player.hp = Math.min(player.maxHp, player.hp + 15); enemy.hp = Math.min(enemy.maxHp, enemy.hp + 15);
+      enemy.state = "idle"; enemy.t = 0; enemy.idleFor = 1200;
+      return;
+    }
+    // enemy brain
+    if (enemy.state === "idle") {
+      enemy.t += dt * 1000;
+      if (enemy.t >= enemy.idleFor) startTelegraph();
+    } else if (enemy.state === "telegraph") {
+      enemy.t += dt * 1000;
+      const a = enemy.atk;
+      if (a.feint && !enemy.feinted && enemy.t >= a.telegraph * 0.55) {
+        // Feint: the first wind-up was fake — a real (fully-telegraphed) jab follows.
+        enemy.feinted = true; enemy.atk = { id: "jab", telegraph: 480, counterMs: 140, dmg: a.dmg, dodge: "any" };
+        enemy.t = 0; msg = "Feint!"; msgT = 0.5;
+      } else if (enemy.t >= a.telegraph) {
+        enemy.state = "attack"; enemy.t = 0; enemy.hitDone = false;
+      }
+    } else if (enemy.state === "attack") {
+      enemy.t += dt * 1000;
+      const swingMs = 260;
+      if (!enemy.hitDone && enemy.t >= swingMs * 0.55) { enemy.hitDone = true; resolveEnemyHit(); if (state !== "fight") return; }
+      if (enemy.t >= swingMs) {
+        const a = enemy.atk;
+        if (a.hits === 2 && !enemy.secondDone) { enemy.secondDone = true; enemy.state = "telegraph"; enemy.t = 0; enemy.atk = { id: "jab2", telegraph: 430, counterMs: 130, dmg: a.dmg, dodge: "any" }; }
+        else { enemy.secondDone = false; enemy.state = "idle"; enemy.t = 0; enemy.idleFor = (800 + Math.random() * 800) / enemy.def.speed; }
+      }
+    } else if (enemy.state === "stunned") {
+      enemy.t += dt;
+      if (enemy.t >= (enemy.stunFor || 2.4)) { enemy.state = "idle"; enemy.t = 0; enemy.idleFor = 600; }
+    }
+    if (enemy.flash > 0) enemy.flash -= dt;
+  } else if (state === "roundBreak") {
+    breakT -= dt; if (breakT <= 0) state = "fight";
+  } else if (state === "downCount") {
+    countT += dt;
+    const count = Math.floor(countT / 0.55) + 1;
+    if (countFor === "enemy") {
+      if (count >= enemy.getUpAt && enemy.getUpAt < 90) {
+        enemy.hp = Math.round(enemy.maxHp * 0.4); enemy.state = "idle"; enemy.t = 0; enemy.idleFor = 1000;
+        player.state = "idle"; state = "fight"; msg = opp.name + " beats the count!"; msgT = 1.2; sfx("bell");
+      } else if (count >= 10) { endFight(true, "the count reaches ten."); }
+    } else {
+      const need = player.downs >= 3 ? 999 : 6 + player.downs * 3; // 3rd knockdown = TKO
+      if (mashCount >= need) {
+        player.hp = 35; player.state = "idle"; enemy.state = "idle"; enemy.t = 0; enemy.idleFor = 1300;
+        state = "fight"; msg = "You're up!"; msgT = 1.0; sfx("bell");
+      } else if (count >= 10) {
+        endFight(false, downWhy);
+      }
+    }
+  }
+}
+let breakT = 0;
+
+/* ---------------- draw ---------------- */
+function drawFighter(x, y, s, def, flash, pose, faceDown) {
+  ctx.save(); ctx.translate(x, y); ctx.scale(s, s);
+  if (faceDown) { ctx.rotate(Math.PI / 2.2); ctx.globalAlpha = 0.9; }
+  // legs / shorts
+  ctx.fillStyle = def.color; ctx.fillRect(-34, 62, 26, 52); ctx.fillRect(8, 62, 26, 52);
+  ctx.fillStyle = "#f5f5f5"; ctx.fillRect(-40, 48, 80, 18);
+  // torso
+  ctx.fillStyle = def.skin; ctx.beginPath(); ctx.roundRect(-42, -28, 84, 82, 18); ctx.fill();
+  // head
+  ctx.beginPath(); ctx.arc(0, -58, 27, 0, 7); ctx.fill();
+  ctx.fillStyle = "#222"; ctx.beginPath(); ctx.arc(0, -74, 27, Math.PI, 0); ctx.fill(); // hair cap
+  // eyes (angry brows)
+  ctx.strokeStyle = "#222"; ctx.lineWidth = 4;
+  ctx.beginPath(); ctx.moveTo(-16, -62); ctx.lineTo(-4, -58); ctx.moveTo(16, -62); ctx.lineTo(4, -58); ctx.stroke();
+  // gloves by pose
+  ctx.fillStyle = flash > 0 ? "#fff" : "#c0271b";
+  const gy = pose === "telegraph" ? -6 : pose === "attack" ? 26 : 6;
+  const gx = pose === "attack" ? 6 : 30;
+  ctx.beginPath(); ctx.arc(-gx, gy, 17, 0, 7); ctx.fill();
+  ctx.beginPath(); ctx.arc(gx, gy, 17, 0, 7); ctx.fill();
+  if (pose === "telegraph") { // wind-up glow tell
+    ctx.strokeStyle = "rgba(255,220,60,.95)"; ctx.lineWidth = 5;
+    ctx.beginPath(); ctx.arc(0, -10, 74, 0, 7); ctx.stroke();
+  }
+  if (pose === "stunned") {
+    ctx.fillStyle = "#ffd23e"; ctx.font = "20px sans-serif"; ctx.textAlign = "center";
+    ctx.fillText("★ ★ ★", 0, -102);
+  }
+  ctx.restore();
+}
+function bar(x, y, w, frac, color, label) {
+  ctx.fillStyle = "rgba(0,0,0,.45)"; ctx.fillRect(x - 2, y - 2, w + 4, 18);
+  ctx.fillStyle = "#444"; ctx.fillRect(x, y, w, 14);
+  ctx.fillStyle = color; ctx.fillRect(x, y, w * Math.max(0, frac), 14);
+  ctx.fillStyle = "#fff"; ctx.font = "bold 12px sans-serif"; ctx.textAlign = "left"; ctx.fillText(label, x, y - 6);
+}
+function draw() {
+  ctx.setTransform(1, 0, 0, 1, 0, 0);
+  ctx.fillStyle = "#20304a"; ctx.fillRect(0, 0, canvas.width, canvas.height);
+  ctx.setTransform(scale, 0, 0, scale, ox + (shake > 0 ? (Math.random() - 0.5) * 10 * scale : 0), oy);
+  // arena
+  const g = ctx.createLinearGradient(0, 0, 0, VH);
+  g.addColorStop(0, "#141c2e"); g.addColorStop(0.55, "#2c3e5d"); g.addColorStop(0.56, "#7a4a34"); g.addColorStop(1, "#5d3826");
+  ctx.fillStyle = g; ctx.fillRect(0, 0, VW, VH);
+  ctx.fillStyle = "rgba(255,255,255,.06)";
+  for (let i = 0; i < 24; i++) { const x = (i * 73) % VW, y = (i * 37) % 170 + 16; ctx.fillRect(x, y, 5, 5); } // crowd dots
+  // ring ropes
+  ctx.strokeStyle = "#d8d8e2"; ctx.lineWidth = 4;
+  [300, 348, 396].forEach(y => { ctx.beginPath(); ctx.moveTo(18, y); ctx.lineTo(VW - 18, y); ctx.stroke(); });
+  ctx.strokeStyle = "#a33"; ctx.lineWidth = 7;
+  ctx.beginPath(); ctx.moveTo(18, 288); ctx.lineTo(18, 408); ctx.moveTo(VW - 18, 288); ctx.lineTo(VW - 18, 408); ctx.stroke();
+
+  ctx.textAlign = "center";
+  if (state === "menu") {
+    ctx.fillStyle = "#ffd23e"; ctx.font = "bold 44px sans-serif"; ctx.fillText("TITLE BOUT", VW / 2, 120);
+    ctx.fillStyle = "#fff"; ctx.font = "16px sans-serif";
+    ctx.fillText("Watch the golden tell. Dodge, duck, counter —", VW / 2, 156);
+    ctx.fillText("earn a ⭐ and land the POWER PUNCH.", VW / 2, 180);
+    ctx.font = "bold 18px sans-serif"; ctx.fillText("— THE LADDER —", VW / 2, 232);
+    OPPONENTS.forEach((o, i) => {
+      const y = 262 + i * 92, locked = i > beaten;
+      ctx.fillStyle = locked ? "rgba(255,255,255,.08)" : "rgba(255,255,255,.16)";
+      ctx.beginPath(); ctx.roundRect(40, y, VW - 80, 76, 12); ctx.fill();
+      ctx.fillStyle = locked ? "#889" : "#fff"; ctx.font = "bold 20px sans-serif"; ctx.textAlign = "left";
+      ctx.fillText((i + 1) + ". " + o.name, 62, y + 32);
+      ctx.font = "14px sans-serif"; ctx.fillStyle = locked ? "#778" : "#ccd";
+      ctx.fillText(locked ? "Beat the fighter above to unlock" : o.title, 62, y + 56);
+      if (i < beaten) { ctx.fillStyle = "#7ee787"; ctx.font = "bold 20px sans-serif"; ctx.textAlign = "right"; ctx.fillText("✔ BEATEN", VW - 62, y + 46); ctx.textAlign = "left"; }
+    });
+    ctx.textAlign = "center"; ctx.fillStyle = "#aab"; ctx.font = "14px sans-serif";
+    ctx.fillText("Tap a fighter to step into the ring.", VW / 2, 660);
+    if (QA_MODE) drawQA();
+    return;
+  }
+  // HUD
+  bar(16, 30, 176, player.hp / player.maxHp, "#57d977", "YOU" + (player.token ? "  ⭐" : ""));
+  bar(VW - 192, 30, 176, enemy.hp / enemy.maxHp, "#e5534b", opp.name.toUpperCase());
+  ctx.fillStyle = "#fff"; ctx.font = "bold 20px sans-serif"; ctx.textAlign = "center";
+  ctx.fillText("R" + round + "  ⏱ " + Math.max(0, Math.ceil(roundT)), VW / 2, 46);
+  ctx.font = "13px sans-serif"; ctx.fillStyle = "#ccd";
+  ctx.fillText("Downs — you: " + player.downs + "/3 · them: " + enemy.downs, VW / 2, 68);
+  // opponent
+  const sway = enemy.state === "idle" ? Math.sin(perfNow / 300) * 8 : 0;
+  const ePose = enemy.state === "telegraph" ? "telegraph" : enemy.state === "attack" ? "attack" : enemy.state === "stunned" ? "stunned" : "idle";
+  const eScale = enemy.state === "attack" ? 1.75 : 1.5;
+  drawFighter(VW / 2 + sway + (enemy.state === "attack" ? 0 : 0), 330, eScale, enemy.def, enemy.flash, ePose, enemy.state === "down");
+  if (enemy.state === "telegraph") {
+    ctx.fillStyle = "#ffd23e"; ctx.font = "bold 22px sans-serif";
+    ctx.fillText("!", VW / 2, 168);
+  }
+  // player gloves
+  const duckOff = player.state === "duck" ? 34 : 0;
+  const px = player.state === "dodgeL" ? -56 : player.state === "dodgeR" ? 56 : 0;
+  const jabUp = player.state === "jab" || player.state === "power" ? -64 : 0;
+  ctx.fillStyle = player.state === "power" ? "#ffd23e" : "#2255aa";
+  ctx.beginPath(); ctx.arc(96 + px, 616 + duckOff + jabUp, 34, 0, 7); ctx.fill();
+  ctx.beginPath(); ctx.arc(324 + px, 616 + duckOff + jabUp, 34, 0, 7); ctx.fill();
+  ctx.fillStyle = "rgba(255,255,255,.25)";
+  ctx.beginPath(); ctx.arc(96 + px, 606 + duckOff + jabUp, 12, 0, 7); ctx.fill();
+  ctx.beginPath(); ctx.arc(324 + px, 606 + duckOff + jabUp, 12, 0, 7); ctx.fill();
+  if (player.state === "down") {
+    ctx.fillStyle = "rgba(0,0,0,.5)"; ctx.fillRect(0, 0, VW, VH);
+    ctx.fillStyle = "#fff"; ctx.font = "bold 34px sans-serif"; ctx.fillText("DOWN!", VW / 2, 300);
+  }
+  if (state === "downCount") {
+    const count = Math.min(10, Math.floor(countT / 0.55) + 1);
+    ctx.fillStyle = "#ffd23e"; ctx.font = "bold 84px sans-serif"; ctx.fillText(String(count), VW / 2, 220);
+    if (countFor === "player") {
+      ctx.fillStyle = "#fff"; ctx.font = "bold 22px sans-serif";
+      ctx.fillText(player.downs >= 3 ? "TKO — THREE KNOCKDOWNS…" : "TAP ANYWHERE — GET UP! (" + mashCount + "/" + (6 + player.downs * 3) + ")", VW / 2, 640);
+    }
+  }
+  if (state === "roundBreak") {
+    ctx.fillStyle = "rgba(0,0,0,.45)"; ctx.fillRect(0, 0, VW, VH);
+    ctx.fillStyle = "#fff"; ctx.font = "bold 40px sans-serif"; ctx.fillText("ROUND " + round, VW / 2, 350);
+    ctx.font = "16px sans-serif"; ctx.fillText("Corners, both of you. +15 health.", VW / 2, 386);
+  }
+  if (state === "fightOver") {
+    ctx.fillStyle = "rgba(0,0,0,.55)"; ctx.fillRect(0, 0, VW, VH);
+    ctx.fillStyle = "#ffd23e"; ctx.font = "bold 26px sans-serif";
+    wrapText(msg, VW / 2, 300, VW - 60, 32);
+    ctx.fillStyle = "#fff"; ctx.font = "17px sans-serif";
+    ctx.fillText(beaten >= 4 ? "🏆 YOU ARE THE CHAMPION! 🏆" : "Tap to return to the ladder", VW / 2, 420);
+  }
+  if (msgT > 0 && state === "fight") {
+    ctx.fillStyle = "#ffd23e"; ctx.font = "bold 24px sans-serif"; ctx.fillText(msg, VW / 2, 108);
+  }
+}
+function wrapText(text, x, y, maxW, lh) {
+  const words = text.split(" "); let line = "", yy = y;
+  for (const w of words) {
+    if (ctx.measureText(line + w).width > maxW && line) { ctx.fillText(line, x, yy); yy += lh; line = ""; }
+    line += w + " ";
+  }
+  ctx.fillText(line, x, yy);
+}
+function drawQA() {
+  const r = fairnessCheck();
+  ctx.fillStyle = "rgba(0,0,0,.85)"; ctx.fillRect(6, 380, VW - 12, 320);
+  ctx.fillStyle = r.ok ? "#7ee787" : "#ff7b72"; ctx.font = "bold 15px sans-serif"; ctx.textAlign = "left";
+  ctx.fillText("QA FAIRNESS: " + (r.ok ? "PASS" : "FAIL"), 16, 406);
+  ctx.fillStyle = "#fff"; ctx.font = "11px sans-serif";
+  r.rows.forEach((row, i) => { wrapText(row, 16, 428 + i * 44, VW - 40, 14); });
+  ctx.fillStyle = "#7ee787"; ctx.font = "bold 13px sans-serif";
+  ctx.fillText(window.__qaErrors === 0 ? "console errors: 0" : "console errors: " + window.__qaErrors, 16, 640);
+}
+
+/* ---------------- loop ---------------- */
+let perfNow = 0;
+function frame(ts) {
+  perfNow = ts;
+  const dt = Math.min(0.05, (ts - (last || ts)) / 1000); last = ts;
+  if (state !== "menu") update(dt);
+  draw();
+  requestAnimationFrame(frame);
+}
+requestAnimationFrame(frame);
+
+/* ---------------- input ---------------- */
+function toGame(e) { const r = canvas.getBoundingClientRect(); return { x: (e.clientX - r.left) * (canvas.width / r.width - 0) / DPR / scale - ox / scale, y: (e.clientY - r.top) * (canvas.height / r.height) / DPR / scale - oy / scale }; }
+canvas.addEventListener("pointerdown", e => {
+  initAudio();
+  const p = toGame(e);
+  if (state === "menu") {
+    OPPONENTS.forEach((o, i) => { const y = 262 + i * 92; if (i <= beaten && p.y >= y && p.y <= y + 76 && p.x >= 40 && p.x <= VW - 40) startFight(i); });
+    return;
+  }
+  if (state === "downCount" && countFor === "player") { mashCount++; tone(300 + mashCount * 20, 0.06, "square", 0.1); return; }
+  if (state === "fightOver") { state = "menu"; document.getElementById("btnPower").style.display = "none"; return; }
+});
+function bindHold(id, on, off) {
+  const el = document.getElementById(id);
+  el.addEventListener("pointerdown", e => { e.preventDefault(); initAudio(); on(); });
+  if (off) { el.addEventListener("pointerup", off); el.addEventListener("pointerleave", off); el.addEventListener("pointercancel", off); }
+}
+function setPlayer(s) { if (state === "fight" && player.state === "idle") { player.state = s; player.t = s === "duck" || s === "block" ? 999 : 0.28; if (s === "duck" || s === "block") player.t = 999; } }
+bindHold("btnDL", () => setPlayer("dodgeL"), () => { if (player && player.state === "dodgeL") { player.state = "idle"; player.t = 0; } });
+bindHold("btnDR", () => setPlayer("dodgeR"), () => { if (player && player.state === "dodgeR") { player.state = "idle"; player.t = 0; } });
+bindHold("btnDuck", () => setPlayer("duck"), () => { if (player && player.state === "duck") { player.state = "idle"; player.t = 0; } });
+bindHold("btnBlock", () => setPlayer("block"), () => { if (player && player.state === "block") { player.state = "idle"; player.t = 0; } });
+bindHold("btnJL", () => playerJab());
+bindHold("btnJR", () => playerJab());
+bindHold("btnPower", () => powerPunch());
+document.getElementById("muteBtn").addEventListener("click", e => { e.stopPropagation(); muted = !muted; e.target.textContent = muted ? "🔇" : "🔊"; });
+window.addEventListener("keydown", e => {
+  initAudio();
+  if (state === "downCount" && countFor === "player") { mashCount++; return; }
+  if (state === "fightOver" && (e.code === "Space" || e.code === "Enter")) { state = "menu"; return; }
+  switch (e.code) {
+    case "ArrowLeft": setPlayer("dodgeL"); break;
+    case "ArrowRight": setPlayer("dodgeR"); break;
+    case "ArrowDown": setPlayer("duck"); break;
+    case "ArrowUp": setPlayer("block"); break;
+    case "KeyZ": playerJab(); break;
+    case "KeyX": playerJab(); break;
+    case "KeyC": case "Space": powerPunch(); break;
+  }
+  if (["ArrowLeft", "ArrowRight", "ArrowDown", "ArrowUp", "Space"].includes(e.code)) e.preventDefault();
+});
+window.addEventListener("keyup", e => {
+  if (!player) return;
+  if (e.code === "ArrowLeft" && player.state === "dodgeL") { player.state = "idle"; player.t = 0; }
+  if (e.code === "ArrowRight" && player.state === "dodgeR") { player.state = "idle"; player.t = 0; }
+  if (e.code === "ArrowDown" && player.state === "duck") { player.state = "idle"; player.t = 0; }
+  if (e.code === "ArrowUp" && player.state === "block") { player.state = "idle"; player.t = 0; }
+});
+if (QA_MODE) { window.__qaErrors = 0; window.addEventListener("error", () => window.__qaErrors++); }
+</script>
+</body>
+</html>
