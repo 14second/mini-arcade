@@ -279,7 +279,11 @@ function collideMove(dt) {
   // X axis
   p.x += p.vx * dt;
   let box = { l: p.x - p.w / 2, r: p.x + p.w / 2, t: p.y - p.h, b: p.y };
-  let c0 = Math.floor(box.l / TILE), c1 = Math.floor(box.r / TILE), r0 = Math.floor(box.t / TILE), r1 = Math.floor(box.b / TILE);
+  // Tile ranges come from a box inset by 0.01: the Y pass leaves the feet
+  // EXACTLY on a tile boundary (p.y = r * TILE), so floor(b / TILE) counts
+  // the floor being stood on as a row the box overlaps — the X sweep then
+  // treats that floor as a wall and ejects the player sideways every frame.
+  let c0 = Math.floor((box.l + 0.01) / TILE), c1 = Math.floor((box.r - 0.01) / TILE), r0 = Math.floor((box.t + 0.01) / TILE), r1 = Math.floor((box.b - 0.01) / TILE);
   for (let r = r0; r <= r1; r++) for (let c = c0; c <= c1; c++) if (solidTile(c, r, p)) {
     if (p.vx > 0) p.x = c * TILE - p.w / 2 - 0.01; else if (p.vx < 0) p.x = (c + 1) * TILE + p.w / 2 + 0.01;
     p.vx = 0; box = { l: p.x - p.w / 2, r: p.x + p.w / 2, t: p.y - p.h, b: p.y };
@@ -287,7 +291,7 @@ function collideMove(dt) {
   // Y axis
   p.y += p.vy * dt;
   box = { l: p.x - p.w / 2, r: p.x + p.w / 2, t: p.y - p.h, b: p.y };
-  c0 = Math.floor(box.l / TILE); c1 = Math.floor(box.r / TILE); r0 = Math.floor(box.t / TILE); r1 = Math.floor(box.b / TILE);
+  c0 = Math.floor((box.l + 0.01) / TILE); c1 = Math.floor((box.r - 0.01) / TILE); r0 = Math.floor((box.t + 0.01) / TILE); r1 = Math.floor((box.b - 0.01) / TILE);
   let grounded = false;
   for (let r = r0; r <= r1; r++) for (let c = c0; c <= c1; c++) if (solidTile(c, r, p)) {
     if (p.vy > 0) { p.y = r * TILE; grounded = true; }
