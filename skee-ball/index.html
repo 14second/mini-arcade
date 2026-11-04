@@ -1,0 +1,494 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, user-scalable=no">
+<meta name="theme-color" content="#140a10">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<title>Skee-Ball</title>
+<style>
+  * { margin:0; padding:0; box-sizing:border-box; }
+  html, body {
+    width:100%; height:100%; overflow:hidden; background:#140a10;
+    font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+    touch-action:none; user-select:none; -webkit-user-select:none;
+    -webkit-tap-highlight-color: transparent;
+  }
+  canvas { position:fixed; inset:0; display:block; touch-action:none; }
+  #muteBtn {
+    position:fixed; top:10px; right:10px; z-index:10;
+    width:48px; height:48px; border-radius:12px;
+    border:2px solid rgba(255,170,200,.5); background:rgba(22,8,14,.62);
+    color:#fff; font-size:22px; line-height:1; cursor:pointer;
+    touch-action:none; user-select:none; -webkit-user-select:none;
+    display:flex; align-items:center; justify-content:center; padding:0;
+  }
+</style>
+</head>
+<body>
+<canvas id="game"></canvas>
+<button id="muteBtn" aria-label="Toggle sound">🔊</button>
+<script>
+// iOS audio routing: route Web Audio to the media/playback channel (iOS 17+
+// Audio Session API) on the first gesture and inside audio init, so sound
+// plays even with the silent switch on.
+function iosPlaybackSession() {
+  try { if ('audioSession' in navigator) navigator.audioSession.type = 'playback'; } catch (e) {}
+}
+document.addEventListener('pointerdown', iosPlaybackSession, true);
+document.addEventListener('touchstart', iosPlaybackSession, true);
+
+"use strict";
+/* ============================================================
+   SKEE-BALL — flick the ball up the lane, hop the ramp, and
+   drop it in the rings: 10 / 20 / 30 / 40 / 50, with two 100
+   cups tucked in the top corners. Flick speed is your power,
+   flick angle is your aim. 9 balls a game.
+   The physics is tuned so a medium flick lands mid-rings —
+   the scoring band is wide, the 50 takes a measured hand.
+   ============================================================ */
+
+const canvas = document.getElementById("game");
+const ctx = canvas.getContext("2d");
+let W = 0, H = 0, DPR = 1, u = 4;
+function clamp(v, a, b) { return v < a ? a : (v > b ? b : v); }
+function lerp(a, b, t) { return a + (b - a) * t; }
+
+// Target geometry
+let TC = { x: 0, y: 0 };       // rings centre
+const RINGS = [ // [planeRadius, points] innermost first
+  [30, 50], [58, 40], [88, 30], [120, 20], [155, 10]
+];
+const SQUASH = 0.42;
+let cups = [];                  // {x, y, r}
+let lipY = 0, startY = 0;
+
+function resize() {
+  DPR = Math.min(window.devicePixelRatio || 1, 2);
+  W = window.innerWidth; H = window.innerHeight;
+  canvas.width = Math.round(W * DPR); canvas.height = Math.round(H * DPR);
+  canvas.style.width = W + "px"; canvas.style.height = H + "px";
+  ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+  u = Math.min(W, H) / 100;
+  TC = { x: W / 2, y: H * 0.295 };
+  const s = Math.min(1.15, Math.max(0.8, W / 390));
+  cups = [
+    { x: W / 2 - W * 0.315, y: H * 0.175, r: 21 * s },
+    { x: W / 2 + W * 0.315, y: H * 0.175, r: 21 * s }
+  ];
+  lipY = H * 0.52;
+  startY = H * 0.895;
+}
+window.addEventListener("resize", resize);
+
+function scoreAtLanding(x, y) {
+  for (const c of cups) {
+    if (Math.hypot(x - c.x, y - c.y) < c.r + 4) return 100;
+  }
+  const dd = Math.hypot(x - TC.x, (y - TC.y) / SQUASH);
+  for (const [r, pts] of RINGS) {
+    if (dd < r * Math.min(1.15, Math.max(0.8, W / 390))) return pts;
+  }
+  return 0;
+}
+
+// ---------- Audio ----------
+let actx = null, muted = false;
+const muteBtn = document.getElementById("muteBtn");
+function initAudio() {
+  iosPlaybackSession();
+  if (!actx) {
+    try {
+      const AC = window.AudioContext || window.webkitAudioContext;
+      if (AC) actx = new AC();
+    } catch (e) { actx = null; }
+    if (actx) startMusicScheduler();
+  }
+  if (actx && actx.state === "suspended") actx.resume();
+}
+function beep(freq, dur, type, vol, slide) {
+  if (!actx || muted) return;
+  const t = actx.currentTime;
+  const o = actx.createOscillator(), g = actx.createGain();
+  o.type = type || "square";
+  o.frequency.setValueAtTime(freq, t);
+  if (slide) o.frequency.exponentialRampToValueAtTime(Math.max(20, slide), t + dur);
+  g.gain.setValueAtTime(vol || 0.08, t);
+  g.gain.exponentialRampToValueAtTime(0.0001, t + dur);
+  o.connect(g); g.connect(actx.destination);
+  o.start(t); o.stop(t + dur + 0.02);
+}
+function noiseBurst(dur, vol, freq) {
+  if (!actx || muted) return;
+  const t = actx.currentTime;
+  const len = Math.max(1, Math.floor(actx.sampleRate * dur));
+  const buf = actx.createBuffer(1, len, actx.sampleRate);
+  const d = buf.getChannelData(0);
+  for (let i = 0; i < len; i++) d[i] = (Math.random() * 2 - 1) * (1 - i / len);
+  const src = actx.createBufferSource(); src.buffer = buf;
+  const f = actx.createBiquadFilter(); f.type = "lowpass"; f.frequency.value = freq || 600;
+  const g = actx.createGain(); g.gain.value = vol || 0.12;
+  src.connect(f); f.connect(g); g.connect(actx.destination); src.start(t);
+}
+function sfxRoll()  { noiseBurst(0.18, 0.06, 500); }
+function sfxLand(pts) {
+  noiseBurst(0.08, 0.16, 700);
+  if (pts >= 50) [784, 988, 1174, 1568].forEach((f, i) => setTimeout(() => beep(f, 0.1, "square", 0.055), i * 65));
+  else if (pts > 0) beep(880, 0.09, "square", 0.05);
+  else beep(220, 0.14, "square", 0.05, 140);
+}
+
+// Carnival groove, BPM 100. Bass >= MIDI 45.
+const BPM = 100, STEP_DUR = 60 / BPM / 2;
+const BASS = [
+  48,0,48,0, 0,0,55,0, 53,0,53,0, 0,0,50,0,
+  48,0,48,0, 0,0,55,0, 57,0,55,0, 53,0,50,0
+];
+const LEAD = [
+  72,0,0,0, 76,0,0,0, 0,0,79,0, 0,0,0,0,
+  81,0,0,0, 79,0,0,0, 76,0,0,0, 0,0,0,0
+];
+const PADS = [ [48,52,55], [53,57,60], [48,52,55], [50,53,57] ];
+let musicStep = 0, nextNoteTime = 0, musicTimer = null;
+function midiFreq(m) { return 440 * Math.pow(2, (m - 69) / 12); }
+function toneAt(midi, when, dur, type, vol) {
+  const o = actx.createOscillator(), g = actx.createGain();
+  o.type = type; o.frequency.setValueAtTime(midiFreq(midi), when);
+  g.gain.setValueAtTime(0.0001, when);
+  g.gain.exponentialRampToValueAtTime(vol, when + 0.012);
+  g.gain.exponentialRampToValueAtTime(0.0001, when + dur);
+  o.connect(g); g.connect(actx.destination);
+  o.start(when); o.stop(when + dur + 0.03);
+}
+function scheduleStep(step, when) {
+  if (muted) return;
+  const b = BASS[step % 32]; if (b) toneAt(b, when, STEP_DUR * 0.9, "square", 0.029);
+  const l = LEAD[step % 32]; if (l) toneAt(l, when, STEP_DUR * 1.5, "triangle", 0.018);
+  if (step % 8 === 0) {
+    const chord = PADS[Math.floor(step / 8) % PADS.length];
+    for (let i = 0; i < chord.length; i++) toneAt(chord[i], when, STEP_DUR * 7.6, "triangle", 0.009);
+  }
+}
+function startMusicScheduler() {
+  if (musicTimer !== null || !actx) return;
+  musicStep = 0; nextNoteTime = actx.currentTime + 0.06;
+  musicTimer = setInterval(function () {
+    if (!actx) return;
+    if (nextNoteTime < actx.currentTime) nextNoteTime = actx.currentTime + 0.05;
+    while (nextNoteTime < actx.currentTime + 0.12) {
+      scheduleStep(musicStep, nextNoteTime);
+      nextNoteTime += STEP_DUR; musicStep = (musicStep + 1) % 32;
+    }
+  }, 25);
+}
+function setMuted(m) { muted = m; muteBtn.textContent = muted ? "🔇" : "🔊"; }
+muteBtn.addEventListener("pointerdown", function (e) { e.stopPropagation(); e.preventDefault(); initAudio(); setMuted(!muted); });
+muteBtn.addEventListener("click", function (e) { e.stopPropagation(); e.preventDefault(); });
+
+// ---------- Game state ----------
+let state = "menu"; // menu | ready | rolling | land | over
+const BALLS = 9;
+let results = [];
+let total = 0, landTimer = 0, lastPts = null, flashRing = -1;
+let best = 0;
+try { best = parseInt(localStorage.getItem("skeeball_best") || "0", 10) || 0; } catch (e) { best = 0; }
+const ball = { x: 0, y: 0, vx: 0, vy: 0, z: 0, vz: 0, air: false, r: 15 };
+function resetBall() {
+  ball.x = W / 2; ball.y = startY; ball.vx = 0; ball.vy = 0;
+  ball.z = 0; ball.vz = 0; ball.air = false;
+  ball.r = Math.max(12, W * 0.040);
+}
+function startGame() {
+  initAudio();
+  results = []; total = 0; lastPts = null;
+  resetBall();
+  state = "ready";
+}
+function roll(power, angleDeg) {
+  if (state !== "ready") return false;
+  const v0 = lerp(H * 0.55, H * 1.45, clamp(power, 0, 1));
+  const ang = clamp(angleDeg || 0, -22, 22) * Math.PI / 180;
+  ball.vx = Math.sin(ang) * v0;
+  ball.vy = -Math.cos(ang) * v0;
+  state = "rolling";
+  sfxRoll();
+  return true;
+}
+function landBall() {
+  const pts = scoreAtLanding(ball.x, ball.y);
+  results.push(pts);
+  total += pts;
+  lastPts = pts;
+  flashRing = pts;
+  sfxLand(pts);
+  state = "land"; landTimer = 0.85;
+}
+function update(dt) {
+  if (state === "land") {
+    landTimer -= dt;
+    if (landTimer <= 0) {
+      if (results.length >= BALLS) {
+        state = "over";
+        if (total > best) { best = total; try { localStorage.setItem("skeeball_best", String(best)); } catch (e) {} }
+      } else { resetBall(); state = "ready"; }
+    }
+    return;
+  }
+  if (state !== "rolling") return;
+  const sub = 3, sdt = dt / sub;
+  for (let s = 0; s < sub; s++) {
+    if (!ball.air) {
+      ball.vy += H * 0.90 * sdt; // rolling uphill decel (vy is negative going up)
+      ball.vx *= Math.pow(0.5, sdt);
+      ball.x += ball.vx * sdt;
+      ball.y += ball.vy * sdt;
+      if (ball.vy >= 0) { // never made the lip: rolls back
+        if (ball.y >= startY) { ball.y = startY; results.push(0); total += 0; lastPts = 0; state = "land"; landTimer = 0.6; sfxLand(0); return; }
+      }
+      if (ball.y <= lipY && ball.vy < 0) {
+        ball.air = true;
+        const speed = -ball.vy;
+        ball.vz = speed * 0.42;
+        ball.z = 0;
+      }
+    } else {
+      ball.vz -= H * 2.2 * sdt;
+      ball.z += ball.vz * sdt;
+      ball.x += ball.vx * sdt;
+      ball.y += ball.vy * sdt;
+      if (ball.z <= 0 && ball.vz < 0) {
+        ball.z = 0;
+        // back wall: overshoot drops at the back edge of the target
+        if (ball.y < H * 0.115) ball.y = H * 0.115;
+        landBall();
+        return;
+      }
+    }
+    // lane side walls while rolling low
+    if (!ball.air && ball.y > lipY) {
+      const laneHalf = W * 0.30;
+      if (ball.x < W / 2 - laneHalf + ball.r) { ball.x = W / 2 - laneHalf + ball.r; ball.vx = Math.abs(ball.vx) * 0.6; }
+      if (ball.x > W / 2 + laneHalf - ball.r) { ball.x = W / 2 + laneHalf - ball.r; ball.vx = -Math.abs(ball.vx) * 0.6; }
+    }
+    if (ball.x < ball.r) { ball.x = ball.r; ball.vx = Math.abs(ball.vx) * 0.6; }
+    if (ball.x > W - ball.r) { ball.x = W - ball.r; ball.vx = -Math.abs(ball.vx) * 0.6; }
+  }
+}
+
+// ---------- Input ----------
+let flick = null;
+canvas.addEventListener("pointerdown", function (e) {
+  initAudio();
+  if (state === "menu" || state === "over") { startGame(); return; }
+  flick = { samples: [{ x: e.clientX, y: e.clientY, t: performance.now() }] };
+});
+canvas.addEventListener("pointermove", function (e) {
+  if (!flick) return;
+  const now = performance.now();
+  flick.samples.push({ x: e.clientX, y: e.clientY, t: now });
+  while (flick.samples.length > 2 && now - flick.samples[0].t > 150) flick.samples.shift();
+});
+function endFlick(cancelled) {
+  if (!flick) return;
+  const samples = flick.samples; flick = null;
+  if (cancelled || state !== "ready" || samples.length < 2) return;
+  const a = samples[0], b = samples[samples.length - 1];
+  const dt = Math.max(16, b.t - a.t) / 1000;
+  const vy = (b.y - a.y) / dt, vx = (b.x - a.x) / dt;
+  if (vy > -300) return; // not a flick
+  const power = clamp((-vy - 300) / (H * 1.15), 0.05, 1);
+  const ang = Math.atan2(vx, -vy) * 180 / Math.PI;
+  roll(power, clamp(ang, -22, 22));
+}
+canvas.addEventListener("pointerup", function () { endFlick(false); });
+canvas.addEventListener("pointercancel", function () { endFlick(true); });
+let spaceCharge = -1, kbAngle = 0;
+window.addEventListener("keydown", function (e) {
+  if (["ArrowLeft", "ArrowRight", " "].includes(e.key)) e.preventDefault();
+  initAudio();
+  if (e.key === "m" || e.key === "M") { setMuted(!muted); return; }
+  if (e.key === "ArrowLeft") kbAngle = Math.max(-22, kbAngle - 3);
+  if (e.key === "ArrowRight") kbAngle = Math.min(22, kbAngle + 3);
+  if (e.key === " " && state === "ready" && spaceCharge < 0) spaceCharge = 0;
+  if ((e.key === " " || e.key === "Enter") && (state === "menu" || state === "over")) startGame();
+});
+window.addEventListener("keyup", function (e) {
+  if (e.key === " " && spaceCharge >= 0) {
+    roll(clamp(spaceCharge, 0.05, 1), kbAngle);
+    spaceCharge = -1;
+  }
+});
+
+// ---------- Draw ----------
+function drawTarget() {
+  const s = Math.min(1.15, Math.max(0.8, W / 390));
+  // target surround
+  ctx.fillStyle = "#2a1420";
+  ctx.beginPath(); ctx.ellipse(TC.x, TC.y, 175 * s, 175 * SQUASH * s + 26, 0, 0, Math.PI * 2); ctx.fill();
+  ctx.strokeStyle = "#59324a"; ctx.lineWidth = 3; ctx.stroke();
+  const colors = { 10: "#274b8f", 20: "#2e7d4f", 30: "#c9a227", 40: "#c25e1e", 50: "#b03050" };
+  for (let i = RINGS.length - 1; i >= 0; i--) {
+    const [r, pts] = RINGS[i];
+    ctx.beginPath(); ctx.ellipse(TC.x, TC.y, r * s, r * SQUASH * s, 0, 0, Math.PI * 2);
+    ctx.fillStyle = colors[pts]; ctx.fill();
+    ctx.strokeStyle = "rgba(255,255,255,0.65)"; ctx.lineWidth = 2; ctx.stroke();
+    if (flashRing === pts && state === "land") {
+      ctx.fillStyle = "rgba(255,255,255,0.35)"; ctx.fill();
+    }
+    ctx.fillStyle = "rgba(255,255,255,0.92)";
+    ctx.font = "bold " + Math.round(r * 0.34 * s) + "px system-ui"; ctx.textAlign = "center"; ctx.textBaseline = "middle";
+    const ly = TC.y - (i > 0 ? (RINGS[i - 1][0] + r) / 2 : r * 0.45) * SQUASH * s - (i === 0 ? 2 : 0);
+    ctx.fillText(String(pts), TC.x, i === 0 ? TC.y : ly + (RINGS[i][0] * SQUASH * s) * 0.5);
+  }
+  // cups
+  for (const c of cups) {
+    ctx.beginPath(); ctx.arc(c.x, c.y, c.r, 0, Math.PI * 2);
+    ctx.fillStyle = (flashRing === 100 && state === "land") ? "#ffe98a" : "#ffd94d"; ctx.fill();
+    ctx.strokeStyle = "#8a6d1f"; ctx.lineWidth = 2.5; ctx.stroke();
+    ctx.fillStyle = "#5c430a";
+    ctx.font = "bold " + Math.round(c.r * 0.72) + "px system-ui"; ctx.textAlign = "center"; ctx.textBaseline = "middle";
+    ctx.fillText("100", c.x, c.y + 1);
+  }
+}
+function draw() {
+  const g = ctx.createLinearGradient(0, 0, 0, H);
+  g.addColorStop(0, "#1d0f18"); g.addColorStop(1, "#33182b");
+  ctx.fillStyle = g; ctx.fillRect(0, 0, W, H);
+  drawTarget();
+  // ramp + lane
+  const laneHalf = W * 0.30;
+  const lg = ctx.createLinearGradient(0, lipY, 0, H);
+  lg.addColorStop(0, "#7a4a2b"); lg.addColorStop(0.25, "#96603a"); lg.addColorStop(1, "#6e4526");
+  ctx.fillStyle = lg;
+  ctx.beginPath();
+  ctx.moveTo(W / 2 - laneHalf, H);
+  ctx.lineTo(W / 2 - W * 0.185, lipY);
+  ctx.lineTo(W / 2 + W * 0.185, lipY);
+  ctx.lineTo(W / 2 + laneHalf, H);
+  ctx.closePath(); ctx.fill();
+  // ramp lip highlight
+  ctx.strokeStyle = "#ffb066"; ctx.lineWidth = 3;
+  ctx.beginPath(); ctx.moveTo(W / 2 - W * 0.185, lipY); ctx.lineTo(W / 2 + W * 0.185, lipY); ctx.stroke();
+  // lane boards
+  ctx.strokeStyle = "rgba(60,32,14,0.5)"; ctx.lineWidth = 1.5;
+  for (let i = -2; i <= 2; i++) {
+    ctx.beginPath();
+    ctx.moveTo(W / 2 + i * laneHalf / 2.4, H);
+    ctx.lineTo(W / 2 + i * W * 0.075, lipY);
+    ctx.stroke();
+  }
+  // score card
+  ctx.textAlign = "left"; ctx.textBaseline = "middle";
+  ctx.font = "bold " + Math.round(u * 4.6) + "px system-ui, sans-serif";
+  ctx.fillStyle = "#ffe3ef";
+  if (state !== "menu") ctx.fillText("TOTAL " + total, 12, 24);
+  // ball pips
+  if (state !== "menu") {
+    for (let i = 0; i < BALLS; i++) {
+      const bx = 14 + i * (u * 4.4), by = 24 + u * 5.6;
+      ctx.beginPath(); ctx.arc(bx, by, u * 1.55, 0, Math.PI * 2);
+      if (i < results.length) { ctx.fillStyle = results[i] > 0 ? "#ffd94d" : "#5a4a55"; }
+      else if (i === results.length && state !== "over") { ctx.fillStyle = "#fff"; }
+      else ctx.fillStyle = "rgba(255,255,255,0.25)";
+      ctx.fill();
+      if (i < results.length) {
+        ctx.fillStyle = "#40262f";
+        ctx.font = "bold " + Math.round(u * 2.2) + "px system-ui"; ctx.textAlign = "center";
+        ctx.fillText(String(results[i]), bx, by + 0.5);
+        ctx.textAlign = "left";
+        ctx.font = "bold " + Math.round(u * 4.6) + "px system-ui, sans-serif";
+        ctx.fillStyle = "#ffe3ef";
+      }
+    }
+    ctx.font = Math.round(u * 3.4) + "px system-ui, sans-serif";
+    ctx.fillStyle = "#c9a4b8";
+    ctx.fillText("Best: " + best, 12, 24 + u * 11);
+  }
+  // ball
+  if (state !== "menu") {
+    const scale = ball.air ? 0.72 : lerp(1, 0.85, clamp((startY - ball.y) / Math.max(1, startY - lipY), 0, 1));
+    const r = ball.r * scale;
+    const lift = ball.air ? ball.z * 0.35 : 0;
+    ctx.fillStyle = "rgba(0,0,0,0.35)";
+    ctx.beginPath(); ctx.ellipse(ball.x, ball.y + r * 0.6, r * 0.9, r * 0.4, 0, 0, Math.PI * 2); ctx.fill();
+    const bg2 = ctx.createRadialGradient(ball.x - r * 0.3, ball.y - lift - r * 0.35, r * 0.25, ball.x, ball.y - lift, r);
+    bg2.addColorStop(0, "#ffb0a0"); bg2.addColorStop(1, "#c23a2e");
+    ctx.fillStyle = bg2;
+    ctx.beginPath(); ctx.arc(ball.x, ball.y - lift, r, 0, Math.PI * 2); ctx.fill();
+    ctx.strokeStyle = "rgba(90,15,10,0.6)"; ctx.lineWidth = 1.6;
+    ctx.beginPath(); ctx.arc(ball.x, ball.y - lift, r * 0.62, 0.3, 2.2); ctx.stroke();
+  }
+  if (state === "ready") {
+    ctx.textAlign = "center";
+    ctx.font = "bold " + Math.round(u * 4.4) + "px system-ui, sans-serif";
+    ctx.fillStyle = "rgba(255,255,255,0.88)";
+    ctx.fillText(spaceCharge >= 0 ? "POWER " + Math.round(spaceCharge * 100) + "% — release!" : "FLICK UP TO ROLL!", W / 2, H * 0.665);
+    if (spaceCharge >= 0) {
+      ctx.fillStyle = "#ffd94d";
+      ctx.fillRect(W * 0.25, H * 0.685, W * 0.5 * spaceCharge, 8);
+    }
+  }
+  if (state === "land" && lastPts !== null) {
+    ctx.textAlign = "center";
+    ctx.font = "bold " + Math.round(u * 9) + "px system-ui, sans-serif";
+    ctx.fillStyle = lastPts >= 50 ? "#ffd94d" : lastPts > 0 ? "#b6ff7a" : "#ff8a7a";
+    ctx.fillText(lastPts > 0 ? "+" + lastPts : "MISS", W / 2, H * 0.60);
+  }
+  if (state === "menu" || state === "over") {
+    ctx.fillStyle = "rgba(8,3,6,0.84)"; ctx.fillRect(0, 0, W, H);
+    ctx.textAlign = "center";
+    ctx.fillStyle = "#ff8fb8";
+    ctx.font = "bold " + Math.round(u * 9.5) + "px system-ui, sans-serif";
+    ctx.fillText("🎳 SKEE-BALL", W / 2, H * 0.30);
+    ctx.fillStyle = "#ffe3ef";
+    ctx.font = Math.round(u * 4.3) + "px system-ui, sans-serif";
+    if (state === "menu") {
+      ctx.fillText("Flick up to roll. Hop the ramp and", W / 2, H * 0.42);
+      ctx.fillText("drop the ball in the rings — 50 in the", W / 2, H * 0.465);
+      ctx.fillText("middle, 100 in the corner cups.", W / 2, H * 0.51);
+      ctx.fillStyle = "#c9a4b8";
+      ctx.fillText("9 balls · Best total: " + best, W / 2, H * 0.575);
+    } else {
+      ctx.fillStyle = "#ffd166";
+      ctx.font = "bold " + Math.round(u * 7) + "px system-ui, sans-serif";
+      ctx.fillText("TOTAL " + total, W / 2, H * 0.44);
+      ctx.fillStyle = "#ffe3ef";
+      ctx.font = Math.round(u * 4.3) + "px system-ui, sans-serif";
+      ctx.fillText("Balls: " + results.join(" · "), W / 2, H * 0.52);
+      ctx.fillStyle = "#c9a4b8";
+      ctx.fillText("Best total: " + best, W / 2, H * 0.575);
+    }
+    ctx.fillStyle = "#ff8fb8";
+    ctx.font = "bold " + Math.round(u * 5) + "px system-ui, sans-serif";
+    ctx.fillText(state === "menu" ? "TAP TO START" : "TAP TO PLAY AGAIN", W / 2, H * 0.66);
+  }
+}
+
+// ---------- Loop ----------
+let lastT = 0;
+function frame(t) {
+  requestAnimationFrame(frame);
+  const dt = Math.min(0.05, (t - lastT) / 1000 || 0); lastT = t;
+  if (spaceCharge >= 0) spaceCharge = Math.min(1, spaceCharge + dt * 1.1);
+  update(dt);
+  draw();
+}
+resize();
+resetBall();
+requestAnimationFrame(frame);
+
+// ---------- QA hooks ----------
+window.__qa = {
+  state: () => state,
+  start: () => startGame(),
+  roll: (p, a) => roll(p, a || 0),
+  scoreAt: (x, y) => scoreAtLanding(x, y),
+  geom: () => ({ TC: { ...TC }, cups: cups.map(c => ({ ...c })), lipY, startY }),
+  results: () => results.slice(),
+  total: () => total,
+  ball: () => ({ x: Math.round(ball.x), y: Math.round(ball.y), air: ball.air })
+};
+</script>
+</body>
+</html>

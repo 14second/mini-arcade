@@ -1,0 +1,533 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, user-scalable=no">
+<meta name="theme-color" content="#081018">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<title>Air Hockey</title>
+<style>
+  * { margin:0; padding:0; box-sizing:border-box; }
+  html, body {
+    width:100%; height:100%; overflow:hidden; background:#081018;
+    font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+    touch-action:none; user-select:none; -webkit-user-select:none;
+    -webkit-tap-highlight-color: transparent;
+  }
+  canvas { position:fixed; inset:0; display:block; touch-action:none; }
+  #muteBtn {
+    position:fixed; top:10px; right:10px; z-index:10;
+    width:48px; height:48px; border-radius:12px;
+    border:2px solid rgba(160,200,255,.5); background:rgba(6,12,20,.62);
+    color:#fff; font-size:22px; line-height:1; cursor:pointer;
+    touch-action:none; user-select:none; -webkit-user-select:none;
+    display:flex; align-items:center; justify-content:center; padding:0;
+  }
+  .modeBtn {
+    position:fixed; left:50%; transform:translateX(-50%); z-index:10;
+    width:min(280px, 76vw); height:60px; border-radius:14px;
+    border:2px solid rgba(120,200,255,.65); background:rgba(8,16,28,.92);
+    color:#eaf6ff; font-size:20px; font-weight:700; cursor:pointer;
+    touch-action:none; user-select:none; -webkit-user-select:none;
+    display:none;
+  }
+  #btn1p { top:47%; }
+  #btn2p { top:calc(47% + 76px); }
+</style>
+</head>
+<body>
+<canvas id="game"></canvas>
+<button id="muteBtn" aria-label="Toggle sound">🔊</button>
+<button class="modeBtn" id="btn1p">🏒 1 Player vs CPU</button>
+<button class="modeBtn" id="btn2p">🏒 2 Players — same phone</button>
+<script>
+// iOS audio routing: route Web Audio to the media/playback channel (iOS 17+
+// Audio Session API) on the first gesture and inside audio init, so sound
+// plays even with the silent switch on.
+function iosPlaybackSession() {
+  try { if ('audioSession' in navigator) navigator.audioSession.type = 'playback'; } catch (e) {}
+}
+document.addEventListener('pointerdown', iosPlaybackSession, true);
+document.addEventListener('touchstart', iosPlaybackSession, true);
+
+"use strict";
+/* ============================================================
+   AIR HOCKEY — drag your mallet, guard your goal, first to 7.
+   1 Player against a CPU that sharpens as you score, or
+   2 Players on one phone: one mallet at each end, with the
+   top player's controls flipped for playing across the table.
+   ============================================================ */
+
+const canvas = document.getElementById("game");
+const ctx = canvas.getContext("2d");
+let W = 0, H = 0, DPR = 1, u = 4;
+function clamp(v, a, b) { return v < a ? a : (v > b ? b : v); }
+function lerp(a, b, t) { return a + (b - a) * t; }
+
+// Table geometry
+let tblX = 0, tblW = 0, tblTop = 0, tblBot = 0, goalHalf = 0;
+let malletR = 26, puckR = 16;
+
+function resize() {
+  DPR = Math.min(window.devicePixelRatio || 1, 2);
+  W = window.innerWidth; H = window.innerHeight;
+  canvas.width = Math.round(W * DPR); canvas.height = Math.round(H * DPR);
+  canvas.style.width = W + "px"; canvas.style.height = H + "px";
+  ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+  u = Math.min(W, H) / 100;
+  tblW = W * 0.90; tblX = (W - tblW) / 2;
+  tblTop = H * 0.055; tblBot = H * 0.965;
+  goalHalf = tblW * 0.19;
+  malletR = Math.max(20, W * 0.072);
+  puckR = Math.max(11, W * 0.042);
+}
+window.addEventListener("resize", resize);
+
+// ---------- Audio ----------
+let actx = null, muted = false;
+const muteBtn = document.getElementById("muteBtn");
+function initAudio() {
+  iosPlaybackSession();
+  if (!actx) {
+    try {
+      const AC = window.AudioContext || window.webkitAudioContext;
+      if (AC) actx = new AC();
+    } catch (e) { actx = null; }
+    if (actx) startMusicScheduler();
+  }
+  if (actx && actx.state === "suspended") actx.resume();
+}
+function beep(freq, dur, type, vol, slide) {
+  if (!actx || muted) return;
+  const t = actx.currentTime;
+  const o = actx.createOscillator(), g = actx.createGain();
+  o.type = type || "square";
+  o.frequency.setValueAtTime(freq, t);
+  if (slide) o.frequency.exponentialRampToValueAtTime(Math.max(20, slide), t + dur);
+  g.gain.setValueAtTime(vol || 0.08, t);
+  g.gain.exponentialRampToValueAtTime(0.0001, t + dur);
+  o.connect(g); g.connect(actx.destination);
+  o.start(t); o.stop(t + dur + 0.02);
+}
+function sfxHit()  { beep(210, 0.05, "triangle", 0.13); }
+function sfxWall() { beep(340, 0.04, "square", 0.05); }
+function sfxGoal() { beep(392, 0.12, "square", 0.07); setTimeout(() => beep(523, 0.12, "square", 0.07), 100); setTimeout(() => beep(784, 0.2, "square", 0.08), 200); }
+function sfxConcede() { beep(330, 0.15, "square", 0.06, 196); }
+function sfxWin()  { [523, 659, 784, 1046].forEach((f, i) => setTimeout(() => beep(f, 0.14, "square", 0.06), i * 110)); }
+
+// Cool rink groove, BPM 104. Bass >= MIDI 45.
+const BPM = 104, STEP_DUR = 60 / BPM / 2;
+const BASS = [
+  45,0,0,45, 0,0,57,0, 0,0,53,0, 0,0,50,0,
+  45,0,0,45, 0,0,57,0, 0,0,59,0, 0,57,0,55
+];
+const LEAD = [
+  69,0,0,0, 0,72,0,0, 0,0,74,0, 0,0,0,0,
+  69,0,0,0, 0,72,0,0, 0,0,76,0, 0,0,0,0
+];
+const PADS = [ [45,52,57], [41,48,53], [45,52,57], [43,50,55] ];
+let musicStep = 0, nextNoteTime = 0, musicTimer = null;
+function midiFreq(m) { return 440 * Math.pow(2, (m - 69) / 12); }
+function toneAt(midi, when, dur, type, vol) {
+  const o = actx.createOscillator(), g = actx.createGain();
+  o.type = type; o.frequency.setValueAtTime(midiFreq(midi), when);
+  g.gain.setValueAtTime(0.0001, when);
+  g.gain.exponentialRampToValueAtTime(vol, when + 0.012);
+  g.gain.exponentialRampToValueAtTime(0.0001, when + dur);
+  o.connect(g); g.connect(actx.destination);
+  o.start(when); o.stop(when + dur + 0.03);
+}
+function scheduleStep(step, when) {
+  if (muted) return;
+  const b = BASS[step % 32]; if (b) toneAt(b, when, STEP_DUR * 0.9, "square", 0.03);
+  const l = LEAD[step % 32]; if (l) toneAt(l, when, STEP_DUR * 1.5, "triangle", 0.018);
+  if (step % 8 === 0) {
+    const chord = PADS[Math.floor(step / 8) % PADS.length];
+    for (let i = 0; i < chord.length; i++) toneAt(chord[i], when, STEP_DUR * 7.6, "triangle", 0.009);
+  }
+}
+function startMusicScheduler() {
+  if (musicTimer !== null || !actx) return;
+  musicStep = 0; nextNoteTime = actx.currentTime + 0.06;
+  musicTimer = setInterval(function () {
+    if (!actx) return;
+    if (nextNoteTime < actx.currentTime) nextNoteTime = actx.currentTime + 0.05;
+    while (nextNoteTime < actx.currentTime + 0.12) {
+      scheduleStep(musicStep, nextNoteTime);
+      nextNoteTime += STEP_DUR; musicStep = (musicStep + 1) % 32;
+    }
+  }, 25);
+}
+function setMuted(m) { muted = m; muteBtn.textContent = muted ? "🔇" : "🔊"; }
+muteBtn.addEventListener("pointerdown", function (e) { e.stopPropagation(); e.preventDefault(); initAudio(); setMuted(!muted); });
+muteBtn.addEventListener("click", function (e) { e.stopPropagation(); e.preventDefault(); });
+
+// ---------- Game state ----------
+const WIN = 7;
+let state = "menu"; // menu | play | goal | over
+let mode = 1;
+let pScore = 0, cScore = 0, goalTimer = 0, bannerText = "", hitCount = 0;
+let wins = 0;
+try { wins = parseInt(localStorage.getItem("airhockey_wins") || "0", 10) || 0; } catch (e) { wins = 0; }
+const puck = { x: 0, y: 0, vx: 0, vy: 0 };
+function makeMallet(color) {
+  return { x: 0, y: 0, vx: 0, vy: 0, tx: 0, ty: 0, color, hasTarget: false };
+}
+const pMallet = makeMallet("#3ec6ff"); // bottom (you / P1)
+const cMallet = makeMallet("#ff5d7a"); // top (cpu / P2)
+
+function clampMallet(m, top) {
+  m.x = clamp(m.x, tblX + malletR, tblX + tblW - malletR);
+  if (top) m.y = clamp(m.y, tblTop + malletR, H / 2 - malletR * 0.6);
+  else m.y = clamp(m.y, H / 2 + malletR * 0.6, tblBot - malletR);
+}
+function resetPositions(serveDir) {
+  pMallet.x = W / 2; pMallet.y = H * 0.82; pMallet.tx = pMallet.x; pMallet.ty = pMallet.y; pMallet.vx = 0; pMallet.vy = 0;
+  cMallet.x = W / 2; cMallet.y = H * 0.18; cMallet.tx = cMallet.x; cMallet.ty = cMallet.y; cMallet.vx = 0; cMallet.vy = 0;
+  puck.x = W / 2; puck.y = H / 2;
+  puck.vx = (Math.random() * 2 - 1) * 90;
+  puck.vy = serveDir * H * 0.10;
+}
+function startGame(n) {
+  initAudio();
+  mode = n;
+  pScore = 0; cScore = 0; hitCount = 0;
+  resetPositions(Math.random() < 0.5 ? 1 : -1);
+  state = "play";
+  document.getElementById("btn1p").style.display = "none";
+  document.getElementById("btn2p").style.display = "none";
+}
+function showButtons() {
+  document.getElementById("btn1p").style.display = "";
+  document.getElementById("btn2p").style.display = "";
+}
+function goalScored(byPlayer) {
+  if (byPlayer) { pScore++; sfxGoal(); bannerText = mode === 2 ? "P1 SCORES!" : "GOAL!"; }
+  else { cScore++; sfxConcede(); bannerText = mode === 2 ? "P2 SCORES!" : "RIVAL SCORES"; }
+  if (pScore >= WIN || cScore >= WIN) {
+    state = "over";
+    if (mode === 1 && pScore >= WIN) {
+      wins++; try { localStorage.setItem("airhockey_wins", String(wins)); } catch (e) {}
+      sfxWin();
+    }
+    showButtons();
+    return;
+  }
+  state = "goal"; goalTimer = 1.15;
+}
+let puckHist = [];
+function cpuThink(dt) {
+  // Defence first: sit between puck and goal; attack a slow puck in range.
+  // The rival reads the puck with a human-like delay (~0.13s), so sharp
+  // changes of direction beat it; its speed ramps as you score.
+  const diff = Math.min(1, 0.55 + pScore * 0.09);
+  const maxSpeed = lerp(H * 0.66, H * 1.12, diff);
+  const now = performance.now() / 1000;
+  puckHist.push({ t: now, x: puck.x, y: puck.y });
+  while (puckHist.length > 2 && puckHist[1].t < now - 0.13) puckHist.shift();
+  const seen = puckHist[0] || { x: puck.x, y: puck.y };
+  let tx = seen.x, ty = H * 0.125;
+  const puckComing = puck.vy < 0 || puck.y < H * 0.5;
+  if (puck.y < H * 0.30 && Math.abs(puck.vy) < H * 0.35) {
+    // strike: get behind the puck relative to the player's goal
+    tx = puck.x; ty = puck.y - malletR * 0.9;
+    if (Math.abs(cMallet.y - (puck.y - malletR * 2.2)) < 6 && Math.abs(cMallet.x - puck.x) < malletR) {
+      ty = puck.y + 4; // swing through
+    }
+  } else if (puckComing) {
+    tx = clamp(seen.x, W / 2 - goalHalf * 1.35, W / 2 + goalHalf * 1.35);
+    ty = H * 0.125;
+  } else {
+    tx = W / 2 + (seen.x - W / 2) * 0.35;
+    ty = H * 0.17;
+  }
+  moveMalletToward(cMallet, tx, ty, maxSpeed, dt, true);
+}
+function moveMalletToward(m, tx, ty, maxSpeed, dt, isTop) {
+  const dx = tx - m.x, dy = ty - m.y;
+  const d = Math.hypot(dx, dy);
+  const step = Math.min(d, maxSpeed * dt);
+  const ox = m.x, oy = m.y;
+  if (d > 0.01) { m.x += dx / d * step; m.y += dy / d * step; }
+  clampMallet(m, isTop);
+  m.vx = dt > 0 ? (m.x - ox) / dt : 0;
+  m.vy = dt > 0 ? (m.y - oy) / dt : 0;
+}
+let hitCool = 0;
+function hitMallet(m) {
+  const dx = puck.x - m.x, dy = puck.y - m.y;
+  const d = Math.hypot(dx, dy);
+  const rr = malletR + puckR;
+  if (d >= rr || d < 0.01) return;
+  const nx = dx / d, ny = dy / d;
+  puck.x = m.x + nx * rr; puck.y = m.y + ny * rr;
+  const rvx = puck.vx - m.vx, rvy = puck.vy - m.vy;
+  const vn = rvx * nx + rvy * ny;
+  if (vn < 0) {
+    puck.vx -= 1.92 * vn * nx;
+    puck.vy -= 1.92 * vn * ny;
+    // add a share of the mallet's own motion
+    puck.vx += m.vx * 0.35; puck.vy += m.vy * 0.35;
+    const sp = Math.hypot(puck.vx, puck.vy), maxSp = H * 2.3;
+    if (sp > maxSp) { puck.vx *= maxSp / sp; puck.vy *= maxSp / sp; }
+    if (hitCool <= 0) { hitCount++; sfxHit(); hitCool = 0.06; }
+  }
+}
+function update(dt) {
+  if (hitCool > 0) hitCool -= dt;
+  if (state === "goal") {
+    goalTimer -= dt;
+    if (goalTimer <= 0) { resetPositions(Math.random() < 0.5 ? 1 : -1); state = "play"; }
+    return;
+  }
+  if (state !== "play") return;
+  // player mallets chase their targets
+  if (pMallet.hasTarget) moveMalletToward(pMallet, pMallet.tx, pMallet.ty, H * 3.1, dt, false);
+  else { pMallet.vx *= 0.8; pMallet.vy *= 0.8; }
+  if (mode === 2) {
+    if (cMallet.hasTarget) moveMalletToward(cMallet, cMallet.tx, cMallet.ty, H * 3.1, dt, true);
+    else { cMallet.vx *= 0.8; cMallet.vy *= 0.8; }
+  } else {
+    cpuThink(dt);
+  }
+  // puck
+  const sub = 3, sdt = dt / sub;
+  for (let s = 0; s < sub; s++) {
+    puck.x += puck.vx * sdt;
+    puck.y += puck.vy * sdt;
+    const fr = Math.pow(0.62, sdt);
+    puck.vx *= fr; puck.vy *= fr;
+    // side walls
+    if (puck.x < tblX + puckR) { puck.x = tblX + puckR; puck.vx = Math.abs(puck.vx) * 0.92; sfxWall(); }
+    if (puck.x > tblX + tblW - puckR) { puck.x = tblX + tblW - puckR; puck.vx = -Math.abs(puck.vx) * 0.92; sfxWall(); }
+    // top & bottom: inside the goal mouth the puck travels into the net;
+    // anywhere else the end wall bounces it.
+    const inMouth = Math.abs(puck.x - W / 2) < goalHalf - puckR * 0.25;
+    if (puck.y - puckR < tblTop) {
+      if (inMouth) {
+        if (puck.y < tblTop - puckR * 0.6) { goalScored(true); return; }
+        puck.x = clamp(puck.x, W / 2 - goalHalf + puckR * 0.4, W / 2 + goalHalf - puckR * 0.4);
+      } else {
+        puck.y = tblTop + puckR;
+        if (puck.vy < 0) { puck.vy = Math.abs(puck.vy) * 0.92; sfxWall(); }
+      }
+    }
+    if (puck.y + puckR > tblBot) {
+      if (inMouth) {
+        if (puck.y > tblBot + puckR * 0.6) { goalScored(false); return; }
+        puck.x = clamp(puck.x, W / 2 - goalHalf + puckR * 0.4, W / 2 + goalHalf - puckR * 0.4);
+      } else {
+        puck.y = tblBot - puckR;
+        if (puck.vy > 0) { puck.vy = -Math.abs(puck.vy) * 0.92; sfxWall(); }
+      }
+    }
+    // goal posts
+    for (const gx of [W / 2 - goalHalf, W / 2 + goalHalf]) {
+      for (const gy of [tblTop, tblBot]) {
+        const dx = puck.x - gx, dy = puck.y - gy;
+        const d = Math.hypot(dx, dy);
+        if (d < puckR + 5 && d > 0.01) {
+          const nx = dx / d, ny = dy / d;
+          puck.x = gx + nx * (puckR + 5); puck.y = gy + ny * (puckR + 5);
+          const vn = puck.vx * nx + puck.vy * ny;
+          if (vn < 0) { puck.vx -= 1.9 * vn * nx; puck.vy -= 1.9 * vn * ny; sfxWall(); }
+        }
+      }
+    }
+    hitMallet(pMallet);
+    hitMallet(cMallet);
+    if (state !== "play") return;
+  }
+}
+
+// ---------- Input ----------
+const pointers = new Map();
+function applyPointer(e) {
+  if (e.clientY > H / 2) {
+    pMallet.tx = e.clientX; pMallet.ty = e.clientY; pMallet.hasTarget = true;
+    pointers.set(e.pointerId, "P");
+  } else {
+    // top half: in 2P the far-end player's controls are flipped
+    if (mode === 2) { cMallet.tx = W - e.clientX; cMallet.ty = e.clientY; }
+    else { cMallet.tx = e.clientX; cMallet.ty = e.clientY; }
+    if (mode === 2) { cMallet.hasTarget = true; pointers.set(e.pointerId, "C"); }
+  }
+}
+canvas.addEventListener("pointerdown", function (e) {
+  initAudio();
+  if (state === "menu" || state === "over") return;
+  applyPointer(e);
+});
+canvas.addEventListener("pointermove", function (e) {
+  if (state !== "play" && state !== "goal") return;
+  if (pointers.has(e.pointerId) || mode === 2) applyPointer(e);
+  else if (e.clientY > H / 2) applyPointer(e);
+});
+function endPointer(e) {
+  const who = pointers.get(e.pointerId);
+  if (who === "P") pMallet.hasTarget = false;
+  if (who === "C") cMallet.hasTarget = false;
+  pointers.delete(e.pointerId);
+}
+canvas.addEventListener("pointerup", endPointer);
+canvas.addEventListener("pointercancel", endPointer);
+let keys = {};
+window.addEventListener("keydown", function (e) {
+  keys[e.key] = true;
+  if (["ArrowLeft", "ArrowRight", "ArrowUp", "ArrowDown", " "].includes(e.key)) e.preventDefault();
+  initAudio();
+  if (e.key === "m" || e.key === "M") { setMuted(!muted); return; }
+  if ((e.key === " " || e.key === "Enter") && state !== "play") startGame(mode);
+});
+window.addEventListener("keyup", function (e) { keys[e.key] = false; });
+function keyControl(dt) {
+  // P1 arrows; P2 WASD (screen coords — keyboard players sit on the same side)
+  const sp = H * 1.5;
+  let used = false;
+  let tx = pMallet.x, ty = pMallet.y;
+  if (keys["ArrowLeft"]) { tx -= sp * dt; used = true; }
+  if (keys["ArrowRight"]) { tx += sp * dt; used = true; }
+  if (keys["ArrowUp"]) { ty -= sp * dt; used = true; }
+  if (keys["ArrowDown"]) { ty += sp * dt; used = true; }
+  if (used) moveMalletToward(pMallet, tx, ty, H * 3.1, dt, false);
+  if (mode === 2) {
+    let ux = cMallet.x, uy = cMallet.y, u2 = false;
+    if (keys["a"] || keys["A"]) { ux -= sp * dt; u2 = true; }
+    if (keys["d"] || keys["D"]) { ux += sp * dt; u2 = true; }
+    if (keys["w"] || keys["W"]) { uy -= sp * dt; u2 = true; }
+    if (keys["s"] || keys["S"]) { uy += sp * dt; u2 = true; }
+    if (u2) moveMalletToward(cMallet, ux, uy, H * 3.1, dt, true);
+  }
+}
+document.getElementById("btn1p").addEventListener("click", function () { startGame(1); });
+document.getElementById("btn2p").addEventListener("click", function () { startGame(2); });
+
+// ---------- Draw ----------
+function drawMallet(m, label) {
+  ctx.fillStyle = "rgba(0,0,0,0.3)";
+  ctx.beginPath(); ctx.arc(m.x + 2, m.y + 3, malletR, 0, Math.PI * 2); ctx.fill();
+  ctx.fillStyle = m.color;
+  ctx.beginPath(); ctx.arc(m.x, m.y, malletR, 0, Math.PI * 2); ctx.fill();
+  ctx.fillStyle = "rgba(255,255,255,0.85)";
+  ctx.beginPath(); ctx.arc(m.x, m.y, malletR * 0.55, 0, Math.PI * 2); ctx.fill();
+  ctx.fillStyle = m.color;
+  ctx.beginPath(); ctx.arc(m.x, m.y, malletR * 0.34, 0, Math.PI * 2); ctx.fill();
+  ctx.fillStyle = "rgba(255,255,255,0.9)";
+  ctx.font = "bold " + Math.round(malletR * 0.5) + "px system-ui"; ctx.textAlign = "center"; ctx.textBaseline = "middle";
+  ctx.fillText(label, m.x, m.y + 1);
+}
+function draw() {
+  const g = ctx.createLinearGradient(0, 0, 0, H);
+  g.addColorStop(0, "#0a1826"); g.addColorStop(1, "#081018");
+  ctx.fillStyle = g; ctx.fillRect(0, 0, W, H);
+  // table
+  ctx.fillStyle = "#eaf4fb";
+  ctx.fillRect(tblX, tblTop, tblW, tblBot - tblTop);
+  ctx.fillStyle = "rgba(62,198,255,0.10)";
+  ctx.fillRect(tblX, tblTop, tblW, (tblBot - tblTop) / 2);
+  ctx.fillStyle = "rgba(255,93,122,0.10)";
+  ctx.fillRect(tblX, tblTop + (tblBot - tblTop) / 2, tblW, (tblBot - tblTop) / 2);
+  // lines
+  ctx.strokeStyle = "#ff5d7a"; ctx.lineWidth = 3;
+  ctx.beginPath(); ctx.moveTo(tblX, H / 2); ctx.lineTo(tblX + tblW, H / 2); ctx.stroke();
+  ctx.strokeStyle = "rgba(62,140,255,0.6)"; ctx.lineWidth = 2.5;
+  ctx.beginPath(); ctx.arc(W / 2, H / 2, tblW * 0.16, 0, Math.PI * 2); ctx.stroke();
+  ctx.beginPath(); ctx.arc(W / 2, tblTop, tblW * 0.20, 0.15 * Math.PI, 0.85 * Math.PI); ctx.stroke();
+  ctx.beginPath(); ctx.arc(W / 2, tblBot, tblW * 0.20, 1.15 * Math.PI, 1.85 * Math.PI); ctx.stroke();
+  // goals
+  ctx.fillStyle = "#101c2c";
+  ctx.fillRect(W / 2 - goalHalf, tblTop - 10, goalHalf * 2, 12);
+  ctx.fillRect(W / 2 - goalHalf, tblBot - 2, goalHalf * 2, 12);
+  ctx.fillStyle = "#ffd94d";
+  ctx.fillRect(W / 2 - goalHalf - 4, tblTop - 4, 6, 8);
+  ctx.fillRect(W / 2 + goalHalf - 2, tblTop - 4, 6, 8);
+  ctx.fillRect(W / 2 - goalHalf - 4, tblBot - 4, 6, 8);
+  ctx.fillRect(W / 2 + goalHalf - 2, tblBot - 4, 6, 8);
+  // score ghosts
+  ctx.textAlign = "center"; ctx.textBaseline = "middle";
+  ctx.font = "bold " + Math.round(u * 16) + "px system-ui, sans-serif";
+  ctx.fillStyle = "rgba(255,93,122,0.20)";
+  ctx.fillText(String(cScore), W / 2, H * 0.30);
+  ctx.fillStyle = "rgba(30,140,220,0.20)";
+  ctx.fillText(String(pScore), W / 2, H * 0.71);
+  ctx.font = Math.round(u * 3.6) + "px system-ui, sans-serif";
+  ctx.fillStyle = "rgba(180,40,70,0.75)";
+  ctx.fillText(mode === 2 ? "P2" : "CPU", W / 2, H * 0.30 - u * 10.5);
+  ctx.fillStyle = "rgba(20,90,160,0.8)";
+  ctx.fillText(mode === 2 ? "P1" : "YOU", W / 2, H * 0.71 + u * 11);
+  ctx.textAlign = "left";
+  ctx.font = Math.round(u * 3.3) + "px system-ui, sans-serif";
+  ctx.fillStyle = "#7d93a8";
+  ctx.fillText("First to " + WIN + (mode === 1 ? " · CPU wins beaten: " + wins : ""), 12, 22);
+  // puck
+  if (state !== "menu") {
+    ctx.fillStyle = "rgba(0,0,0,0.25)";
+    ctx.beginPath(); ctx.arc(puck.x + 2, puck.y + 3, puckR, 0, Math.PI * 2); ctx.fill();
+    ctx.fillStyle = "#20242e";
+    ctx.beginPath(); ctx.arc(puck.x, puck.y, puckR, 0, Math.PI * 2); ctx.fill();
+    ctx.fillStyle = "rgba(255,255,255,0.35)";
+    ctx.beginPath(); ctx.arc(puck.x - puckR * 0.25, puck.y - puckR * 0.3, puckR * 0.4, 0, Math.PI * 2); ctx.fill();
+  }
+  drawMallet(cMallet, mode === 2 ? "2" : "C");
+  drawMallet(pMallet, "1");
+  if (state === "goal") {
+    ctx.textAlign = "center";
+    ctx.font = "bold " + Math.round(u * 8) + "px system-ui, sans-serif";
+    ctx.fillStyle = "#ffb02e";
+    ctx.fillText(bannerText, W / 2, H * 0.5 - u * 14);
+  }
+  if (state === "menu" || state === "over") {
+    ctx.fillStyle = "rgba(3,8,14,0.84)"; ctx.fillRect(0, 0, W, H);
+    ctx.textAlign = "center";
+    ctx.fillStyle = "#7ad9ff";
+    ctx.font = "bold " + Math.round(u * 9.5) + "px system-ui, sans-serif";
+    ctx.fillText("🏒 AIR HOCKEY", W / 2, H * 0.27);
+    ctx.fillStyle = "#eaf6ff";
+    ctx.font = Math.round(u * 4.3) + "px system-ui, sans-serif";
+    if (state === "menu") {
+      ctx.fillText("Drag your mallet. First to 7 takes it.", W / 2, H * 0.365);
+      ctx.fillText("2 Players: one at each end of the phone —", W / 2, H * 0.405);
+      ctx.fillText("the top player's controls are flipped.", W / 2, H * 0.445);
+    } else {
+      const pWon = pScore > cScore;
+      ctx.fillStyle = pWon ? "#8be04e" : "#ff5d7a";
+      ctx.font = "bold " + Math.round(u * 6.6) + "px system-ui, sans-serif";
+      const label = mode === 2 ? (pWon ? "P1 WINS " : "P2 WINS ") : (pWon ? "YOU WIN " : "CPU WINS ");
+      ctx.fillText(label + pScore + " – " + cScore, W / 2, H * 0.38);
+      if (mode === 1) {
+        ctx.fillStyle = "#7d93a8";
+        ctx.font = Math.round(u * 4.2) + "px system-ui, sans-serif";
+        ctx.fillText("CPU wins beaten so far: " + wins, W / 2, H * 0.435);
+      }
+    }
+  }
+}
+
+// ---------- Loop ----------
+let lastT = 0;
+function frame(t) {
+  requestAnimationFrame(frame);
+  const dt = Math.min(0.05, (t - lastT) / 1000 || 0); lastT = t;
+  keyControl(dt);
+  update(dt);
+  draw();
+}
+resize();
+resetPositions(1);
+showButtons();
+requestAnimationFrame(frame);
+
+// ---------- QA hooks ----------
+window.__qa = {
+  state: () => state,
+  start: n => startGame(n || 1),
+  scores: () => [pScore, cScore],
+  puck: () => ({ x: Math.round(puck.x), y: Math.round(puck.y), vx: Math.round(puck.vx), vy: Math.round(puck.vy) }),
+  setTarget: (x, y) => { pMallet.tx = x; pMallet.ty = y; pMallet.hasTarget = true; },
+  mallet: () => ({ x: Math.round(pMallet.x), y: Math.round(pMallet.y) }),
+  hits: () => hitCount
+};
+</script>
+</body>
+</html>

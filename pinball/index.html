@@ -1,0 +1,735 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, user-scalable=no">
+<meta name="theme-color" content="#0a0a18">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<title>Pinball</title>
+<style>
+  * { margin:0; padding:0; box-sizing:border-box; }
+  html, body {
+    width:100%; height:100%; overflow:hidden; background:#0a0a18;
+    font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+    touch-action:none; user-select:none; -webkit-user-select:none;
+    -webkit-tap-highlight-color: transparent;
+  }
+  canvas { position:fixed; inset:0; display:block; touch-action:none; }
+  #muteBtn {
+    position:fixed; top:10px; right:10px; z-index:10;
+    width:48px; height:48px; border-radius:12px;
+    border:2px solid rgba(170,170,255,.5); background:rgba(8,8,22,.62);
+    color:#fff; font-size:22px; line-height:1; cursor:pointer;
+    touch-action:none; user-select:none; -webkit-user-select:none;
+    display:flex; align-items:center; justify-content:center; padding:0;
+  }
+  .tblBtn {
+    position:fixed; z-index:10; height:52px; border-radius:12px;
+    border:2px solid rgba(150,180,255,.55); background:rgba(12,14,34,.92);
+    color:#e8ecff; font-size:17px; font-weight:700; cursor:pointer;
+    touch-action:none; user-select:none; -webkit-user-select:none;
+    display:none; align-items:center; justify-content:center; padding:0 10px;
+  }
+  #btnPrev { left:6%; top:56%; width:15%; }
+  #btnNext { right:6%; top:56%; width:15%; }
+  #btnStart { left:26%; top:56%; width:48%; border-color:rgba(120,255,170,.7); }
+</style>
+</head>
+<body>
+<canvas id="game"></canvas>
+<button id="muteBtn" aria-label="Toggle sound">🔊</button>
+<button class="tblBtn" id="btnPrev">◀</button>
+<button class="tblBtn" id="btnStart">▶ PLAY</button>
+<button class="tblBtn" id="btnNext">▶</button>
+<script>
+// iOS audio routing: route Web Audio to the media/playback channel (iOS 17+
+// Audio Session API) on the first gesture and inside audio init, so sound
+// plays even with the silent switch on.
+function iosPlaybackSession() {
+  try { if ('audioSession' in navigator) navigator.audioSession.type = 'playback'; } catch (e) {}
+}
+document.addEventListener('pointerdown', iosPlaybackSession, true);
+document.addEventListener('touchstart', iosPlaybackSession, true);
+
+"use strict";
+/* ============================================================
+   PINBALL — real flipper pinball, three tables.
+   Hold the right side (or SPACE) to charge the plunger, release
+   to launch. Left/right halves of the screen work the flippers
+   (or ◀ ▶ / A D keys). Light every target to clear the table
+   and unlock the next: Neon City, Pirate Cove, Deep Space.
+   3 balls a game, and a quick drain right after launch is saved.
+   ============================================================ */
+
+const canvas = document.getElementById("game");
+const ctx = canvas.getContext("2d");
+let W = 0, H = 0, DPR = 1, u = 4;
+function clamp(v, a, b) { return v < a ? a : (v > b ? b : v); }
+function lerp(a, b, t) { return a + (b - a) * t; }
+
+// ---------- Audio ----------
+let actx = null, muted = false;
+const muteBtn = document.getElementById("muteBtn");
+function initAudio() {
+  iosPlaybackSession();
+  if (!actx) {
+    try {
+      const AC = window.AudioContext || window.webkitAudioContext;
+      if (AC) actx = new AC();
+    } catch (e) { actx = null; }
+    if (actx) startMusicScheduler();
+  }
+  if (actx && actx.state === "suspended") actx.resume();
+}
+function beep(freq, dur, type, vol, slide) {
+  if (!actx || muted) return;
+  const t = actx.currentTime;
+  const o = actx.createOscillator(), g = actx.createGain();
+  o.type = type || "square";
+  o.frequency.setValueAtTime(freq, t);
+  if (slide) o.frequency.exponentialRampToValueAtTime(Math.max(20, slide), t + dur);
+  g.gain.setValueAtTime(vol || 0.08, t);
+  g.gain.exponentialRampToValueAtTime(0.0001, t + dur);
+  o.connect(g); g.connect(actx.destination);
+  o.start(t); o.stop(t + dur + 0.02);
+}
+function sfxBumper() { beep(1180, 0.05, "square", 0.06); beep(190, 0.06, "triangle", 0.1); }
+function sfxTarget() { beep(1560, 0.09, "square", 0.06, 2093); }
+function sfxFlip()   { beep(340, 0.04, "square", 0.045); }
+function sfxLaunch() { beep(220, 0.16, "sawtooth", 0.05, 660); }
+function sfxDrain()  { beep(320, 0.3, "sawtooth", 0.06, 70); }
+function sfxClear()  { [659, 784, 988, 1318, 1568].forEach((f, i) => setTimeout(() => beep(f, 0.13, "square", 0.06), i * 85)); }
+function sfxSling()  { beep(880, 0.05, "square", 0.05); }
+
+// Arcade groove, BPM 120. Bass >= MIDI 45.
+const BPM = 120, STEP_DUR = 60 / BPM / 2;
+const BASS = [
+  45,0,0,45, 0,45,0,0, 48,0,0,48, 0,48,0,0,
+  43,0,0,43, 0,43,0,0, 41,0,43,0, 45,0,47,0
+];
+const LEAD = [
+  69,0,72,0, 0,0,76,0, 0,0,74,0, 72,0,0,0,
+  71,0,0,0, 0,0,67,0, 69,0,0,0, 0,0,0,0
+];
+const PADS = [ [45,52,57], [48,52,55], [43,50,55], [41,48,52] ];
+let musicStep = 0, nextNoteTime = 0, musicTimer = null;
+function midiFreq(m) { return 440 * Math.pow(2, (m - 69) / 12); }
+function toneAt(midi, when, dur, type, vol) {
+  const o = actx.createOscillator(), g = actx.createGain();
+  o.type = type; o.frequency.setValueAtTime(midiFreq(midi), when);
+  g.gain.setValueAtTime(0.0001, when);
+  g.gain.exponentialRampToValueAtTime(vol, when + 0.012);
+  g.gain.exponentialRampToValueAtTime(0.0001, when + dur);
+  o.connect(g); g.connect(actx.destination);
+  o.start(when); o.stop(when + dur + 0.03);
+}
+function scheduleStep(step, when) {
+  if (muted) return;
+  const b = BASS[step % 32]; if (b) toneAt(b, when, STEP_DUR * 0.85, "square", 0.03);
+  const l = LEAD[step % 32]; if (l) toneAt(l, when, STEP_DUR * 1.4, "triangle", 0.017);
+  if (step % 8 === 0) {
+    const chord = PADS[Math.floor(step / 8) % PADS.length];
+    for (let i = 0; i < chord.length; i++) toneAt(chord[i], when, STEP_DUR * 7.4, "triangle", 0.009);
+  }
+}
+function startMusicScheduler() {
+  if (musicTimer !== null || !actx) return;
+  musicStep = 0; nextNoteTime = actx.currentTime + 0.06;
+  musicTimer = setInterval(function () {
+    if (!actx) return;
+    if (nextNoteTime < actx.currentTime) nextNoteTime = actx.currentTime + 0.05;
+    while (nextNoteTime < actx.currentTime + 0.12) {
+      scheduleStep(musicStep, nextNoteTime);
+      nextNoteTime += STEP_DUR; musicStep = (musicStep + 1) % 32;
+    }
+  }, 25);
+}
+function setMuted(m) { muted = m; muteBtn.textContent = muted ? "🔇" : "🔊"; }
+muteBtn.addEventListener("pointerdown", function (e) { e.stopPropagation(); e.preventDefault(); initAudio(); setMuted(!muted); });
+muteBtn.addEventListener("click", function (e) { e.stopPropagation(); e.preventDefault(); });
+
+// ---------- Tables ----------
+// All geometry in fractions of W (x) and H (y), built per resize.
+function seg(x1, y1, x2, y2, rest, extra) {
+  return Object.assign({ x1: x1 * W, y1: y1 * H, x2: x2 * W, y2: y2 * H, rest: rest === undefined ? 0.35 : rest }, extra || {});
+}
+function sharedWalls() {
+  return [
+    seg(0.035, 0.32, 0.035, 0.72, 0.4),                    // left wall
+    seg(0.035, 0.32, 0.20, 0.088, 0.4),                    // top-left slant
+    seg(0.20, 0.088, 0.66, 0.088, 0.4),                    // top
+    seg(0.66, 0.088, 0.958, 0.165, 0.4),                   // top-right slant (over the lane)
+    seg(0.965, 0.165, 0.965, 0.975, 0.4),                  // outer right (lane outer)
+    seg(0.855, 0.30, 0.855, 0.975, 0.4),                   // lane divider
+    seg(0.035, 0.72, 0.315, 0.888, 0.3),                   // left funnel
+    seg(0.855, 0.72, 0.585, 0.888, 0.3),                   // right funnel
+    seg(0.965, 0.975, 0.855, 0.975, 0.2),                  // lane floor
+    // slingshot wedges (bouncy, score on a firm hit) — kept clear of the
+    // funnel walls so the ball can never wedge in a pocket between them
+    seg(0.185, 0.665, 0.280, 0.755, 0.9, { sling: 1 }),
+    seg(0.280, 0.755, 0.185, 0.755, 0.9, { sling: 1 }),
+    seg(0.715, 0.665, 0.620, 0.755, 0.9, { sling: 1 }),
+    seg(0.620, 0.755, 0.715, 0.755, 0.9, { sling: 1 })
+  ];
+}
+const TABLES = [
+  {
+    name: "Neon City", sub: "The classic triangle", bg: "#0d1030", bg2: "#181d4d", accent: "#3ee6ff", accent2: "#ff4fd8",
+    bumpers: [[0.28, 0.30], [0.50, 0.235], [0.40, 0.43]],
+    targets: [[0.665, 0.335], [0.70, 0.415], [0.665, 0.495], [0.60, 0.565]],
+    rollovers: [[0.22, 0.155], [0.40, 0.135], [0.58, 0.155]],
+    posts: [[0.135, 0.55], [0.60, 0.20]],
+    extraSegs: [], spinner: null, scoop: null, miniFlipper: false,
+    orbitSegs: []
+  },
+  {
+    name: "Pirate Cove", sub: "Find the cove, spin the wheel", bg: "#0c1f16", bg2: "#143324", accent: "#ffc44d", accent2: "#4dd2ff",
+    bumpers: [[0.22, 0.26], [0.55, 0.295], [0.40, 0.475]],
+    targets: [[0.185, 0.615], [0.315, 0.645], [0.445, 0.655], [0.575, 0.645], [0.685, 0.60]],
+    rollovers: [[0.22, 0.155], [0.40, 0.135], [0.58, 0.155]],
+    posts: [[0.66, 0.44]],
+    extraSegs: [ // the cove chute (left): two rails guiding to the scoop
+      seg(0.045, 0.44, 0.235, 0.375, 0.25),
+      seg(0.045, 0.515, 0.235, 0.45, 0.25)
+    ],
+    spinner: { x: 0.715, y: 0.19, r: 0.045 },
+    scoop: { x: 0.075, y: 0.478, r: 0.034 },
+    miniFlipper: false,
+    orbitSegs: []
+  },
+  {
+    name: "Deep Space", sub: "An extra flipper guards the bank", bg: "#0a0a20", bg2: "#171233", accent: "#9d7bff", accent2: "#4dffca",
+    bumpers: [[0.30, 0.27], [0.52, 0.27], [0.41, 0.40], [0.30, 0.53]],
+    targets: [[0.745, 0.40], [0.76, 0.475], [0.745, 0.55], [0.16, 0.335], [0.135, 0.415]],
+    rollovers: [[0.22, 0.155], [0.40, 0.135], [0.58, 0.155]],
+    posts: [[0.585, 0.565]],
+    extraSegs: [],
+    spinner: null, scoop: null,
+    miniFlipper: true,
+    orbitSegs: [ seg(0.035, 0.205, 0.315, 0.128, 0.35) ], // upper orbit rail
+    orbitSensor: { x: 0.16, y: 0.145, r: 0.05 }
+  }
+];
+
+// ---------- State ----------
+let state = "menu"; // menu | plunge | play | over
+let tableIdx = 0;
+let unlocked = [true, false, false];
+let bestByTable = [0, 0, 0];
+try {
+  const un = JSON.parse(localStorage.getItem("pinball_unlocked") || "[true,false,false]");
+  if (Array.isArray(un)) unlocked = [true, !!un[1], !!un[2]];
+  const bb = JSON.parse(localStorage.getItem("pinball_best") || "[0,0,0]");
+  if (Array.isArray(bb)) bestByTable = bb.map(v => parseInt(v, 10) || 0);
+} catch (e) {}
+let score = 0, ballsLeft = 3, ballNum = 1, launchTime = 0, savedThisBall = false;
+let bannerText = "", bannerTimer = 0, charge = 0, charging = false;
+let flipperHits = 0, drains = 0, clearCelebration = 0;
+let table = null; // built runtime table
+const ball = { x: 0, y: 0, vx: 0, vy: 0, r: 8, active: false };
+let flippers = [];
+
+function makeFlipper(fx, fy, len, side, rest, active) {
+  return { px: fx * W, py: fy * H, len: len * W, side, rest, active, angle: rest, pressed: false, omega: 0, mini: false };
+}
+function buildTable(idx) {
+  const def = TABLES[idx];
+  table = {
+    def,
+    walls: sharedWalls().concat(def.extraSegs || []).concat(def.orbitSegs || []),
+    bumpers: def.bumpers.map(([x, y]) => ({ x: x * W, y: y * H, r: W * 0.052, flash: 0 })),
+    targets: def.targets.map(([x, y]) => ({ x: x * W, y: y * H, r: W * 0.030, lit: false })),
+    rollovers: def.rollovers.map(([x, y]) => ({ x: x * W, y: y * H, r: W * 0.036, lit: false, wasIn: false })),
+    posts: def.posts.map(([x, y]) => ({ x: x * W, y: y * H, r: W * 0.020 })),
+    spinner: def.spinner ? { x: def.spinner.x * W, y: def.spinner.y * H, r: def.spinner.r * W, ang: 0, spinV: 0, wasIn: false } : null,
+    scoop: def.scoop ? { x: def.scoop.x * W, y: def.scoop.y * H, r: def.scoop.r * W, cool: 0 } : null,
+    orbitSensor: def.orbitSensor ? { x: def.orbitSensor.x * W, y: def.orbitSensor.y * H, r: def.orbitSensor.r * W, wasIn: false } : null
+  };
+  flippers = [
+    makeFlipper(0.330, 0.905, 0.105, 1, 0.55, -0.50),
+    makeFlipper(0.570, 0.905, 0.105, -1, Math.PI - 0.55, Math.PI + 0.50)
+  ];
+  if (def.miniFlipper) {
+    const mf = makeFlipper(0.665, 0.545, 0.082, -1, Math.PI - 0.55, Math.PI + 0.50);
+    mf.mini = true;
+    flippers.push(mf);
+  }
+  ball.r = Math.max(6, W * 0.021);
+}
+function resize() {
+  DPR = Math.min(window.devicePixelRatio || 1, 2);
+  W = window.innerWidth; H = window.innerHeight;
+  canvas.width = Math.round(W * DPR); canvas.height = Math.round(H * DPR);
+  canvas.style.width = W + "px"; canvas.style.height = H + "px";
+  ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+  u = Math.min(W, H) / 100;
+  buildTable(tableIdx);
+  if (!ball.active) restBall();
+}
+window.addEventListener("resize", resize);
+
+function restBall() {
+  ball.x = W * 0.91; ball.y = H * 0.945; ball.vx = 0; ball.vy = 0; ball.active = false;
+}
+function banner(t, dur) { bannerText = t; bannerTimer = dur || 1.2; }
+function addScore(n, x, y) { score += n; }
+function startGame() {
+  initAudio();
+  if (!unlocked[tableIdx]) return;
+  buildTable(tableIdx);
+  score = 0; ballNum = 1; ballsLeft = 3; drains = 0; flipperHits = 0;
+  savedThisBall = false;
+  restBall();
+  charge = 0; charging = false;
+  state = "plunge";
+  hideMenuButtons();
+  banner(TABLES[tableIdx].name + " — Ball 1", 1.4);
+}
+function launch(power) {
+  if (state !== "plunge") return;
+  ball.active = true;
+  ball.vy = -(1.0 + clamp(power, 0, 1) * 1.05) * H;
+  ball.vx = 0;
+  launchTime = performance.now() / 1000;
+  state = "play";
+  sfxLaunch();
+}
+function drain() {
+  drains++;
+  const now = performance.now() / 1000;
+  if (!savedThisBall && now - launchTime < 6) {
+    savedThisBall = true;
+    banner("BALL SAVED!", 1.2);
+    restBall(); state = "plunge";
+    return;
+  }
+  sfxDrain();
+  ballsLeft--;
+  if (ballsLeft <= 0) {
+    state = "over";
+    if (score > bestByTable[tableIdx]) {
+      bestByTable[tableIdx] = score;
+      try { localStorage.setItem("pinball_best", JSON.stringify(bestByTable)); } catch (e) {}
+    }
+    showMenuButtons();
+    return;
+  }
+  ballNum++;
+  savedThisBall = false;
+  banner("Ball " + ballNum, 1.1);
+  restBall(); state = "plunge";
+}
+function lightTarget(t) {
+  if (t.lit) return;
+  t.lit = true;
+  addScore(500);
+  sfxTarget();
+  if (table.targets.every(x => x.lit)) {
+    addScore(10000);
+    clearCelebration = 1.6;
+    banner("TABLE CLEAR! +10000", 1.8);
+    sfxClear();
+    if (tableIdx + 1 < TABLES.length && !unlocked[tableIdx + 1]) {
+      unlocked[tableIdx + 1] = true;
+      try { localStorage.setItem("pinball_unlocked", JSON.stringify(unlocked)); } catch (e) {}
+    }
+    setTimeout(() => { if (table) for (const x of table.targets) x.lit = false; }, 1600);
+  }
+}
+// ---------- Physics ----------
+function flipperSeg(f) {
+  return {
+    x1: f.px, y1: f.py,
+    x2: f.px + Math.cos(f.angle) * f.len,
+    y2: f.py + Math.sin(f.angle) * f.len,
+    rest: 0.25, flip: f, thick: ball.r * 0.42
+  };
+}
+function collideSegment(b, s) {
+  const dx = s.x2 - s.x1, dy = s.y2 - s.y1;
+  const l2 = dx * dx + dy * dy;
+  let t = l2 ? ((b.x - s.x1) * dx + (b.y - s.y1) * dy) / l2 : 0;
+  t = clamp(t, 0, 1);
+  const cx = s.x1 + dx * t, cy = s.y1 + dy * t;
+  let nx = b.x - cx, ny = b.y - cy;
+  const d = Math.hypot(nx, ny);
+  const rr = b.r + (s.thick || 0);
+  if (d >= rr || d < 0.0001) return;
+  nx /= d; ny /= d;
+  b.x = cx + nx * rr; b.y = cy + ny * rr;
+  const vn = b.vx * nx + b.vy * ny;
+  if (vn < 0) {
+    const rest = s.rest;
+    b.vx -= (1 + rest) * vn * nx;
+    b.vy -= (1 + rest) * vn * ny;
+    if (s.flip) {
+      flipperHits++;
+      const f = s.flip;
+      if (Math.abs(f.omega) > 2.5 && ny < 0.1) {
+        // the swing itself bats the ball: power grows toward the tip
+        const power = Math.min(Math.abs(f.omega), 14) * H * 0.085 * (0.35 + t);
+        b.vx += nx * power;
+        b.vy += ny * power;
+      }
+    }
+    if (s.sling && -vn > 130) addScore(50);
+    if (s.sling) sfxSling();
+  }
+}
+function collideCircle(b, c, rest, kick) {
+  let nx = b.x - c.x, ny = b.y - c.y;
+  const d = Math.hypot(nx, ny);
+  const rr = b.r + c.r;
+  if (d >= rr || d < 0.0001) return false;
+  nx /= d; ny /= d;
+  b.x = c.x + nx * rr; b.y = c.y + ny * rr;
+  const vn = b.vx * nx + b.vy * ny;
+  if (vn < 0) {
+    b.vx -= (1 + rest) * vn * nx;
+    b.vy -= (1 + rest) * vn * ny;
+    if (kick) {
+      const sp = Math.hypot(b.vx, b.vy), minSp = H * 0.46;
+      if (sp < minSp) { const k = minSp / Math.max(sp, 1); b.vx *= k; b.vy *= k; }
+    }
+    return true;
+  }
+  return false;
+}
+function stepPhysics(dt) {
+  // flippers ease toward their target angle at a fixed angular speed
+  for (const f of flippers) {
+    const target = f.pressed ? f.active : f.rest;
+    const prev = f.angle;
+    const maxStep = 13.5 * dt;
+    if (f.angle < target) f.angle = Math.min(target, f.angle + maxStep);
+    else if (f.angle > target) f.angle = Math.max(target, f.angle - maxStep);
+    f.omega = dt > 0 ? (f.angle - prev) / dt : 0;
+    if (f.pressed && Math.abs(f.omega) > 3 && !f.sounded) { f.sounded = true; sfxFlip(); }
+    if (!f.pressed) f.sounded = false;
+  }
+  if (state !== "play" || !ball.active) return;
+  const grav = H * 0.58;
+  const speed = Math.hypot(ball.vx, ball.vy);
+  const steps = clamp(Math.ceil(speed * dt / (ball.r * 0.45)), 2, 26);
+  const sdt = dt / steps;
+  for (let s = 0; s < steps; s++) {
+    ball.vy += grav * sdt;
+    // mild drag + terminal velocity keep the ball controllable
+    ball.vx *= Math.pow(0.75, sdt); ball.vy *= Math.pow(0.75, sdt);
+    const vmax = H * 2.1;
+    const sp = Math.hypot(ball.vx, ball.vy);
+    if (sp > vmax) { ball.vx *= vmax / sp; ball.vy *= vmax / sp; }
+    ball.x += ball.vx * sdt;
+    ball.y += ball.vy * sdt;
+    for (const w of table.walls) collideSegment(ball, w);
+    for (const f of flippers) collideSegment(ball, flipperSeg(f));
+    for (const bp of table.bumpers) {
+      if (collideCircle(ball, bp, 1.0, true)) { bp.flash = 0.12; addScore(100); sfxBumper(); }
+    }
+    for (const p of table.posts) collideCircle(ball, p, 0.55, false);
+    for (const t of table.targets) {
+      const d = Math.hypot(ball.x - t.x, ball.y - t.y);
+      if (d < ball.r + t.r) { if (!t.lit) lightTarget(t); collideCircle(ball, t, 0.5, false); }
+    }
+    // sensors (edge-triggered)
+    for (const r of table.rollovers) {
+      const inside = Math.hypot(ball.x - r.x, ball.y - r.y) < r.r;
+      if (inside && !r.wasIn) {
+        if (!r.lit) { r.lit = true; addScore(250); sfxTarget(); }
+        if (table.rollovers.every(x => x.lit)) { addScore(1500); banner("LANES LIT! +1500", 1.1); for (const x of table.rollovers) x.lit = false; }
+      }
+      r.wasIn = inside;
+    }
+    if (table.spinner) {
+      const sp2 = table.spinner;
+      const inside = Math.hypot(ball.x - sp2.x, ball.y - sp2.y) < sp2.r + ball.r * 0.4;
+      if (inside && !sp2.wasIn) { sp2.spinV += 14; addScore(250); sfxTarget(); }
+      sp2.wasIn = inside;
+    }
+    if (table.scoop && table.scoop.cool <= 0) {
+      const sc = table.scoop;
+      if (Math.hypot(ball.x - sc.x, ball.y - sc.y) < sc.r + ball.r * 0.6) {
+        addScore(1500); banner("THE COVE! +1500", 1.2); sfxClear();
+        ball.x = W * 0.46; ball.y = H * 0.56; ball.vx = W * 0.24; ball.vy = H * 0.12;
+        sc.cool = 1.2;
+      }
+    }
+    if (table.orbitSensor) {
+      const os = table.orbitSensor;
+      const inside = Math.hypot(ball.x - os.x, ball.y - os.y) < os.r;
+      if (inside && !os.wasIn) { addScore(500); sfxTarget(); }
+      os.wasIn = inside;
+    }
+    // drain / lane return
+    if (ball.x > W * 0.855) {
+      // in the plunger lane: recapture if it settles low
+      if (ball.y > H * 0.90 && Math.hypot(ball.vx, ball.vy) < H * 0.09) {
+        ball.x = W * 0.91; ball.y = H * 0.945; ball.vx = 0; ball.vy = 0; ball.active = false;
+        state = "plunge";
+        return;
+      }
+    } else if (ball.y > H * 0.985) {
+      drain();
+      return;
+    }
+  }
+}
+function update(dt) {
+  if (bannerTimer > 0) bannerTimer -= dt;
+  if (clearCelebration > 0) clearCelebration -= dt;
+  for (const bp of (table ? table.bumpers : [])) if (bp.flash > 0) bp.flash -= dt;
+  if (table && table.spinner) {
+    table.spinner.ang += table.spinner.spinV * dt;
+    table.spinner.spinV *= Math.pow(0.1, dt);
+  }
+  if (table && table.scoop && table.scoop.cool > 0) table.scoop.cool -= dt;
+  if (charging) charge = Math.min(1, charge + dt * 1.15);
+  stepPhysics(dt);
+}
+
+// ---------- Input ----------
+const ptrSide = new Map();
+let chargePtr = null;
+function sideOf(e) {
+  if (e.clientX > W * 0.85 && state === "plunge") return "charge";
+  return e.clientX < W / 2 ? "L" : "R";
+}
+function setFlipper(side, on) {
+  for (const f of flippers) {
+    if (side === "L" && f.side > 0 && !f.mini) f.pressed = on;
+    if (side === "R" && f.side < 0) f.pressed = on; // right button also works the mini flipper
+  }
+}
+canvas.addEventListener("pointerdown", function (e) {
+  initAudio();
+  if (state === "menu" || state === "over") return;
+  const side = sideOf(e);
+  if (side === "charge") { chargePtr = e.pointerId; charging = true; charge = 0; return; }
+  ptrSide.set(e.pointerId, side);
+  setFlipper(side, true);
+});
+function releasePointer(e) {
+  if (e.pointerId === chargePtr) {
+    chargePtr = null;
+    if (charging) { charging = false; launch(charge); charge = 0; }
+    return;
+  }
+  const side = ptrSide.get(e.pointerId);
+  if (side) { setFlipper(side, false); ptrSide.delete(e.pointerId); }
+}
+canvas.addEventListener("pointerup", releasePointer);
+canvas.addEventListener("pointercancel", releasePointer);
+let keys = {};
+window.addEventListener("keydown", function (e) {
+  if (["ArrowLeft", "ArrowRight", " "].includes(e.key)) e.preventDefault();
+  initAudio();
+  if (e.key === "m" || e.key === "M") { setMuted(!muted); return; }
+  if (keys[e.key]) return;
+  keys[e.key] = true;
+  if (e.key === "ArrowLeft" || e.key === "a" || e.key === "A") setFlipper("L", true);
+  if (e.key === "ArrowRight" || e.key === "d" || e.key === "D") setFlipper("R", true);
+  if (e.key === " " && state === "plunge" && !charging) { charging = true; charge = 0; }
+});
+window.addEventListener("keyup", function (e) {
+  keys[e.key] = false;
+  if (e.key === "ArrowLeft" || e.key === "a" || e.key === "A") setFlipper("L", false);
+  if (e.key === "ArrowRight" || e.key === "d" || e.key === "D") setFlipper("R", false);
+  if (e.key === " " && charging) { charging = false; launch(charge); charge = 0; }
+});
+
+// menu buttons
+const btnPrev = document.getElementById("btnPrev"), btnNext = document.getElementById("btnNext"), btnStart = document.getElementById("btnStart");
+function showMenuButtons() {
+  for (const b of [btnPrev, btnNext, btnStart]) b.style.display = "flex";
+  refreshMenuButtons();
+}
+function hideMenuButtons() { for (const b of [btnPrev, btnNext, btnStart]) b.style.display = "none"; }
+function refreshMenuButtons() {
+  btnStart.textContent = unlocked[tableIdx] ? "▶ PLAY — " + TABLES[tableIdx].name : "🔒 LOCKED";
+  btnStart.style.opacity = unlocked[tableIdx] ? "1" : "0.55";
+}
+btnPrev.addEventListener("click", function () { initAudio(); tableIdx = (tableIdx + TABLES.length - 1) % TABLES.length; buildTable(tableIdx); restBall(); refreshMenuButtons(); });
+btnNext.addEventListener("click", function () { initAudio(); tableIdx = (tableIdx + 1) % TABLES.length; buildTable(tableIdx); restBall(); refreshMenuButtons(); });
+btnStart.addEventListener("click", function () { if (unlocked[tableIdx]) startGame(); });
+
+// ---------- Draw ----------
+function drawSeg(s, color, width) {
+  ctx.strokeStyle = color; ctx.lineWidth = width; ctx.lineCap = "round";
+  ctx.beginPath(); ctx.moveTo(s.x1, s.y1); ctx.lineTo(s.x2, s.y2); ctx.stroke();
+}
+function draw() {
+  const def = TABLES[tableIdx];
+  const g = ctx.createLinearGradient(0, 0, 0, H);
+  g.addColorStop(0, def.bg2); g.addColorStop(1, def.bg);
+  ctx.fillStyle = g; ctx.fillRect(0, 0, W, H);
+  if (!table) return;
+  // lane tint
+  ctx.fillStyle = "rgba(255,255,255,0.05)";
+  ctx.fillRect(W * 0.855, H * 0.09, W * 0.11, H * 0.885);
+  // walls
+  for (const w of table.walls) drawSeg(w, w.sling ? def.accent2 : "rgba(210,220,255,0.75)", w.sling ? 5 : 4);
+  // rollovers
+  for (const r of table.rollovers) {
+    ctx.beginPath(); ctx.arc(r.x, r.y, r.r, 0, Math.PI * 2);
+    ctx.fillStyle = r.lit ? def.accent : "rgba(255,255,255,0.13)"; ctx.fill();
+    ctx.strokeStyle = "rgba(255,255,255,0.5)"; ctx.lineWidth = 1.5; ctx.stroke();
+  }
+  if (table.orbitSensor) {
+    ctx.beginPath(); ctx.arc(table.orbitSensor.x, table.orbitSensor.y, table.orbitSensor.r * 0.5, 0, Math.PI * 2);
+    ctx.fillStyle = "rgba(255,255,255,0.10)"; ctx.fill();
+  }
+  // spinner
+  if (table.spinner) {
+    const sp = table.spinner;
+    ctx.save(); ctx.translate(sp.x, sp.y); ctx.rotate(sp.ang);
+    ctx.fillStyle = def.accent;
+    ctx.fillRect(-sp.r, -4, sp.r * 2, 8);
+    ctx.beginPath(); ctx.arc(0, 0, 6, 0, Math.PI * 2); ctx.fillStyle = "#fff"; ctx.fill();
+    ctx.restore();
+  }
+  // scoop
+  if (table.scoop) {
+    ctx.beginPath(); ctx.arc(table.scoop.x, table.scoop.y, table.scoop.r, 0, Math.PI * 2);
+    ctx.fillStyle = "#06130b"; ctx.fill();
+    ctx.strokeStyle = def.accent; ctx.lineWidth = 2.5; ctx.stroke();
+    ctx.fillStyle = def.accent; ctx.font = "bold " + Math.round(u * 2.6) + "px system-ui"; ctx.textAlign = "center";
+    ctx.fillText("COVE", table.scoop.x, table.scoop.y + u);
+  }
+  // bumpers
+  for (const bp of table.bumpers) {
+    ctx.beginPath(); ctx.arc(bp.x, bp.y, bp.r, 0, Math.PI * 2);
+    ctx.fillStyle = bp.flash > 0 ? "#ffffff" : def.accent; ctx.fill();
+    ctx.beginPath(); ctx.arc(bp.x, bp.y, bp.r * 0.62, 0, Math.PI * 2);
+    ctx.fillStyle = bp.flash > 0 ? def.accent : "rgba(255,255,255,0.85)"; ctx.fill();
+    ctx.beginPath(); ctx.arc(bp.x, bp.y, bp.r * 0.30, 0, Math.PI * 2);
+    ctx.fillStyle = def.accent2; ctx.fill();
+  }
+  // posts
+  for (const p of table.posts) {
+    ctx.beginPath(); ctx.arc(p.x, p.y, p.r, 0, Math.PI * 2);
+    ctx.fillStyle = "#dfe6ff"; ctx.fill();
+    ctx.beginPath(); ctx.arc(p.x, p.y, p.r * 0.45, 0, Math.PI * 2);
+    ctx.fillStyle = def.accent2; ctx.fill();
+  }
+  // targets
+  for (const t of table.targets) {
+    ctx.beginPath(); ctx.arc(t.x, t.y, t.r, 0, Math.PI * 2);
+    ctx.fillStyle = t.lit ? "#ffd94d" : "rgba(255,217,77,0.25)"; ctx.fill();
+    ctx.strokeStyle = "#ffd94d"; ctx.lineWidth = 2; ctx.stroke();
+    ctx.fillStyle = t.lit ? "#7a5b00" : "#ffd94d";
+    ctx.font = "bold " + Math.round(t.r * 1.15) + "px system-ui"; ctx.textAlign = "center"; ctx.textBaseline = "middle";
+    ctx.fillText("★", t.x, t.y + 1);
+  }
+  // flippers
+  for (const f of flippers) {
+    const s = flipperSeg(f);
+    drawSeg({ x1: s.x1, y1: s.y1, x2: s.x2, y2: s.y2 }, "rgba(0,0,0,0.35)", ball.r * 0.95 + 5);
+    drawSeg({ x1: s.x1, y1: s.y1, x2: s.x2, y2: s.y2 }, f.mini ? def.accent2 : "#ffd94d", ball.r * 0.95);
+    ctx.beginPath(); ctx.arc(f.px, f.py, ball.r * 0.5, 0, Math.PI * 2); ctx.fillStyle = "#fff2b0"; ctx.fill();
+  }
+  // plunger + charge
+  ctx.fillStyle = "#39406e";
+  ctx.fillRect(W * 0.895, H * 0.955, W * 0.03, H * 0.03);
+  if (state === "plunge") {
+    ctx.fillStyle = "rgba(255,255,255,0.85)";
+    ctx.font = Math.round(u * 3.4) + "px system-ui"; ctx.textAlign = "center";
+    ctx.fillText(charging ? "RELEASE!" : "HOLD right side", W * 0.91, H * 0.885);
+    if (charging) {
+      ctx.fillStyle = "#ffd94d";
+      ctx.fillRect(W * 0.868, H * 0.90, W * 0.084 * charge, 7);
+    }
+  }
+  // ball
+  if (state === "play" || state === "plunge") {
+    const bg2 = ctx.createRadialGradient(ball.x - ball.r * 0.3, ball.y - ball.r * 0.35, ball.r * 0.2, ball.x, ball.y, ball.r);
+    bg2.addColorStop(0, "#ffffff"); bg2.addColorStop(1, "#8b93ad");
+    ctx.fillStyle = bg2;
+    ctx.beginPath(); ctx.arc(ball.x, ball.y, ball.r, 0, Math.PI * 2); ctx.fill();
+  }
+  // header
+  ctx.textAlign = "left"; ctx.textBaseline = "middle";
+  ctx.font = "bold " + Math.round(u * 4.6) + "px system-ui, sans-serif";
+  ctx.fillStyle = "#e8ecff";
+  if (state !== "menu") {
+    ctx.fillText("SCORE " + score, 12, 24);
+    ctx.font = Math.round(u * 3.6) + "px system-ui, sans-serif";
+    ctx.fillStyle = "#9aa4d8";
+    ctx.fillText(def.name + " · Ball " + ballNum + " of 3 · Best " + Math.max(bestByTable[tableIdx], score), 12, 24 + u * 5.2);
+  }
+  if (bannerTimer > 0) {
+    ctx.textAlign = "center";
+    ctx.font = "bold " + Math.round(u * 6.4) + "px system-ui, sans-serif";
+    ctx.fillStyle = "#ffd94d";
+    ctx.fillText(bannerText, W / 2, H * 0.5);
+  }
+  if (clearCelebration > 0) {
+    ctx.fillStyle = "rgba(255,217,77," + (clearCelebration * 0.12).toFixed(2) + ")";
+    ctx.fillRect(0, 0, W, H);
+  }
+  if (state === "menu" || state === "over") {
+    ctx.fillStyle = "rgba(3,4,14,0.80)"; ctx.fillRect(0, H * 0.10, W, H * 0.40);
+    ctx.textAlign = "center";
+    ctx.fillStyle = def.accent;
+    ctx.font = "bold " + Math.round(u * 9.5) + "px system-ui, sans-serif";
+    ctx.fillText("🕹️ PINBALL", W / 2, H * 0.175);
+    if (state === "over") {
+      ctx.fillStyle = "#ffd94d";
+      ctx.font = "bold " + Math.round(u * 6.6) + "px system-ui, sans-serif";
+      ctx.fillText("GAME OVER — " + score, W / 2, H * 0.255);
+      ctx.fillStyle = "#c6cdf5";
+      ctx.font = Math.round(u * 4.2) + "px system-ui, sans-serif";
+      ctx.fillText(def.name + " best: " + bestByTable[tableIdx], W / 2, H * 0.305);
+    } else {
+      ctx.fillStyle = "#e8ecff";
+      ctx.font = "bold " + Math.round(u * 5.6) + "px system-ui, sans-serif";
+      ctx.fillText((tableIdx + 1) + ". " + def.name + (unlocked[tableIdx] ? "" : " 🔒"), W / 2, H * 0.25);
+      ctx.fillStyle = "#aab4e8";
+      ctx.font = Math.round(u * 4.1) + "px system-ui, sans-serif";
+      ctx.fillText(def.sub, W / 2, H * 0.295);
+      ctx.fillText("Best on this table: " + bestByTable[tableIdx], W / 2, H * 0.335);
+      if (!unlocked[tableIdx]) {
+        ctx.fillStyle = "#ffd94d";
+        ctx.fillText("Clear " + TABLES[tableIdx - 1].name + " (light every ★) to unlock.", W / 2, H * 0.375);
+      }
+    }
+    ctx.fillStyle = "#aab4e8";
+    ctx.font = Math.round(u * 3.9) + "px system-ui, sans-serif";
+    ctx.fillText("Hold the right edge to charge the plunger.", W / 2, H * 0.425);
+    ctx.fillText("Tap left / right halves for the flippers.", W / 2, H * 0.46);
+    ctx.fillText("Light every ★ target to clear the table.", W / 2, H * 0.485);
+  }
+}
+
+// ---------- Loop ----------
+let lastT = 0;
+function frame(t) {
+  requestAnimationFrame(frame);
+  const dt = Math.min(0.05, (t - lastT) / 1000 || 0); lastT = t;
+  update(dt);
+  draw();
+}
+resize();
+showMenuButtons();
+requestAnimationFrame(frame);
+
+// ---------- QA hooks ----------
+window.__qa = {
+  state: () => state,
+  tables: () => TABLES.map(t => t.name),
+  unlocked: () => unlocked.slice(),
+  selectTable: i => { tableIdx = i; buildTable(i); restBall(); refreshMenuButtons(); },
+  start: () => startGame(),
+  launch: p => launch(p === undefined ? 0.8 : p),
+  setFlipper: (side, on) => setFlipper(side, on),
+  ball: () => ({ x: Math.round(ball.x), y: Math.round(ball.y), vx: Math.round(ball.vx), vy: Math.round(ball.vy), active: ball.active }),
+  score: () => score,
+  ballsLeft: () => ballsLeft,
+  flipperHits: () => flipperHits,
+  drains: () => drains,
+  targetsLit: () => table ? table.targets.filter(t => t.lit).length : 0,
+  unlockAll: () => { unlocked = [true, true, true]; }
+};
+</script>
+</body>
+</html>

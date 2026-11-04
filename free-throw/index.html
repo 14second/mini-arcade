@@ -1,0 +1,483 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, user-scalable=no">
+<meta name="theme-color" content="#120d08">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<title>Free Throw</title>
+<style>
+  * { margin:0; padding:0; box-sizing:border-box; }
+  html, body {
+    width:100%; height:100%; overflow:hidden; background:#120d08;
+    font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+    touch-action:none; user-select:none; -webkit-user-select:none;
+    -webkit-tap-highlight-color: transparent;
+  }
+  canvas { position:fixed; inset:0; display:block; touch-action:none; }
+  #muteBtn {
+    position:fixed; top:10px; right:10px; z-index:10;
+    width:48px; height:48px; border-radius:12px;
+    border:2px solid rgba(255,190,120,.5); background:rgba(22,14,6,.62);
+    color:#fff; font-size:22px; line-height:1; cursor:pointer;
+    touch-action:none; user-select:none; -webkit-user-select:none;
+    display:flex; align-items:center; justify-content:center; padding:0;
+  }
+</style>
+</head>
+<body>
+<canvas id="game"></canvas>
+<button id="muteBtn" aria-label="Toggle sound">🔊</button>
+<script>
+// iOS audio routing: route Web Audio to the media/playback channel (iOS 17+
+// Audio Session API) on the first gesture and inside audio init, so sound
+// plays even with the silent switch on.
+function iosPlaybackSession() {
+  try { if ('audioSession' in navigator) navigator.audioSession.type = 'playback'; } catch (e) {}
+}
+document.addEventListener('pointerdown', iosPlaybackSession, true);
+document.addEventListener('touchstart', iosPlaybackSession, true);
+
+"use strict";
+/* ============================================================
+   FREE THROW — basketball shooting, Pocket-Fairway style.
+   Two taps per shot: lock the swinging AIM marker over the hoop,
+   then lock the POWER meter in the zone. Real trajectory decides:
+   swish, off the rim, off the glass, or short.
+   3 rounds of 5 balls. Last ball of a round is worth 2.
+   Round 2 steps back, round 3 moves you off to the side.
+   Streaks pay a bonus point from the third straight make.
+   ============================================================ */
+
+const canvas = document.getElementById("game");
+const ctx = canvas.getContext("2d");
+let W = 0, H = 0, DPR = 1, u = 4;
+function clamp(v, a, b) { return v < a ? a : (v > b ? b : v); }
+function lerp(a, b, t) { return a + (b - a) * t; }
+
+let hoopX = 0, rimY = 0, rimHalf = 20, boardW = 0, boardH = 0;
+let startY = 0, ballR0 = 30;
+
+function resize() {
+  DPR = Math.min(window.devicePixelRatio || 1, 2);
+  W = window.innerWidth; H = window.innerHeight;
+  canvas.width = Math.round(W * DPR); canvas.height = Math.round(H * DPR);
+  canvas.style.width = W + "px"; canvas.style.height = H + "px";
+  ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+  u = Math.min(W, H) / 100;
+  hoopX = W / 2; rimY = H * 0.335;
+  rimHalf = W * 0.058;
+  boardW = W * 0.44; boardH = H * 0.115;
+  startY = H * 0.845;
+  ballR0 = W * 0.088;
+}
+window.addEventListener("resize", resize);
+
+// ---------- Audio ----------
+let actx = null, muted = false;
+const muteBtn = document.getElementById("muteBtn");
+function initAudio() {
+  iosPlaybackSession();
+  if (!actx) {
+    try {
+      const AC = window.AudioContext || window.webkitAudioContext;
+      if (AC) actx = new AC();
+    } catch (e) { actx = null; }
+    if (actx) startMusicScheduler();
+  }
+  if (actx && actx.state === "suspended") actx.resume();
+}
+function beep(freq, dur, type, vol, slide) {
+  if (!actx || muted) return;
+  const t = actx.currentTime;
+  const o = actx.createOscillator(), g = actx.createGain();
+  o.type = type || "square";
+  o.frequency.setValueAtTime(freq, t);
+  if (slide) o.frequency.exponentialRampToValueAtTime(Math.max(20, slide), t + dur);
+  g.gain.setValueAtTime(vol || 0.08, t);
+  g.gain.exponentialRampToValueAtTime(0.0001, t + dur);
+  o.connect(g); g.connect(actx.destination);
+  o.start(t); o.stop(t + dur + 0.02);
+}
+function noiseBurst(dur, vol, freq, type) {
+  if (!actx || muted) return;
+  const t = actx.currentTime;
+  const len = Math.max(1, Math.floor(actx.sampleRate * dur));
+  const buf = actx.createBuffer(1, len, actx.sampleRate);
+  const d = buf.getChannelData(0);
+  for (let i = 0; i < len; i++) d[i] = (Math.random() * 2 - 1) * (1 - i / len);
+  const src = actx.createBufferSource(); src.buffer = buf;
+  const f = actx.createBiquadFilter(); f.type = type || "lowpass"; f.frequency.value = freq || 900;
+  const g = actx.createGain(); g.gain.value = vol || 0.15;
+  src.connect(f); f.connect(g); g.connect(actx.destination); src.start(t);
+}
+function sfxLock()  { beep(740, 0.05, "square", 0.05); }
+function sfxBounce(){ beep(150, 0.09, "triangle", 0.12); }
+function sfxRim()   { beep(1240, 0.16, "square", 0.05, 900); beep(830, 0.2, "square", 0.04, 620); }
+function sfxSwish() { noiseBurst(0.22, 0.16, 2600, "bandpass"); }
+function sfxMake()  { sfxSwish(); [660, 880].forEach((f, i) => setTimeout(() => beep(f, 0.1, "square", 0.05), 60 + i * 80)); }
+function sfxBuzzer(){ beep(140, 0.5, "sawtooth", 0.07); }
+
+// Gym groove, BPM 100. Bass >= MIDI 45.
+const BPM = 100, STEP_DUR = 60 / BPM / 2;
+const BASS = [
+  45,0,0,45, 0,0,45,0, 48,0,0,48, 0,0,48,0,
+  43,0,0,43, 0,0,43,0, 41,0,0,41, 0,43,0,45
+];
+const LEAD = [
+  69,0,0,0, 0,0,72,0, 0,0,71,0, 0,0,0,0,
+  67,0,0,0, 0,0,71,0, 0,0,69,0, 0,0,0,0
+];
+const PADS = [ [45,48,52], [48,52,55], [43,47,50], [41,45,48] ];
+let musicStep = 0, nextNoteTime = 0, musicTimer = null;
+function midiFreq(m) { return 440 * Math.pow(2, (m - 69) / 12); }
+function toneAt(midi, when, dur, type, vol) {
+  const o = actx.createOscillator(), g = actx.createGain();
+  o.type = type; o.frequency.setValueAtTime(midiFreq(midi), when);
+  g.gain.setValueAtTime(0.0001, when);
+  g.gain.exponentialRampToValueAtTime(vol, when + 0.012);
+  g.gain.exponentialRampToValueAtTime(0.0001, when + dur);
+  o.connect(g); g.connect(actx.destination);
+  o.start(when); o.stop(when + dur + 0.03);
+}
+function scheduleStep(step, when) {
+  if (muted) return;
+  const b = BASS[step % 32]; if (b) toneAt(b, when, STEP_DUR * 0.9, "square", 0.03);
+  const l = LEAD[step % 32]; if (l) toneAt(l, when, STEP_DUR * 1.5, "triangle", 0.017);
+  if (step % 8 === 0) {
+    const chord = PADS[Math.floor(step / 8) % PADS.length];
+    for (let i = 0; i < chord.length; i++) toneAt(chord[i], when, STEP_DUR * 7.6, "triangle", 0.009);
+  }
+}
+function startMusicScheduler() {
+  if (musicTimer !== null || !actx) return;
+  musicStep = 0; nextNoteTime = actx.currentTime + 0.06;
+  musicTimer = setInterval(function () {
+    if (!actx) return;
+    if (nextNoteTime < actx.currentTime) nextNoteTime = actx.currentTime + 0.05;
+    while (nextNoteTime < actx.currentTime + 0.12) {
+      scheduleStep(musicStep, nextNoteTime);
+      nextNoteTime += STEP_DUR; musicStep = (musicStep + 1) % 32;
+    }
+  }, 25);
+}
+function setMuted(m) { muted = m; muteBtn.textContent = muted ? "🔇" : "🔊"; }
+muteBtn.addEventListener("pointerdown", function (e) { e.stopPropagation(); e.preventDefault(); initAudio(); setMuted(!muted); });
+muteBtn.addEventListener("click", function (e) { e.stopPropagation(); e.preventDefault(); });
+
+// ---------- Game state ----------
+const ROUNDS = [
+  { name: "Free-Throw Line", ideal: 52, window: 8.5, spotX: 0,    aimSpeed: 1.5, powSpeed: 0.95, startDrop: 0 },
+  { name: "Step Back",       ideal: 70, window: 7.5, spotX: 0,    aimSpeed: 1.7, powSpeed: 1.05, startDrop: 0 },
+  { name: "Off to the Side", ideal: 60, window: 7.5, spotX: 0.23, aimSpeed: 1.95, powSpeed: 1.1, startDrop: 0 }
+];
+let state = "menu"; // menu | aim | power | flight | result | over
+let round = 0, ballInRound = 0; // ballInRound 0..4
+let score = 0, streak = 0, bestStreak = 0, makes = 0, attempts = 0;
+let aimT = 0, powT = 0, aimLocked = 0, powerLocked = 0;
+let flightT = 0, flight = null, resultText = "", resultGood = false, resultTimer = 0;
+let sideSign = 1;
+let best = 0;
+try { best = parseInt(localStorage.getItem("freethrow_best") || "0", 10) || 0; } catch (e) { best = 0; }
+
+function startX() {
+  const r = ROUNDS[round];
+  return W / 2 + (r.spotX ? sideSign * W * r.spotX : 0);
+}
+function ballStartY() { return startY + (round === 1 ? H * 0.045 : 0); }
+function judgeShot(aim, power) {
+  const r = ROUNDS[round];
+  const aimErrPx = aim * W * 0.30;                 // px from hoop centre at the hoop plane
+  const powErr = power - r.ideal;                  // meter points from ideal
+  const inAim = Math.abs(aimErrPx) <= rimHalf * 0.75;
+  const inPow = Math.abs(powErr) <= r.window;
+  const nearAim = Math.abs(aimErrPx) <= rimHalf * 1.8;
+  const nearPow = Math.abs(powErr) <= r.window * 1.8;
+  let kind;
+  if (inAim && inPow) kind = (Math.abs(aimErrPx) <= rimHalf * 0.4 && Math.abs(powErr) <= r.window * 0.4) ? "swish" : "make";
+  else if (nearAim && nearPow) kind = "rimout";
+  else if (!inPow && powErr < 0) kind = "short";
+  else if (!inPow) kind = "long";
+  else kind = "wide";
+  return { kind, aimErrPx, powErr, made: kind === "swish" || kind === "make" };
+}
+function startGame() {
+  initAudio();
+  round = 0; ballInRound = 0; score = 0; streak = 0; bestStreak = 0; makes = 0; attempts = 0;
+  sideSign = Math.random() < 0.5 ? -1 : 1;
+  newBall();
+}
+function newBall() {
+  aimT = Math.random() * 6; powT = 0;
+  state = "aim";
+}
+function lockAim() {
+  if (state !== "aim") return;
+  aimLocked = Math.sin(aimT);
+  state = "power"; powT = 0;
+  sfxLock();
+}
+function lockPower() {
+  if (state !== "power") return;
+  const cycle = (powT % 2 + 2) % 2;
+  powerLocked = (cycle < 1 ? cycle : 2 - cycle) * 100;
+  const res = judgeShot(aimLocked, powerLocked);
+  attempts++;
+  // endpoint for the animation, in hoop-plane coords
+  const endX = hoopX + res.aimErrPx;
+  let endY = rimY;
+  if (res.kind === "short") endY = rimY + (Math.abs(res.powErr) - ROUNDS[round].window) * H * 0.006 + 14;
+  if (res.kind === "long") endY = rimY - boardH * 0.42 - (Math.abs(res.powErr) - ROUNDS[round].window) * H * 0.004;
+  if (res.kind === "rimout") endY = rimY - 6;
+  flight = { sx: startX(), sy: ballStartY(), ex: endX, ey: endY, res };
+  flightT = 0;
+  state = "flight";
+}
+function finishFlight() {
+  const res = flight.res;
+  const bonusBall = ballInRound === 4;
+  if (res.made) {
+    makes++;
+    streak++; bestStreak = Math.max(bestStreak, streak);
+    let pts = bonusBall ? 2 : 1;
+    let label = res.kind === "swish" ? "SWISH!" : "BUCKET!";
+    if (bonusBall) label += " +2 BONUS BALL";
+    if (streak >= 3) { pts += 1; label += " 🔥 STREAK +1"; }
+    score += pts;
+    resultText = label; resultGood = true;
+    sfxMake();
+  } else {
+    streak = 0;
+    resultText = { rimout: "OFF THE RIM!", short: "TOO SHORT!", long: "OFF THE GLASS!", wide: "WIDE!" }[res.kind];
+    resultGood = false;
+    if (res.kind === "rimout" || res.kind === "long") sfxRim(); else sfxBounce();
+  }
+  state = "result"; resultTimer = 1.05;
+}
+function advanceBall() {
+  ballInRound++;
+  if (ballInRound >= 5) {
+    ballInRound = 0; round++;
+    if (round >= 3) {
+      state = "over";
+      if (score > best) { best = score; try { localStorage.setItem("freethrow_best", String(best)); } catch (e) {} }
+      sfxBuzzer();
+      return;
+    }
+    if (round === 2) sideSign = Math.random() < 0.5 ? -1 : 1;
+  }
+  newBall();
+}
+function update(dt) {
+  if (state === "aim") aimT += dt * ROUNDS[round].aimSpeed;
+  else if (state === "power") powT += dt * ROUNDS[round].powSpeed;
+  else if (state === "flight") {
+    flightT += dt / 0.85;
+    if (flightT >= 1) finishFlight();
+  } else if (state === "result") {
+    resultTimer -= dt;
+    if (resultTimer <= 0) advanceBall();
+  }
+}
+function aimNow() { return Math.sin(aimT); }
+function powerNow() { const c = (powT % 2 + 2) % 2; return (c < 1 ? c : 2 - c) * 100; }
+
+// ---------- Input ----------
+function tap() {
+  initAudio();
+  if (state === "menu" || state === "over") { startGame(); return; }
+  if (state === "aim") lockAim();
+  else if (state === "power") lockPower();
+}
+canvas.addEventListener("pointerdown", function (e) { e.preventDefault(); tap(); });
+window.addEventListener("keydown", function (e) {
+  if ([" ", "Enter", "ArrowUp"].includes(e.key)) e.preventDefault();
+  if (e.key === "m" || e.key === "M") { initAudio(); setMuted(!muted); return; }
+  if (e.key === " " || e.key === "Enter") tap();
+});
+
+// ---------- Draw ----------
+function drawBall(x, y, r) {
+  ctx.fillStyle = "rgba(0,0,0,0.3)";
+  ctx.beginPath(); ctx.ellipse(x + 2, y + r * 0.75, r * 0.9, r * 0.35, 0, 0, Math.PI * 2); ctx.fill();
+  const g = ctx.createRadialGradient(x - r * 0.3, y - r * 0.35, r * 0.25, x, y, r);
+  g.addColorStop(0, "#ffb066"); g.addColorStop(1, "#d96a1e");
+  ctx.fillStyle = g;
+  ctx.beginPath(); ctx.arc(x, y, r, 0, Math.PI * 2); ctx.fill();
+  ctx.strokeStyle = "rgba(80,35,5,0.75)"; ctx.lineWidth = Math.max(1.2, r * 0.07);
+  ctx.beginPath(); ctx.arc(x, y, r, 0, Math.PI * 2); ctx.stroke();
+  ctx.beginPath(); ctx.moveTo(x - r, y); ctx.lineTo(x + r, y); ctx.stroke();
+  ctx.beginPath(); ctx.moveTo(x, y - r); ctx.lineTo(x, y + r); ctx.stroke();
+  ctx.beginPath(); ctx.arc(x - r * 1.5, y, r * 1.25, -0.5, 0.5); ctx.stroke();
+  ctx.beginPath(); ctx.arc(x + r * 1.5, y, r * 1.25, Math.PI - 0.5, Math.PI + 0.5); ctx.stroke();
+}
+function drawHoop() {
+  const bw = boardW, bh = boardH, bx = hoopX - bw / 2, by = rimY - bh - H * 0.028;
+  // pole
+  ctx.fillStyle = "#39404f";
+  ctx.fillRect(hoopX - 4, 0, 8, by);
+  // backboard
+  ctx.fillStyle = "rgba(235,242,250,0.92)";
+  ctx.fillRect(bx, by, bw, bh);
+  ctx.strokeStyle = "#d96a1e"; ctx.lineWidth = 3;
+  ctx.strokeRect(bx + 3, by + 3, bw - 6, bh - 6);
+  ctx.strokeRect(hoopX - rimHalf * 1.15, by + bh * 0.42, rimHalf * 2.3, bh * 0.5);
+  // net (behind rim front)
+  ctx.strokeStyle = "rgba(255,255,255,0.75)"; ctx.lineWidth = 1.6;
+  const netTop = rimY + 3, netBot = rimY + H * 0.055;
+  for (let i = 0; i <= 4; i++) {
+    const fx = hoopX - rimHalf + (2 * rimHalf) * i / 4;
+    const tx = hoopX - rimHalf * 0.55 + (rimHalf * 1.1) * i / 4;
+    ctx.beginPath(); ctx.moveTo(fx, netTop); ctx.lineTo(tx, netBot); ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(fx, netTop); ctx.lineTo(hoopX - (fx - hoopX) * 0.55, netBot); ctx.stroke();
+  }
+  // rim
+  ctx.strokeStyle = "#e2483d"; ctx.lineWidth = Math.max(3, u * 0.9);
+  ctx.beginPath(); ctx.ellipse(hoopX, rimY, rimHalf, rimHalf * 0.30, 0, 0, Math.PI * 2); ctx.stroke();
+}
+function draw() {
+  const g = ctx.createLinearGradient(0, 0, 0, H);
+  g.addColorStop(0, "#241a10"); g.addColorStop(0.6, "#3a2812"); g.addColorStop(1, "#54380f");
+  ctx.fillStyle = g; ctx.fillRect(0, 0, W, H);
+  // court floor lines (perspective hints)
+  ctx.strokeStyle = "rgba(255,220,160,0.20)"; ctx.lineWidth = 2;
+  for (let i = -2; i <= 2; i++) {
+    ctx.beginPath(); ctx.moveTo(W / 2 + i * W * 0.07, rimY + H * 0.1); ctx.lineTo(W / 2 + i * W * 0.30, H); ctx.stroke();
+  }
+  ctx.beginPath(); ctx.ellipse(hoopX, rimY + H * 0.16, W * 0.30, H * 0.035, 0, 0, Math.PI * 2); ctx.stroke();
+  drawHoop();
+  // header
+  ctx.textAlign = "left"; ctx.textBaseline = "middle";
+  ctx.font = "bold " + Math.round(u * 4.2) + "px system-ui, sans-serif";
+  ctx.fillStyle = "#ffd9a0";
+  if (state !== "menu") {
+    ctx.fillText("ROUND " + (Math.min(round, 2) + 1) + " · " + ROUNDS[Math.min(round, 2)].name, 12, 24);
+    ctx.fillText("BALL " + (ballInRound + 1) + "/5" + (ballInRound === 4 ? " · ⭐ WORTH 2" : ""), 12, 24 + u * 5.4);
+    ctx.textAlign = "right";
+    ctx.fillText("SCORE " + score, W - 64, 24);
+    if (streak >= 2) { ctx.fillStyle = "#ff9d4d"; ctx.fillText("🔥 " + streak, W - 64, 24 + u * 5.4); }
+    ctx.textAlign = "left";
+  }
+  // ball
+  if (state === "aim" || state === "power") {
+    drawBall(startX(), ballStartY(), ballR0);
+  } else if (state === "flight" && flight) {
+    const t = Math.min(1, flightT);
+    const x = lerp(flight.sx, flight.ex, t);
+    const arc = Math.sin(t * Math.PI) * H * 0.16;
+    let y = lerp(flight.sy, flight.ey, t) - arc;
+    if (flight.res.made && t > 0.82) y = lerp(y, rimY + H * 0.045, (t - 0.82) / 0.18); // drop through the net
+    const r = lerp(ballR0, ballR0 * 0.44, t);
+    drawBall(x, y, r);
+  } else if (state === "result" && flight) {
+    if (flight.res.made) drawBall(flight.ex, rimY + H * 0.05, ballR0 * 0.44);
+    else {
+      const drop = (1.05 - Math.max(0, resultTimer)) * H * 0.12;
+      drawBall(flight.ex + (flight.res.kind === "wide" ? 10 : 0), flight.ey + drop, ballR0 * 0.44);
+    }
+  }
+  // aim marker
+  if (state === "aim") {
+    const mx = hoopX + aimNow() * W * 0.30;
+    ctx.strokeStyle = "#ffd166"; ctx.lineWidth = 3;
+    ctx.beginPath(); ctx.arc(mx, rimY, rimHalf + 9, 0, Math.PI * 2); ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(mx, rimY - rimHalf - 18); ctx.lineTo(mx, rimY - rimHalf - 4); ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(mx, rimY + rimHalf + 4); ctx.lineTo(mx, rimY + rimHalf + 18); ctx.stroke();
+    ctx.fillStyle = "rgba(255,255,255,0.85)";
+    ctx.textAlign = "center"; ctx.font = "bold " + Math.round(u * 4.4) + "px system-ui, sans-serif";
+    ctx.fillText("TAP TO LOCK AIM", W / 2, H * 0.62);
+  }
+  // power meter
+  if (state === "power" || state === "aim") {
+    const mx = W * 0.14, my = H * 0.60, mw = W * 0.72, mh = u * 6;
+    ctx.fillStyle = "rgba(0,0,0,0.45)"; ctx.fillRect(mx - 4, my - 4, mw + 8, mh + 8);
+    const grad = ctx.createLinearGradient(mx, 0, mx + mw, 0);
+    grad.addColorStop(0, "#4da3ff"); grad.addColorStop(0.5, "#ffd166"); grad.addColorStop(1, "#ff5d5d");
+    ctx.fillStyle = grad; ctx.fillRect(mx, my, mw, mh);
+    // ideal zone
+    if (state === "power") {
+      const zx = mx + mw * (ROUNDS[round].ideal - ROUNDS[round].window) / 100;
+      const zw = mw * (2 * ROUNDS[round].window) / 100;
+      ctx.fillStyle = "rgba(90,255,140,0.35)"; ctx.fillRect(zx, my - 6, zw, mh + 12);
+      ctx.strokeStyle = "#5aff8c"; ctx.lineWidth = 2; ctx.strokeRect(zx, my - 6, zw, mh + 12);
+      const px = mx + mw * powerNow() / 100;
+      ctx.fillStyle = "#fff";
+      ctx.fillRect(px - 3, my - 9, 6, mh + 18);
+      ctx.fillStyle = "rgba(255,255,255,0.9)";
+      ctx.textAlign = "center"; ctx.font = "bold " + Math.round(u * 4.4) + "px system-ui, sans-serif";
+      ctx.fillText("TAP TO LOCK POWER — LAND IN THE GREEN", W / 2, my - u * 6.5);
+    } else {
+      ctx.fillStyle = "rgba(255,255,255,0.5)";
+      ctx.textAlign = "center"; ctx.font = Math.round(u * 3.8) + "px system-ui, sans-serif";
+      ctx.fillText("power meter comes next", W / 2, my + mh + u * 5.5);
+    }
+  }
+  if (state === "result") {
+    ctx.textAlign = "center";
+    ctx.font = "bold " + Math.round(u * 8) + "px system-ui, sans-serif";
+    ctx.fillStyle = resultGood ? "#8be04e" : "#ff7a6b";
+    ctx.fillText(resultText, W / 2, H * 0.56);
+  }
+  if (state === "menu" || state === "over") {
+    ctx.fillStyle = "rgba(8,5,2,0.85)"; ctx.fillRect(0, 0, W, H);
+    ctx.textAlign = "center";
+    ctx.fillStyle = "#ffb066";
+    ctx.font = "bold " + Math.round(u * 9.5) + "px system-ui, sans-serif";
+    ctx.fillText("🏀 FREE THROW", W / 2, H * 0.30);
+    ctx.fillStyle = "#f5e9dc";
+    ctx.font = Math.round(u * 4.3) + "px system-ui, sans-serif";
+    if (state === "menu") {
+      ctx.fillText("Tap once to lock your aim over the hoop,", W / 2, H * 0.42);
+      ctx.fillText("tap again to lock power in the green.", W / 2, H * 0.465);
+      ctx.fillText("3 rounds × 5 balls. Last ball of a round", W / 2, H * 0.53);
+      ctx.fillText("is worth 2 — streaks of 3+ pay a bonus.", W / 2, H * 0.575);
+      ctx.fillStyle = "#9c8d7c";
+      ctx.fillText("Best score: " + best, W / 2, H * 0.63);
+    } else {
+      ctx.fillStyle = "#ffd166";
+      ctx.font = "bold " + Math.round(u * 7) + "px system-ui, sans-serif";
+      ctx.fillText("SCORE " + score, W / 2, H * 0.44);
+      ctx.fillStyle = "#f5e9dc";
+      ctx.font = Math.round(u * 4.4) + "px system-ui, sans-serif";
+      ctx.fillText("Makes: " + makes + " of " + attempts + " · Best streak: " + bestStreak, W / 2, H * 0.52);
+      ctx.fillStyle = "#9c8d7c";
+      ctx.fillText("Best score: " + best, W / 2, H * 0.575);
+    }
+    ctx.fillStyle = "#ffb066";
+    ctx.font = "bold " + Math.round(u * 5) + "px system-ui, sans-serif";
+    ctx.fillText(state === "menu" ? "TAP TO START" : "TAP TO PLAY AGAIN", W / 2, H * 0.70);
+  }
+}
+
+// ---------- Loop ----------
+let lastT = 0;
+function frame(t) {
+  requestAnimationFrame(frame);
+  const dt = Math.min(0.05, (t - lastT) / 1000 || 0); lastT = t;
+  update(dt);
+  draw();
+}
+resize();
+requestAnimationFrame(frame);
+
+// ---------- QA hooks ----------
+window.__qa = {
+  state: () => state,
+  start: () => startGame(),
+  aimNow: () => aimNow(),
+  powerNow: () => powerNow(),
+  ideal: () => ROUNDS[round].ideal,
+  window: () => ROUNDS[round].window,
+  lockAim: () => lockAim(),
+  lockPower: () => lockPower(),
+  judge: (a, p) => judgeShot(a, p),
+  score: () => score,
+  makes: () => makes,
+  attempts: () => attempts,
+  round: () => round,
+  ball: () => ballInRound
+};
+</script>
+</body>
+</html>

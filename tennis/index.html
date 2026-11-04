@@ -1,0 +1,458 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, user-scalable=no">
+<meta name="theme-color" content="#0a1410">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<title>Tennis</title>
+<style>
+  * { margin:0; padding:0; box-sizing:border-box; }
+  html, body {
+    width:100%; height:100%; overflow:hidden; background:#0a1410;
+    font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+    touch-action:none; user-select:none; -webkit-user-select:none;
+    -webkit-tap-highlight-color: transparent;
+  }
+  canvas { position:fixed; inset:0; display:block; touch-action:none; }
+  #muteBtn {
+    position:fixed; top:10px; right:10px; z-index:10;
+    width:48px; height:48px; border-radius:12px;
+    border:2px solid rgba(170,255,190,.5); background:rgba(8,22,14,.62);
+    color:#fff; font-size:22px; line-height:1; cursor:pointer;
+    touch-action:none; user-select:none; -webkit-user-select:none;
+    display:flex; align-items:center; justify-content:center; padding:0;
+  }
+</style>
+</head>
+<body>
+<canvas id="game"></canvas>
+<button id="muteBtn" aria-label="Toggle sound">🔊</button>
+<script>
+// iOS audio routing: route Web Audio to the media/playback channel (iOS 17+
+// Audio Session API) on the first gesture and inside audio init, so sound
+// plays even with the silent switch on.
+function iosPlaybackSession() {
+  try { if ('audioSession' in navigator) navigator.audioSession.type = 'playback'; } catch (e) {}
+}
+document.addEventListener('pointerdown', iosPlaybackSession, true);
+document.addEventListener('touchstart', iosPlaybackSession, true);
+
+"use strict";
+/* ============================================================
+   TENNIS — arcade tennis for portrait phones.
+   You're at the bottom, the machine is at the top. Drag to move;
+   where the ball meets your racket — and how fast you're moving —
+   sets the return angle. Arcade scoring: a points race, first
+   to 6 and win by 2 (not love-15-30 — it says so on the help line).
+   The rival gets quicker the more you score.
+   ============================================================ */
+
+const canvas = document.getElementById("game");
+const ctx = canvas.getContext("2d");
+let W = 0, H = 0, DPR = 1, u = 4;
+function clamp(v, a, b) { return v < a ? a : (v > b ? b : v); }
+
+// Court geometry
+let courtX = 0, courtW = 0, courtTop = 0, courtBot = 0;
+let racketW = 70, racketH = 12, ballR = 8;
+const player = { x: 0, y: 0, vx: 0 };
+const cpu = { x: 0, y: 0, vx: 0 };
+
+function resize() {
+  DPR = Math.min(window.devicePixelRatio || 1, 2);
+  W = window.innerWidth; H = window.innerHeight;
+  canvas.width = Math.round(W * DPR); canvas.height = Math.round(H * DPR);
+  canvas.style.width = W + "px"; canvas.style.height = H + "px";
+  ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+  u = Math.min(W, H) / 100;
+  courtW = W * 0.86; courtX = (W - courtW) / 2;
+  courtTop = H * 0.075; courtBot = H * 0.955;
+  racketW = Math.max(58, W * 0.21); racketH = Math.max(10, u * 2.6); ballR = Math.max(6, u * 1.9);
+  player.y = H * 0.875; cpu.y = H * 0.125;
+  player.x = clamp(player.x || W / 2, courtX + racketW / 2, courtX + courtW - racketW / 2);
+  cpu.x = clamp(cpu.x || W / 2, courtX + racketW / 2, courtX + courtW - racketW / 2);
+}
+window.addEventListener("resize", resize);
+
+// ---------- Audio ----------
+let actx = null, muted = false;
+const muteBtn = document.getElementById("muteBtn");
+function initAudio() {
+  iosPlaybackSession();
+  if (!actx) {
+    try {
+      const AC = window.AudioContext || window.webkitAudioContext;
+      if (AC) actx = new AC();
+    } catch (e) { actx = null; }
+    if (actx) startMusicScheduler();
+  }
+  if (actx && actx.state === "suspended") actx.resume();
+}
+function beep(freq, dur, type, vol, slide) {
+  if (!actx || muted) return;
+  const t = actx.currentTime;
+  const o = actx.createOscillator(), g = actx.createGain();
+  o.type = type || "square";
+  o.frequency.setValueAtTime(freq, t);
+  if (slide) o.frequency.exponentialRampToValueAtTime(Math.max(20, slide), t + dur);
+  g.gain.setValueAtTime(vol || 0.08, t);
+  g.gain.exponentialRampToValueAtTime(0.0001, t + dur);
+  o.connect(g); g.connect(actx.destination);
+  o.start(t); o.stop(t + dur + 0.02);
+}
+function sfxHit()    { beep(520, 0.05, "square", 0.06); beep(190, 0.07, "triangle", 0.09); }
+function sfxCpuHit() { beep(392, 0.05, "square", 0.05); beep(160, 0.07, "triangle", 0.08); }
+function sfxWall()   { beep(300, 0.04, "square", 0.04); }
+function sfxScore()  { beep(880, 0.12, "square", 0.07, 1318); }
+function sfxConcede(){ beep(220, 0.2, "square", 0.06, 110); }
+function sfxWin()    { [523,659,784,1046].forEach((f,i)=>setTimeout(()=>beep(f,0.14,"square",0.06), i*110)); }
+
+// Bright groove, BPM 116. Bass >= MIDI 45.
+const BPM = 116, STEP_DUR = 60 / BPM / 2;
+const BASS = [
+  45,0,45,0, 0,45,0,45, 41,0,41,0, 0,41,0,41,
+  43,0,43,0, 0,43,0,43, 45,0,45,0, 0,50,0,48
+];
+const LEAD = [
+  69,0,0,0, 72,0,0,0, 65,0,0,0, 69,0,0,0,
+  67,0,0,0, 71,0,0,0, 69,0,0,0, 0,0,0,0
+];
+const PADS = [ [45,52,57], [41,48,53], [43,50,55], [45,52,57] ];
+let musicStep = 0, nextNoteTime = 0, musicTimer = null;
+function midiFreq(m) { return 440 * Math.pow(2, (m - 69) / 12); }
+function toneAt(midi, when, dur, type, vol) {
+  const o = actx.createOscillator(), g = actx.createGain();
+  o.type = type; o.frequency.setValueAtTime(midiFreq(midi), when);
+  g.gain.setValueAtTime(0.0001, when);
+  g.gain.exponentialRampToValueAtTime(vol, when + 0.012);
+  g.gain.exponentialRampToValueAtTime(0.0001, when + dur);
+  o.connect(g); g.connect(actx.destination);
+  o.start(when); o.stop(when + dur + 0.03);
+}
+function scheduleStep(step, when) {
+  if (muted) return;
+  const b = BASS[step % 32]; if (b) toneAt(b, when, STEP_DUR * 0.85, "square", 0.03);
+  const l = LEAD[step % 32]; if (l) toneAt(l, when, STEP_DUR * 1.5, "triangle", 0.018);
+  if (step % 8 === 0) {
+    const chord = PADS[Math.floor(step / 8) % PADS.length];
+    for (let i = 0; i < chord.length; i++) toneAt(chord[i], when, STEP_DUR * 7.4, "triangle", 0.009);
+  }
+}
+function startMusicScheduler() {
+  if (musicTimer !== null || !actx) return;
+  musicStep = 0; nextNoteTime = actx.currentTime + 0.06;
+  musicTimer = setInterval(function () {
+    if (!actx) return;
+    if (nextNoteTime < actx.currentTime) nextNoteTime = actx.currentTime + 0.05;
+    while (nextNoteTime < actx.currentTime + 0.12) {
+      scheduleStep(musicStep, nextNoteTime);
+      nextNoteTime += STEP_DUR; musicStep = (musicStep + 1) % 32;
+    }
+  }, 25);
+}
+function setMuted(m) { muted = m; muteBtn.textContent = muted ? "🔇" : "🔊"; }
+muteBtn.addEventListener("pointerdown", function (e) { e.stopPropagation(); e.preventDefault(); initAudio(); setMuted(!muted); });
+muteBtn.addEventListener("click", function (e) { e.stopPropagation(); e.preventDefault(); });
+
+// ---------- Game state ----------
+let state = "menu"; // menu | serve | play | point | over
+let pScore = 0, cScore = 0, rally = 0, server = 1; // server: 1 = player, -1 = cpu
+let pointTimer = 0, won = false, bannerText = "";
+let wins = 0;
+try { wins = parseInt(localStorage.getItem("tennis_wins") || "0", 10) || 0; } catch (e) { wins = 0; }
+const ball = { x: 0, y: 0, vx: 0, vy: 0, speed: 380 };
+let cpuError = 0, cpuErrorTimer = 0;
+
+function resetBallToServer() {
+  if (server === 1) { ball.x = player.x; ball.y = player.y - racketH - ballR - 2; }
+  else { ball.x = cpu.x; ball.y = cpu.y + racketH + ballR + 2; }
+  ball.vx = 0; ball.vy = 0;
+}
+function startMatch() {
+  initAudio();
+  pScore = 0; cScore = 0; rally = 0; won = false;
+  server = Math.random() < 0.5 ? 1 : -1;
+  player.x = W / 2; cpu.x = W / 2;
+  state = "serve"; resetBallToServer();
+}
+function doServe() {
+  if (state !== "serve") return;
+  const dir = server === 1 ? -1 : 1;
+  ball.speed = 400;
+  const ang = (Math.random() * 0.6 - 0.3);
+  ball.vx = Math.sin(ang) * ball.speed;
+  ball.vy = Math.cos(ang) * ball.speed * dir;
+  state = "play"; rally = 0;
+}
+function cpuDifficulty() {
+  // Ramps with the player's score. The rival chases the ball's current
+  // position (not a perfect intercept prediction), so sharp angles beat it.
+  return {
+    speed: Math.min(545, 312 + pScore * 30 + rally * 4),
+    error: Math.max(8, 26 - pScore * 3)
+  };
+}
+function pointTo(who) {
+  if (who === 1) { pScore++; sfxScore(); } else { cScore++; sfxConcede(); }
+  bannerText = who === 1 ? "POINT — YOU" : "POINT — RIVAL";
+  // win check: first to 6, win by 2
+  if ((pScore >= 6 || cScore >= 6) && Math.abs(pScore - cScore) >= 2) {
+    won = pScore > cScore;
+    state = "over";
+    if (won) {
+      wins++; try { localStorage.setItem("tennis_wins", String(wins)); } catch (e) {}
+      sfxWin();
+    }
+    return;
+  }
+  server = -server;
+  state = "point"; pointTimer = 0.9;
+  resetBallToServer();
+}
+function update(dt) {
+  // CPU movement
+  const diff = cpuDifficulty();
+  cpuErrorTimer -= dt;
+  if (cpuErrorTimer <= 0) { cpuErrorTimer = 0.22; cpuError = (Math.random() * 2 - 1) * diff.error; }
+  let cpuTarget = W / 2;
+  if (state === "play" && ball.vy < 0) {
+    // chase the ball's current x with a noisy read — steep angles outrun it
+    cpuTarget = ball.x + cpuError;
+  } else if (state === "serve" && server === -1) {
+    cpuTarget = ball.x;
+  }
+  const cdx = cpuTarget - cpu.x;
+  const cmax = diff.speed * dt;
+  cpu.vx = clamp(cdx, -cmax, cmax) / Math.max(dt, 0.001);
+  cpu.x = clamp(cpu.x + clamp(cdx, -cmax, cmax), courtX + racketW / 2, courtX + courtW - racketW / 2);
+  if (state === "serve" && server === -1) { ball.x = cpu.x; ball.y = cpu.y + racketH + ballR + 2; }
+  if (state === "serve" && server === 1) { ball.x = player.x; ball.y = player.y - racketH - ballR - 2; }
+
+  if (state === "point") {
+    pointTimer -= dt;
+    if (pointTimer <= 0) { state = "serve"; resetBallToServer(); }
+    return;
+  }
+  if (state !== "play") return;
+
+  ball.x += ball.vx * dt;
+  ball.y += ball.vy * dt;
+  // side walls (court lines)
+  if (ball.x < courtX + ballR) { ball.x = courtX + ballR; ball.vx = Math.abs(ball.vx); sfxWall(); }
+  if (ball.x > courtX + courtW - ballR) { ball.x = courtX + courtW - ballR; ball.vx = -Math.abs(ball.vx); sfxWall(); }
+
+  // player racket
+  if (ball.vy > 0 && ball.y + ballR >= player.y - racketH / 2 && ball.y - ballR <= player.y + racketH / 2 &&
+      Math.abs(ball.x - player.x) <= racketW / 2 + ballR * 0.7) {
+    const off = clamp((ball.x - player.x) / (racketW / 2), -1, 1);
+    ball.speed = Math.min(980, ball.speed * 1.045 + 6);
+    const ang = off * 1.12 + clamp(player.vx, -900, 900) * 0.00045;
+    ball.vx = Math.sin(clamp(ang, -1.25, 1.25)) * ball.speed;
+    ball.vy = -Math.cos(clamp(ang, -1.25, 1.25)) * ball.speed;
+    ball.y = player.y - racketH / 2 - ballR - 1;
+    rally++; sfxHit();
+  }
+  // cpu racket
+  if (ball.vy < 0 && ball.y - ballR <= cpu.y + racketH / 2 && ball.y + ballR >= cpu.y - racketH / 2 &&
+      Math.abs(ball.x - cpu.x) <= racketW / 2 + ballR * 0.7) {
+    const off = clamp((ball.x - cpu.x) / (racketW / 2), -1, 1);
+    ball.speed = Math.min(980, ball.speed * 1.045 + 6);
+    const ang = off * 1.05 + clamp(cpu.vx, -900, 900) * 0.0003;
+    ball.vx = Math.sin(clamp(ang, -1.2, 1.2)) * ball.speed;
+    ball.vy = Math.cos(clamp(ang, -1.2, 1.2)) * ball.speed;
+    ball.y = cpu.y + racketH / 2 + ballR + 1;
+    rally++; sfxCpuHit();
+  }
+  if (ball.y < courtTop - ballR * 3) pointTo(1);
+  else if (ball.y > courtBot + ballR * 3) pointTo(-1);
+}
+
+// ---------- Input ----------
+let dragId = null, dragLast = { x: 0, t: 0 };
+canvas.addEventListener("pointerdown", function (e) {
+  initAudio();
+  if (state === "menu" || state === "over") { startMatch(); return; }
+  if (state === "serve" && server === 1) { doServe(); }
+  dragId = e.pointerId; dragLast = { x: e.clientX, t: performance.now() };
+  movePlayer(e.clientX, e.clientY);
+});
+canvas.addEventListener("pointermove", function (e) {
+  if (dragId !== e.pointerId) return;
+  const now = performance.now();
+  const dt = Math.max(1, now - dragLast.t) / 1000;
+  player.vx = clamp((e.clientX - dragLast.x) / dt, -1600, 1600);
+  dragLast = { x: e.clientX, t: now };
+  movePlayer(e.clientX, e.clientY);
+});
+function movePlayer(x, y) {
+  player.x = clamp(x, courtX + racketW / 2, courtX + courtW - racketW / 2);
+  player.y = clamp(y, H * 0.56, courtBot - racketH);
+}
+window.addEventListener("pointerup", function (e) { if (dragId === e.pointerId) dragId = null; });
+let keys = {};
+window.addEventListener("keydown", function (e) {
+  keys[e.key] = true;
+  if (["ArrowLeft", "ArrowRight", "ArrowUp", "ArrowDown", " "].includes(e.key)) e.preventDefault();
+  initAudio();
+  if (e.key === "m" || e.key === "M") { setMuted(!muted); return; }
+  if (state === "menu" || state === "over") { if (e.key === " " || e.key === "Enter") startMatch(); return; }
+  if (state === "serve" && server === 1 && e.key === " ") doServe();
+});
+window.addEventListener("keyup", function (e) { keys[e.key] = false; });
+function keyMove(dt) {
+  const s = 640;
+  let moved = false;
+  if (keys["ArrowLeft"] || keys["a"]) { player.x -= s * dt; moved = true; }
+  if (keys["ArrowRight"] || keys["d"]) { player.x += s * dt; moved = true; }
+  if (keys["ArrowUp"] || keys["w"]) { player.y -= s * dt; moved = true; }
+  if (keys["ArrowDown"] || keys["s"]) { player.y += s * dt; moved = true; }
+  if (moved) {
+    player.x = clamp(player.x, courtX + racketW / 2, courtX + courtW - racketW / 2);
+    player.y = clamp(player.y, H * 0.56, courtBot - racketH);
+    player.vx = 0;
+  }
+  if (state === "serve" && server === -1) { /* cpu serves on its own below */ }
+}
+
+// ---------- Draw ----------
+function rr(x, y, w, h, r) {
+  r = Math.min(r, w / 2, h / 2);
+  ctx.beginPath(); ctx.moveTo(x + r, y);
+  ctx.arcTo(x + w, y, x + w, y + h, r); ctx.arcTo(x + w, y + h, x, y + h, r);
+  ctx.arcTo(x, y + h, x, y, r); ctx.arcTo(x, y, x + w, y, r);
+  ctx.closePath();
+}
+function drawRacket(x, y, color, handleDir) {
+  ctx.fillStyle = "rgba(0,0,0,0.3)";
+  rr(x - racketW / 2 + 2, y - racketH / 2 + 3, racketW, racketH, racketH / 2); ctx.fill();
+  ctx.fillStyle = color;
+  rr(x - racketW / 2, y - racketH / 2, racketW, racketH, racketH / 2); ctx.fill();
+  ctx.strokeStyle = "rgba(255,255,255,0.55)"; ctx.lineWidth = 1.4;
+  for (let i = -2; i <= 2; i++) {
+    ctx.beginPath();
+    ctx.moveTo(x + i * racketW / 6, y - racketH / 2 + 2);
+    ctx.lineTo(x + i * racketW / 6, y + racketH / 2 - 2);
+    ctx.stroke();
+  }
+}
+function draw() {
+  ctx.fillStyle = "#0a1410"; ctx.fillRect(0, 0, W, H);
+  // court
+  ctx.fillStyle = "#1d6a41";
+  ctx.fillRect(courtX, courtTop, courtW, courtBot - courtTop);
+  ctx.fillStyle = "#22784a";
+  ctx.fillRect(courtX, courtTop, courtW, (courtBot - courtTop) / 2);
+  ctx.strokeStyle = "rgba(255,255,255,0.8)"; ctx.lineWidth = 2;
+  ctx.strokeRect(courtX, courtTop, courtW, courtBot - courtTop);
+  // service lines + net
+  ctx.strokeStyle = "rgba(255,255,255,0.4)"; ctx.lineWidth = 1.5;
+  ctx.beginPath(); ctx.moveTo(courtX, courtTop + (courtBot - courtTop) * 0.27); ctx.lineTo(courtX + courtW, courtTop + (courtBot - courtTop) * 0.27); ctx.stroke();
+  ctx.beginPath(); ctx.moveTo(courtX, courtTop + (courtBot - courtTop) * 0.73); ctx.lineTo(courtX + courtW, courtTop + (courtBot - courtTop) * 0.73); ctx.stroke();
+  ctx.beginPath(); ctx.moveTo(W / 2, courtTop + (courtBot - courtTop) * 0.27); ctx.lineTo(W / 2, courtTop + (courtBot - courtTop) * 0.73); ctx.stroke();
+  ctx.fillStyle = "rgba(240,240,240,0.9)";
+  ctx.fillRect(courtX - 4, H / 2 - 3, courtW + 8, 6);
+  ctx.fillStyle = "rgba(20,20,30,0.9)";
+  for (let x = courtX - 4; x < courtX + courtW + 8; x += 9) ctx.fillRect(x, H / 2 - 3, 4, 6);
+  // score
+  ctx.textAlign = "center"; ctx.textBaseline = "middle";
+  ctx.font = "bold " + Math.round(u * 15) + "px system-ui, sans-serif";
+  ctx.fillStyle = "rgba(255,110,120,0.30)";
+  ctx.fillText(String(cScore), W / 2, H * 0.315);
+  ctx.fillStyle = "rgba(150,255,180,0.30)";
+  ctx.fillText(String(pScore), W / 2, H * 0.70);
+  ctx.font = Math.round(u * 3.4) + "px system-ui, sans-serif";
+  ctx.fillStyle = "rgba(255,150,160,0.8)";
+  ctx.fillText("RIVAL", W / 2, H * 0.315 - u * 9.5);
+  ctx.fillStyle = "rgba(160,255,190,0.85)";
+  ctx.fillText("YOU", W / 2, H * 0.70 + u * 10);
+  ctx.textAlign = "left";
+  ctx.fillStyle = "#9fb8a8";
+  ctx.font = Math.round(u * 3.3) + "px system-ui, sans-serif";
+  ctx.fillText("First to 6, win by 2 · Matches won: " + wins, 12, 24);
+  // rackets + ball
+  drawRacket(cpu.x, cpu.y, "#ff5d7a", -1);
+  drawRacket(player.x, player.y, "#ffe14d", 1);
+  if (state !== "menu") {
+    ctx.fillStyle = "#f8fff2";
+    ctx.beginPath(); ctx.arc(ball.x, ball.y, ballR, 0, Math.PI * 2); ctx.fill();
+    ctx.strokeStyle = "rgba(190,220,80,0.8)"; ctx.lineWidth = 1.4;
+    ctx.beginPath(); ctx.arc(ball.x, ball.y, ballR * 0.75, 0.4, 2.4); ctx.stroke();
+    ctx.beginPath(); ctx.arc(ball.x, ball.y, ballR * 0.75, Math.PI + 0.4, Math.PI + 2.4); ctx.stroke();
+  }
+  if (state === "serve") {
+    ctx.textAlign = "center";
+    ctx.font = "bold " + Math.round(u * 4.6) + "px system-ui, sans-serif";
+    ctx.fillStyle = "#ffffff";
+    ctx.fillText(server === 1 ? "YOUR SERVE — TAP!" : "RIVAL SERVING…", W / 2, H * 0.52 + u * 8);
+  }
+  if (state === "point") {
+    ctx.textAlign = "center";
+    ctx.font = "bold " + Math.round(u * 6) + "px system-ui, sans-serif";
+    ctx.fillStyle = "#ffd166";
+    ctx.fillText(bannerText, W / 2, H * 0.52);
+  }
+  if (state === "menu" || state === "over") {
+    ctx.fillStyle = "rgba(3,10,6,0.84)"; ctx.fillRect(0, 0, W, H);
+    ctx.textAlign = "center";
+    ctx.fillStyle = "#8be04e";
+    ctx.font = "bold " + Math.round(u * 11) + "px system-ui, sans-serif";
+    ctx.fillText("🎾 TENNIS", W / 2, H * 0.30);
+    ctx.fillStyle = "#e8f5e9";
+    ctx.font = Math.round(u * 4.3) + "px system-ui, sans-serif";
+    if (state === "menu") {
+      ctx.fillText("Drag to move. The ball angles off", W / 2, H * 0.42);
+      ctx.fillText("where it meets your racket — move", W / 2, H * 0.465);
+      ctx.fillText("fast to hit sharper angles.", W / 2, H * 0.51);
+      ctx.fillStyle = "#ffd166";
+      ctx.fillText("Arcade scoring: a points race — first", W / 2, H * 0.565);
+      ctx.fillText("to 6, win by 2. The rival speeds up", W / 2, H * 0.61);
+      ctx.fillText("the more you score.", W / 2, H * 0.655);
+    } else {
+      ctx.fillStyle = won ? "#8be04e" : "#ff5d7a";
+      ctx.font = "bold " + Math.round(u * 6.4) + "px system-ui, sans-serif";
+      ctx.fillText(won ? "YOU WIN " + pScore + " – " + cScore : "RIVAL WINS " + cScore + " – " + pScore, W / 2, H * 0.46);
+      ctx.fillStyle = "#9fb8a8";
+      ctx.font = Math.round(u * 4.2) + "px system-ui, sans-serif";
+      ctx.fillText("Matches won so far: " + wins, W / 2, H * 0.53);
+    }
+    ctx.fillStyle = "#8be04e";
+    ctx.font = "bold " + Math.round(u * 5) + "px system-ui, sans-serif";
+    ctx.fillText(state === "menu" ? "TAP TO START" : "TAP TO PLAY AGAIN", W / 2, H * 0.70);
+  }
+}
+
+// ---------- Loop ----------
+let lastT = 0, cpuServeTimer = 0;
+function frame(t) {
+  requestAnimationFrame(frame);
+  const dt = Math.min(0.05, (t - lastT) / 1000 || 0); lastT = t;
+  keyMove(dt);
+  if (player.vx) player.vx *= Math.pow(0.001, dt); // velocity decays fast when not dragging
+  if (state === "serve" && server === -1) {
+    cpuServeTimer += dt;
+    if (cpuServeTimer > 0.7) { cpuServeTimer = 0; doServe(); }
+  } else cpuServeTimer = 0;
+  update(dt);
+  draw();
+}
+resize();
+player.x = W / 2; cpu.x = W / 2;
+requestAnimationFrame(frame);
+
+// ---------- QA hooks ----------
+window.__qa = {
+  state: () => state,
+  start: () => startMatch(),
+  serve: () => doServe(),
+  scores: () => [pScore, cScore],
+  ball: () => ({ x: ball.x, y: ball.y, vx: ball.vx, vy: ball.vy, speed: ball.speed }),
+  playerPos: () => ({ x: player.x, y: player.y }),
+  setPlayer: (x, y) => { movePlayer(x, y); },
+  rally: () => rally,
+  server: () => server
+};
+</script>
+</body>
+</html>

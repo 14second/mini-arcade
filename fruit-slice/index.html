@@ -1,0 +1,521 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, user-scalable=no">
+<meta name="theme-color" content="#101408">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<title>Fruit Slice</title>
+<style>
+  * { margin:0; padding:0; box-sizing:border-box; }
+  html, body {
+    width:100%; height:100%; overflow:hidden; background:#101408;
+    font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+    touch-action:none; user-select:none; -webkit-user-select:none;
+    -webkit-tap-highlight-color: transparent;
+  }
+  canvas { position:fixed; inset:0; display:block; touch-action:none; }
+  #muteBtn {
+    position:fixed; top:10px; right:10px; z-index:10;
+    width:48px; height:48px; border-radius:12px;
+    border:2px solid rgba(200,255,160,.5); background:rgba(10,18,6,.62);
+    color:#fff; font-size:22px; line-height:1; cursor:pointer;
+    touch-action:none; user-select:none; -webkit-user-select:none;
+    display:flex; align-items:center; justify-content:center; padding:0;
+  }
+</style>
+</head>
+<body>
+<canvas id="game"></canvas>
+<button id="muteBtn" aria-label="Toggle sound">🔊</button>
+<script>
+// iOS audio routing: route Web Audio to the media/playback channel (iOS 17+
+// Audio Session API) on the first gesture and inside audio init, so sound
+// plays even with the silent switch on.
+function iosPlaybackSession() {
+  try { if ('audioSession' in navigator) navigator.audioSession.type = 'playback'; } catch (e) {}
+}
+document.addEventListener('pointerdown', iosPlaybackSession, true);
+document.addEventListener('touchstart', iosPlaybackSession, true);
+
+"use strict";
+/* ============================================================
+   FRUIT SLICE — swipe to slice the flying fruit.
+   Fruit arcs up from the bottom; drag through it to slice.
+   Halves fly, juice splashes. Slice 3+ in one swipe for a combo.
+   Miss a fruit or slice a bomb and you take a strike.
+   Three strikes and the stall closes.
+   ============================================================ */
+
+const canvas = document.getElementById("game");
+const ctx = canvas.getContext("2d");
+let W = 0, H = 0, DPR = 1, u = 4;
+function clamp(v, a, b) { return v < a ? a : (v > b ? b : v); }
+function rand(a, b) { return a + Math.random() * (b - a); }
+
+function resize() {
+  DPR = Math.min(window.devicePixelRatio || 1, 2);
+  W = window.innerWidth; H = window.innerHeight;
+  canvas.width = Math.round(W * DPR); canvas.height = Math.round(H * DPR);
+  canvas.style.width = W + "px"; canvas.style.height = H + "px";
+  ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+  u = Math.min(W, H) / 100;
+}
+window.addEventListener("resize", resize);
+
+// ---------- Audio ----------
+let actx = null, muted = false;
+const muteBtn = document.getElementById("muteBtn");
+function initAudio() {
+  iosPlaybackSession();
+  if (!actx) {
+    try {
+      const AC = window.AudioContext || window.webkitAudioContext;
+      if (AC) actx = new AC();
+    } catch (e) { actx = null; }
+    if (actx) startMusicScheduler();
+  }
+  if (actx && actx.state === "suspended") actx.resume();
+}
+function beep(freq, dur, type, vol, slide) {
+  if (!actx || muted) return;
+  const t = actx.currentTime;
+  const o = actx.createOscillator(), g = actx.createGain();
+  o.type = type || "square";
+  o.frequency.setValueAtTime(freq, t);
+  if (slide) o.frequency.exponentialRampToValueAtTime(Math.max(20, slide), t + dur);
+  g.gain.setValueAtTime(vol || 0.08, t);
+  g.gain.exponentialRampToValueAtTime(0.0001, t + dur);
+  o.connect(g); g.connect(actx.destination);
+  o.start(t); o.stop(t + dur + 0.02);
+}
+function noiseBurst(dur, vol, freq, type) {
+  if (!actx || muted) return;
+  const t = actx.currentTime;
+  const len = Math.max(1, Math.floor(actx.sampleRate * dur));
+  const buf = actx.createBuffer(1, len, actx.sampleRate);
+  const d = buf.getChannelData(0);
+  for (let i = 0; i < len; i++) d[i] = (Math.random() * 2 - 1) * (1 - i / len);
+  const src = actx.createBufferSource(); src.buffer = buf;
+  const f = actx.createBiquadFilter(); f.type = type || "lowpass"; f.frequency.value = freq || 900;
+  const g = actx.createGain(); g.gain.value = vol || 0.15;
+  src.connect(f); f.connect(g); g.connect(actx.destination); src.start(t);
+}
+function sfxSlice() { noiseBurst(0.09, 0.14, 3200, "bandpass"); beep(300, 0.06, "triangle", 0.05, 520); }
+function sfxCombo() { [784, 988, 1174].forEach((f, i) => setTimeout(() => beep(f, 0.09, "square", 0.05), i * 60)); }
+function sfxBomb()  { noiseBurst(0.4, 0.3, 500); beep(90, 0.4, "sawtooth", 0.12, 40); }
+function sfxMiss()  { beep(240, 0.16, "square", 0.06, 150); }
+function sfxOver()  { [392, 330, 262].forEach((f, i) => setTimeout(() => beep(f, 0.16, "square", 0.06), i * 130)); }
+
+// Market groove, BPM 112. Bass >= MIDI 45.
+const BPM = 112, STEP_DUR = 60 / BPM / 2;
+const BASS = [
+  45,0,45,0, 0,0,52,0, 50,0,50,0, 0,0,48,0,
+  45,0,45,0, 0,0,52,0, 55,0,52,0, 50,0,48,0
+];
+const LEAD = [
+  69,0,0,72, 0,0,69,0, 67,0,0,69, 0,0,0,0,
+  69,0,0,72, 0,0,76,0, 74,0,72,0, 71,0,0,0
+];
+const PADS = [ [45,48,52], [50,53,57], [45,48,52], [43,48,52] ];
+let musicStep = 0, nextNoteTime = 0, musicTimer = null;
+function midiFreq(m) { return 440 * Math.pow(2, (m - 69) / 12); }
+function toneAt(midi, when, dur, type, vol) {
+  const o = actx.createOscillator(), g = actx.createGain();
+  o.type = type; o.frequency.setValueAtTime(midiFreq(midi), when);
+  g.gain.setValueAtTime(0.0001, when);
+  g.gain.exponentialRampToValueAtTime(vol, when + 0.012);
+  g.gain.exponentialRampToValueAtTime(0.0001, when + dur);
+  o.connect(g); g.connect(actx.destination);
+  o.start(when); o.stop(when + dur + 0.03);
+}
+function scheduleStep(step, when) {
+  if (muted) return;
+  const b = BASS[step % 32]; if (b) toneAt(b, when, STEP_DUR * 0.88, "square", 0.03);
+  const l = LEAD[step % 32]; if (l) toneAt(l, when, STEP_DUR * 1.5, "triangle", 0.018);
+  if (step % 8 === 0) {
+    const chord = PADS[Math.floor(step / 8) % PADS.length];
+    for (let i = 0; i < chord.length; i++) toneAt(chord[i], when, STEP_DUR * 7.5, "triangle", 0.009);
+  }
+}
+function startMusicScheduler() {
+  if (musicTimer !== null || !actx) return;
+  musicStep = 0; nextNoteTime = actx.currentTime + 0.06;
+  musicTimer = setInterval(function () {
+    if (!actx) return;
+    if (nextNoteTime < actx.currentTime) nextNoteTime = actx.currentTime + 0.05;
+    while (nextNoteTime < actx.currentTime + 0.12) {
+      scheduleStep(musicStep, nextNoteTime);
+      nextNoteTime += STEP_DUR; musicStep = (musicStep + 1) % 32;
+    }
+  }, 25);
+}
+function setMuted(m) { muted = m; muteBtn.textContent = muted ? "🔇" : "🔊"; }
+muteBtn.addEventListener("pointerdown", function (e) { e.stopPropagation(); e.preventDefault(); initAudio(); setMuted(!muted); });
+muteBtn.addEventListener("click", function (e) { e.stopPropagation(); e.preventDefault(); });
+
+// ---------- Game ----------
+const FRUITS = [
+  { kind: "apple",  r: 26, pts: 10, skin: "#e23b3b", flesh: "#ffe9d6", juice: "#ff6b6b" },
+  { kind: "orange", r: 27, pts: 10, skin: "#f58a1f", flesh: "#ffc46b", juice: "#ffb14d" },
+  { kind: "lemon",  r: 24, pts: 10, skin: "#f5d21f", flesh: "#fff3a0", juice: "#ffe95e" },
+  { kind: "plum",   r: 23, pts: 10, skin: "#7d4fd0", flesh: "#c9a2ff", juice: "#b07dff" },
+  { kind: "melon",  r: 36, pts: 15, skin: "#3f9e4d", flesh: "#ff5d73", juice: "#ff7d92" },
+  { kind: "gold",   r: 25, pts: 30, skin: "#ffcf3f", flesh: "#fff0b3", juice: "#ffd94d" }
+];
+let state = "menu"; // menu | play | over
+let fruits = [], halves = [], drops = [], popups = [];
+let score = 0, strikes = 0, sliced = 0, elapsed = 0, spawnTimer = 0;
+let shake = 0, flash = 0;
+let best = 0;
+try { best = parseInt(localStorage.getItem("fruitslice_best") || "0", 10) || 0; } catch (e) { best = 0; }
+let trail = []; // {x,y,t}
+let touching = false, slicesThisTouch = 0;
+let kb = { x: 0, y: 0, active: false, keys: {} };
+
+function spawnOne(forceFruit) {
+  const g = H * 1.6;
+  const x = rand(W * 0.14, W * 0.86);
+  const vy = -rand(H * 1.42, H * 1.62);
+  const tx = clamp(x + rand(-W * 0.3, W * 0.3), 30, W - 30);
+  const airtime = 2 * -vy / g;
+  const vx = (tx - x) / airtime * rand(0.6, 1);
+  const bombChance = elapsed > 18 ? 0.13 : 0.07;
+  if (!forceFruit && Math.random() < bombChance) {
+    fruits.push({ bomb: true, x, y: H + 34, vx, vy, r: 24, rot: 0, vr: rand(-2, 2), dead: false });
+    return;
+  }
+  let def = FRUITS[Math.floor(Math.random() * 5)];
+  if (Math.random() < 0.05) def = FRUITS[5]; // golden
+  fruits.push({
+    bomb: false, def, x, y: H + def.r + 6, vx, vy,
+    r: def.r * Math.min(1.15, Math.max(0.8, W / 390)), rot: rand(0, 6.28), vr: rand(-2.4, 2.4), dead: false
+  });
+}
+function startGame() {
+  initAudio();
+  fruits = []; halves = []; drops = []; popups = [];
+  score = 0; strikes = 0; sliced = 0; elapsed = 0; spawnTimer = 0.4;
+  shake = 0; flash = 0;
+  state = "play";
+}
+function addStrike(reason) {
+  strikes++;
+  popups.push({ x: W / 2, y: H * 0.4, text: reason, t: 0, color: "#ff6b6b", big: true });
+  if (strikes >= 3) {
+    state = "over";
+    if (score > best) { best = score; try { localStorage.setItem("fruitslice_best", String(best)); } catch (e) {} }
+    sfxOver();
+  }
+}
+function sliceFruit(f, bladeAngle) {
+  f.dead = true;
+  sliced++;
+  slicesThisTouch++;
+  score += f.def.pts;
+  popups.push({ x: f.x, y: f.y - f.r, text: "+" + f.def.pts, t: 0, color: "#fff" });
+  const perp = bladeAngle + Math.PI / 2;
+  for (const s of [-1, 1]) {
+    halves.push({
+      def: f.def, x: f.x, y: f.y, r: f.r, side: s, rot: f.rot, vr: f.vr + s * 2.2,
+      vx: f.vx + Math.cos(perp) * 90 * s, vy: f.vy * 0.45 + Math.sin(perp) * 40 * s - 60, t: 0
+    });
+  }
+  for (let i = 0; i < 10; i++) {
+    drops.push({
+      x: f.x, y: f.y, vx: rand(-160, 160), vy: rand(-140, 60),
+      r: rand(2, 5), color: f.def.juice, t: 0
+    });
+  }
+  sfxSlice();
+}
+function hitBomb(b) {
+  b.dead = true;
+  shake = 0.5; flash = 0.35;
+  for (let i = 0; i < 22; i++) drops.push({ x: b.x, y: b.y, vx: rand(-320, 320), vy: rand(-320, 200), r: rand(2, 6), color: i % 3 ? "#ff9d4d" : "#666", t: 0 });
+  sfxBomb();
+  addStrike("💥 BOMB! STRIKE");
+}
+function distToSeg(px, py, x1, y1, x2, y2) {
+  const dx = x2 - x1, dy = y2 - y1;
+  const l2 = dx * dx + dy * dy;
+  let t = l2 ? ((px - x1) * dx + (py - y1) * dy) / l2 : 0;
+  t = clamp(t, 0, 1);
+  const cx = x1 + t * dx, cy = y1 + t * dy;
+  return Math.hypot(px - cx, py - cy);
+}
+function checkSlices() {
+  if (trail.length < 1) return;
+  for (const f of fruits) {
+    if (f.dead) continue;
+    let hit = false;
+    if (trail.length === 1) {
+      hit = Math.hypot(f.x - trail[0].x, f.y - trail[0].y) < f.r + 6;
+    } else {
+      for (let i = 0; i < trail.length - 1 && !hit; i++) {
+        if (distToSeg(f.x, f.y, trail[i].x, trail[i].y, trail[i + 1].x, trail[i + 1].y) < f.r + 5) hit = true;
+      }
+    }
+    if (hit) {
+      const a = trail[trail.length - 1], b = trail[0];
+      const ang = Math.atan2(a.y - b.y, a.x - b.x);
+      if (f.bomb) hitBomb(f); else sliceFruit(f, ang);
+      if (state !== "play") return;
+    }
+  }
+}
+function update(dt) {
+  if (shake > 0) shake -= dt;
+  if (flash > 0) flash -= dt;
+  for (const p of popups) { p.t += dt; p.y -= 34 * dt; }
+  popups = popups.filter(p => p.t < 0.9);
+  for (const d of drops) { d.t += dt; d.x += d.vx * dt; d.y += d.vy * dt; d.vy += H * 1.4 * dt; }
+  drops = drops.filter(d => d.t < 0.7);
+  for (const hf of halves) {
+    hf.t += dt; hf.x += hf.vx * dt; hf.y += hf.vy * dt; hf.vy += H * 1.5 * dt; hf.rot += hf.vr * dt;
+  }
+  halves = halves.filter(h => h.t < 1.1 && h.y < H + 60);
+  if (state !== "play") return;
+  elapsed += dt;
+  spawnTimer -= dt;
+  if (spawnTimer <= 0) {
+    spawnTimer = Math.max(0.55, 1.15 - elapsed * 0.008) * rand(0.8, 1.2);
+    spawnOne(false);
+    if (elapsed > 35 && Math.random() < 0.4) spawnOne(false);
+    if (elapsed > 70 && Math.random() < 0.3) spawnOne(true);
+  }
+  const g = H * 1.6;
+  for (const f of fruits) {
+    if (f.dead) continue;
+    f.x += f.vx * dt; f.y += f.vy * dt; f.vy += g * dt; f.rot += f.vr * dt;
+    if (f.y - f.r > H + 30 && f.vy > 0) {
+      f.dead = true;
+      if (!f.bomb) { addStrike("MISSED!"); sfxMiss(); if (state !== "play") return; }
+    }
+    if (f.x < f.r * 0.5) { f.x = f.r * 0.5; f.vx = Math.abs(f.vx); }
+    if (f.x > W - f.r * 0.5) { f.x = W - f.r * 0.5; f.vx = -Math.abs(f.vx); }
+  }
+  fruits = fruits.filter(f => !f.dead || f.y < H + 80);
+  fruits = fruits.filter(f => !f.dead);
+  // prune trail
+  const now = performance.now();
+  trail = trail.filter(p => now - p.t < 95);
+  checkSlices();
+  // keyboard blade cursor
+  if (kb.active) {
+    const sp = 950;
+    if (kb.keys["ArrowLeft"]) kb.x -= sp * dt;
+    if (kb.keys["ArrowRight"]) kb.x += sp * dt;
+    if (kb.keys["ArrowUp"]) kb.y -= sp * dt;
+    if (kb.keys["ArrowDown"]) kb.y += sp * dt;
+    kb.x = clamp(kb.x, 0, W); kb.y = clamp(kb.y, 0, H);
+    trail.push({ x: kb.x, y: kb.y, t: now });
+  }
+}
+
+// ---------- Input ----------
+canvas.addEventListener("pointerdown", function (e) {
+  initAudio();
+  if (state === "menu" || state === "over") { startGame(); return; }
+  touching = true; slicesThisTouch = 0;
+  trail.push({ x: e.clientX, y: e.clientY, t: performance.now() });
+});
+canvas.addEventListener("pointermove", function (e) {
+  if (state !== "play") return;
+  trail.push({ x: e.clientX, y: e.clientY, t: performance.now() });
+});
+function endTouch() {
+  if (touching && slicesThisTouch >= 3 && state === "play") {
+    const bonus = slicesThisTouch * 5;
+    score += bonus;
+    popups.push({ x: W / 2, y: H * 0.34, text: "COMBO ×" + slicesThisTouch + "  +" + bonus, t: 0, color: "#ffd94d", big: true });
+    sfxCombo();
+  }
+  touching = false; slicesThisTouch = 0;
+}
+window.addEventListener("pointerup", endTouch);
+window.addEventListener("pointercancel", endTouch);
+window.addEventListener("keydown", function (e) {
+  if (["ArrowLeft", "ArrowRight", "ArrowUp", "ArrowDown", " "].includes(e.key)) e.preventDefault();
+  initAudio();
+  if (e.key === "m" || e.key === "M") { setMuted(!muted); return; }
+  if (e.key.startsWith("Arrow")) {
+    if (!kb.active) { kb.x = W / 2; kb.y = H / 2; kb.active = true; }
+    kb.keys[e.key] = true;
+  }
+  if ((e.key === " " || e.key === "Enter") && state !== "play") startGame();
+});
+window.addEventListener("keyup", function (e) { kb.keys[e.key] = false; });
+
+// ---------- Draw ----------
+function drawFruitBody(f) {
+  const d = f.def, r = f.r;
+  ctx.save();
+  ctx.translate(f.x, f.y); ctx.rotate(f.rot);
+  ctx.fillStyle = "rgba(0,0,0,0.22)";
+  ctx.beginPath(); ctx.ellipse(3, r * 0.5, r * 0.85, r * 0.35, 0, 0, Math.PI * 2); ctx.fill();
+  ctx.fillStyle = d.skin;
+  ctx.beginPath();
+  if (d.kind === "lemon") ctx.ellipse(0, 0, r * 1.15, r * 0.82, 0, 0, Math.PI * 2);
+  else if (d.kind === "melon") ctx.ellipse(0, 0, r * 0.9, r * 1.05, 0, 0, Math.PI * 2);
+  else ctx.arc(0, 0, r, 0, Math.PI * 2);
+  ctx.fill();
+  if (d.kind === "melon") {
+    ctx.strokeStyle = "rgba(20,80,30,0.55)"; ctx.lineWidth = 3;
+    for (const k of [-0.45, 0, 0.45]) {
+      ctx.beginPath(); ctx.ellipse(r * k, 0, r * 0.22, r * 1.02, 0, 0, Math.PI * 2); ctx.stroke();
+    }
+  }
+  if (d.kind === "apple" || d.kind === "gold") {
+    ctx.strokeStyle = "#6b4423"; ctx.lineWidth = 3;
+    ctx.beginPath(); ctx.moveTo(0, -r * 0.8); ctx.quadraticCurveTo(2, -r * 1.15, 6, -r * 1.25); ctx.stroke();
+    ctx.fillStyle = "#4da33f";
+    ctx.beginPath(); ctx.ellipse(r * 0.3, -r * 1.05, r * 0.32, r * 0.14, 0.5, 0, Math.PI * 2); ctx.fill();
+    if (d.kind === "gold") {
+      ctx.fillStyle = "rgba(255,255,255,0.85)";
+      ctx.font = Math.round(r * 0.8) + "px system-ui";
+      ctx.fillText("✦", -r * 0.45, -r * 0.1);
+    }
+  }
+  // shine
+  ctx.fillStyle = "rgba(255,255,255,0.35)";
+  ctx.beginPath(); ctx.ellipse(-r * 0.35, -r * 0.4, r * 0.22, r * 0.13, -0.6, 0, Math.PI * 2); ctx.fill();
+  ctx.restore();
+}
+function drawHalf(hf) {
+  const d = hf.def, r = hf.r;
+  ctx.save();
+  ctx.translate(hf.x, hf.y); ctx.rotate(hf.rot);
+  ctx.globalAlpha = clamp(1.1 - hf.t, 0, 1);
+  // half disc: skin outline + flesh face
+  ctx.beginPath();
+  ctx.arc(0, 0, r, hf.side > 0 ? -Math.PI / 2 : Math.PI / 2, hf.side > 0 ? Math.PI / 2 : Math.PI * 1.5);
+  ctx.closePath();
+  ctx.fillStyle = d.flesh; ctx.fill();
+  ctx.strokeStyle = d.skin; ctx.lineWidth = 4; ctx.stroke();
+  ctx.restore();
+}
+function drawBomb(b) {
+  ctx.save();
+  ctx.translate(b.x, b.y); ctx.rotate(b.rot * 0.4);
+  ctx.fillStyle = "#23232e";
+  ctx.beginPath(); ctx.arc(0, 0, b.r, 0, Math.PI * 2); ctx.fill();
+  ctx.fillStyle = "rgba(255,255,255,0.3)";
+  ctx.beginPath(); ctx.ellipse(-b.r * 0.3, -b.r * 0.35, b.r * 0.25, b.r * 0.14, -0.6, 0, Math.PI * 2); ctx.fill();
+  ctx.fillStyle = "#55565f"; ctx.fillRect(-5, -b.r - 7, 10, 8);
+  ctx.strokeStyle = "#c9a25e"; ctx.lineWidth = 2.5;
+  ctx.beginPath(); ctx.moveTo(0, -b.r - 7); ctx.quadraticCurveTo(8, -b.r - 16, 13, -b.r - 12); ctx.stroke();
+  ctx.fillStyle = Math.random() < 0.5 ? "#ffd94d" : "#ff9d4d";
+  ctx.beginPath(); ctx.arc(14, -b.r - 12, 3.4, 0, Math.PI * 2); ctx.fill();
+  ctx.restore();
+}
+function draw() {
+  ctx.save();
+  if (shake > 0) ctx.translate(rand(-1, 1) * shake * 14, rand(-1, 1) * shake * 14);
+  const g = ctx.createLinearGradient(0, 0, 0, H);
+  g.addColorStop(0, "#1d2a10"); g.addColorStop(1, "#2f4419");
+  ctx.fillStyle = g; ctx.fillRect(-20, -20, W + 40, H + 40);
+  // stall boards
+  ctx.strokeStyle = "rgba(0,0,0,0.18)"; ctx.lineWidth = 3;
+  for (let y = H * 0.2; y < H; y += H * 0.16) { ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(W, y); ctx.stroke(); }
+  for (const hf of halves) drawHalf(hf);
+  for (const f of fruits) { if (f.bomb) drawBomb(f); else drawFruitBody(f); }
+  for (const d of drops) {
+    ctx.globalAlpha = clamp(0.75 - d.t, 0, 0.75);
+    ctx.fillStyle = d.color;
+    ctx.beginPath(); ctx.arc(d.x, d.y, d.r, 0, Math.PI * 2); ctx.fill();
+  }
+  ctx.globalAlpha = 1;
+  // blade trail
+  if (trail.length > 1) {
+    for (let i = 0; i < trail.length - 1; i++) {
+      const p = trail[i], q = trail[i + 1];
+      const a = (i / trail.length) * 0.85;
+      ctx.strokeStyle = "rgba(255,255,255," + a.toFixed(2) + ")";
+      ctx.lineWidth = 2 + (i / trail.length) * 5;
+      ctx.lineCap = "round";
+      ctx.beginPath(); ctx.moveTo(p.x, p.y); ctx.lineTo(q.x, q.y); ctx.stroke();
+    }
+  }
+  if (kb.active && state === "play") {
+    ctx.strokeStyle = "rgba(255,255,255,0.7)"; ctx.lineWidth = 2;
+    ctx.beginPath(); ctx.arc(kb.x, kb.y, 10, 0, Math.PI * 2); ctx.stroke();
+  }
+  // HUD
+  ctx.textAlign = "left"; ctx.textBaseline = "middle";
+  ctx.font = "bold " + Math.round(u * 5) + "px system-ui, sans-serif";
+  ctx.fillStyle = "#eaffe0";
+  ctx.fillText("🍉 " + score, 12, 26);
+  ctx.font = Math.round(u * 5) + "px system-ui, sans-serif";
+  let sx = "";
+  for (let i = 0; i < 3; i++) sx += i < strikes ? "✖ " : "✕ ";
+  ctx.fillStyle = strikes ? "#ff8a7a" : "rgba(255,255,255,0.35)";
+  ctx.textAlign = "right";
+  ctx.fillText(sx.trim(), W - 64, 26);
+  ctx.textAlign = "left";
+  ctx.font = Math.round(u * 3.4) + "px system-ui, sans-serif";
+  ctx.fillStyle = "rgba(230,255,215,0.6)";
+  ctx.fillText("Best: " + best, 12, 26 + u * 5.6);
+  for (const p of popups) {
+    ctx.globalAlpha = clamp(1 - p.t, 0, 1);
+    ctx.textAlign = "center";
+    ctx.font = (p.big ? "bold " : "") + Math.round(u * (p.big ? 6 : 4.4)) + "px system-ui, sans-serif";
+    ctx.fillStyle = p.color;
+    ctx.fillText(p.text, p.x, p.y);
+  }
+  ctx.globalAlpha = 1;
+  if (flash > 0) { ctx.fillStyle = "rgba(255,120,40," + (flash * 0.9).toFixed(2) + ")"; ctx.fillRect(-20, -20, W + 40, H + 40); }
+  ctx.restore();
+  if (state === "menu" || state === "over") {
+    ctx.fillStyle = "rgba(5,8,2,0.82)"; ctx.fillRect(0, 0, W, H);
+    ctx.textAlign = "center";
+    ctx.fillStyle = "#b6ff7a";
+    ctx.font = "bold " + Math.round(u * 9.5) + "px system-ui, sans-serif";
+    ctx.fillText("🍓 FRUIT SLICE", W / 2, H * 0.30);
+    ctx.fillStyle = "#eaffe0";
+    ctx.font = Math.round(u * 4.3) + "px system-ui, sans-serif";
+    if (state === "menu") {
+      ctx.fillText("Swipe through the fruit to slice it.", W / 2, H * 0.42);
+      ctx.fillText("3+ in one swipe = combo bonus.", W / 2, H * 0.465);
+      ctx.fillText("Don't drop fruit — and never slice a 💣.", W / 2, H * 0.51);
+      ctx.fillStyle = "#ffd94d";
+      ctx.fillText("Three strikes and you're out.", W / 2, H * 0.565);
+    } else {
+      ctx.fillStyle = "#ffd166";
+      ctx.font = "bold " + Math.round(u * 6.6) + "px system-ui, sans-serif";
+      ctx.fillText("SCORE " + score, W / 2, H * 0.43);
+      ctx.fillStyle = "#eaffe0";
+      ctx.font = Math.round(u * 4.3) + "px system-ui, sans-serif";
+      ctx.fillText("Fruit sliced: " + sliced + " · Best: " + best, W / 2, H * 0.50);
+    }
+    ctx.fillStyle = "#b6ff7a";
+    ctx.font = "bold " + Math.round(u * 5) + "px system-ui, sans-serif";
+    ctx.fillText(state === "menu" ? "TAP TO START" : "TAP TO PLAY AGAIN", W / 2, H * 0.64);
+  }
+}
+
+// ---------- Loop ----------
+let lastT = 0;
+function frame(t) {
+  requestAnimationFrame(frame);
+  const dt = Math.min(0.05, (t - lastT) / 1000 || 0); lastT = t;
+  update(dt);
+  draw();
+}
+resize();
+requestAnimationFrame(frame);
+
+// ---------- QA hooks ----------
+window.__qa = {
+  state: () => state,
+  start: () => startGame(),
+  score: () => score,
+  strikes: () => strikes,
+  sliced: () => sliced,
+  fruits: () => fruits.filter(f => !f.dead).map(f => ({ x: Math.round(f.x), y: Math.round(f.y), r: f.r, bomb: f.bomb, vy: Math.round(f.vy) })),
+  spawn: () => spawnOne(true)
+};
+</script>
+</body>
+</html>

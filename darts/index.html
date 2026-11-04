@@ -1,0 +1,472 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, user-scalable=no">
+<meta name="theme-color" content="#100c0a">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<title>Darts</title>
+<style>
+  * { margin:0; padding:0; box-sizing:border-box; }
+  html, body {
+    width:100%; height:100%; overflow:hidden; background:#100c0a;
+    font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+    touch-action:none; user-select:none; -webkit-user-select:none;
+    -webkit-tap-highlight-color: transparent;
+  }
+  canvas { position:fixed; inset:0; display:block; touch-action:none; }
+  #muteBtn {
+    position:fixed; top:10px; right:10px; z-index:10;
+    width:48px; height:48px; border-radius:12px;
+    border:2px solid rgba(255,190,140,.5); background:rgba(20,12,6,.62);
+    color:#fff; font-size:22px; line-height:1; cursor:pointer;
+    touch-action:none; user-select:none; -webkit-user-select:none;
+    display:flex; align-items:center; justify-content:center; padding:0;
+  }
+</style>
+</head>
+<body>
+<canvas id="game"></canvas>
+<button id="muteBtn" aria-label="Toggle sound">🔊</button>
+<script>
+// iOS audio routing: route Web Audio to the media/playback channel (iOS 17+
+// Audio Session API) on the first gesture and inside audio init, so sound
+// plays even with the silent switch on.
+function iosPlaybackSession() {
+  try { if ('audioSession' in navigator) navigator.audioSession.type = 'playback'; } catch (e) {}
+}
+document.addEventListener('pointerdown', iosPlaybackSession, true);
+document.addEventListener('touchstart', iosPlaybackSession, true);
+
+"use strict";
+/* ============================================================
+   DARTS — a proper 20-segment board: doubles, trebles, bull.
+   Move to aim. HOLD to steady your arm — the wobble shrinks —
+   but hold too long and your arm tires and the drift grows.
+   Release to throw. 10 darts, highest total wins the bragging.
+   Scoring comes straight from the board geometry.
+   ============================================================ */
+
+const canvas = document.getElementById("game");
+const ctx = canvas.getContext("2d");
+let W = 0, H = 0, DPR = 1, u = 4;
+function clamp(v, a, b) { return v < a ? a : (v > b ? b : v); }
+
+// Board geometry (fractions of board radius R)
+const SEGMENTS = [20, 1, 18, 4, 13, 6, 10, 15, 2, 17, 3, 19, 7, 16, 8, 11, 14, 9, 12, 5];
+const RING = { dblIn: 0.93, trbOut: 0.60, trbIn: 0.53, bullOut: 0.118, bullIn: 0.052 };
+let BC = { x: 0, y: 0, R: 0 }; // board centre + radius
+
+function resize() {
+  DPR = Math.min(window.devicePixelRatio || 1, 2);
+  W = window.innerWidth; H = window.innerHeight;
+  canvas.width = Math.round(W * DPR); canvas.height = Math.round(H * DPR);
+  canvas.style.width = W + "px"; canvas.style.height = H + "px";
+  ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+  u = Math.min(W, H) / 100;
+  BC = { x: W / 2, y: H * 0.415, R: Math.min(W * 0.455, H * 0.335) };
+}
+window.addEventListener("resize", resize);
+
+// Score a landing point from pure board geometry.
+// Returns {score, label, seg, mult}.
+function scoreAt(x, y) {
+  const dx = x - BC.x, dy = y - BC.y;
+  const d = Math.hypot(dx, dy) / BC.R;
+  if (d > 1.0) return { score: 0, label: "MISS", seg: 0, mult: 0 };
+  if (d <= RING.bullIn) return { score: 50, label: "BULL 50!", seg: 25, mult: 2 };
+  if (d <= RING.bullOut) return { score: 25, label: "BULL 25", seg: 25, mult: 1 };
+  let ang = Math.atan2(dy, dx) * 180 / Math.PI; // y down: clockwise positive
+  let rel = (ang + 90 + 9) % 360; if (rel < 0) rel += 360;
+  const seg = SEGMENTS[Math.floor(rel / 18) % 20];
+  let mult = 1, ringName = "";
+  if (d >= RING.dblIn) { mult = 2; ringName = "Double "; }
+  else if (d >= RING.trbIn && d <= RING.trbOut) { mult = 3; ringName = "Treble "; }
+  const score = seg * mult;
+  return { score, label: (ringName + seg + (mult > 1 ? "!" : "")), seg, mult };
+}
+// A point at a given segment/angle fraction and radius fraction (for tests).
+function pointFor(segValue, radiusFrac, angleOff) {
+  const i = SEGMENTS.indexOf(segValue);
+  const ang = (-90 + i * 18 + (angleOff || 0)) * Math.PI / 180;
+  return { x: BC.x + Math.cos(ang) * BC.R * radiusFrac, y: BC.y + Math.sin(ang) * BC.R * radiusFrac };
+}
+
+// ---------- Audio ----------
+let actx = null, muted = false;
+const muteBtn = document.getElementById("muteBtn");
+function initAudio() {
+  iosPlaybackSession();
+  if (!actx) {
+    try {
+      const AC = window.AudioContext || window.webkitAudioContext;
+      if (AC) actx = new AC();
+    } catch (e) { actx = null; }
+    if (actx) startMusicScheduler();
+  }
+  if (actx && actx.state === "suspended") actx.resume();
+}
+function beep(freq, dur, type, vol, slide) {
+  if (!actx || muted) return;
+  const t = actx.currentTime;
+  const o = actx.createOscillator(), g = actx.createGain();
+  o.type = type || "square";
+  o.frequency.setValueAtTime(freq, t);
+  if (slide) o.frequency.exponentialRampToValueAtTime(Math.max(20, slide), t + dur);
+  g.gain.setValueAtTime(vol || 0.08, t);
+  g.gain.exponentialRampToValueAtTime(0.0001, t + dur);
+  o.connect(g); g.connect(actx.destination);
+  o.start(t); o.stop(t + dur + 0.02);
+}
+function noiseBurst(dur, vol, freq) {
+  if (!actx || muted) return;
+  const t = actx.currentTime;
+  const len = Math.max(1, Math.floor(actx.sampleRate * dur));
+  const buf = actx.createBuffer(1, len, actx.sampleRate);
+  const d = buf.getChannelData(0);
+  for (let i = 0; i < len; i++) d[i] = (Math.random() * 2 - 1) * (1 - i / len);
+  const src = actx.createBufferSource(); src.buffer = buf;
+  const f = actx.createBiquadFilter(); f.type = "lowpass"; f.frequency.value = freq || 700;
+  const g = actx.createGain(); g.gain.value = vol || 0.15;
+  src.connect(f); f.connect(g); g.connect(actx.destination); src.start(t);
+}
+function sfxThrow() { noiseBurst(0.08, 0.08, 2400); }
+function sfxStick(good) { noiseBurst(0.07, 0.2, 500); beep(good ? 1180 : 300, 0.07, "square", 0.05); }
+function sfxBull()  { [880, 1174, 1568].forEach((f, i) => setTimeout(() => beep(f, 0.1, "square", 0.055), i * 70)); }
+
+// Pub groove, BPM 96. Bass >= MIDI 45.
+const BPM = 96, STEP_DUR = 60 / BPM / 2;
+const BASS = [
+  48,0,0,48, 0,0,48,0, 45,0,0,45, 0,0,45,0,
+  41,0,0,41, 0,0,41,0, 43,0,0,43, 0,0,47,0
+];
+const LEAD = [
+  64,0,0,0, 67,0,0,0, 0,0,69,0, 0,0,0,0,
+  62,0,0,0, 64,0,0,0, 0,0,66,0, 0,0,0,0
+];
+const PADS = [ [48,52,55], [45,48,52], [41,45,48], [43,47,50] ];
+let musicStep = 0, nextNoteTime = 0, musicTimer = null;
+function midiFreq(m) { return 440 * Math.pow(2, (m - 69) / 12); }
+function toneAt(midi, when, dur, type, vol) {
+  const o = actx.createOscillator(), g = actx.createGain();
+  o.type = type; o.frequency.setValueAtTime(midiFreq(midi), when);
+  g.gain.setValueAtTime(0.0001, when);
+  g.gain.exponentialRampToValueAtTime(vol, when + 0.012);
+  g.gain.exponentialRampToValueAtTime(0.0001, when + dur);
+  o.connect(g); g.connect(actx.destination);
+  o.start(when); o.stop(when + dur + 0.03);
+}
+function scheduleStep(step, when) {
+  if (muted) return;
+  const b = BASS[step % 32]; if (b) toneAt(b, when, STEP_DUR * 0.9, "square", 0.03);
+  const l = LEAD[step % 32]; if (l) toneAt(l, when, STEP_DUR * 1.5, "triangle", 0.018);
+  if (step % 8 === 0) {
+    const chord = PADS[Math.floor(step / 8) % PADS.length];
+    for (let i = 0; i < chord.length; i++) toneAt(chord[i], when, STEP_DUR * 7.6, "triangle", 0.009);
+  }
+}
+function startMusicScheduler() {
+  if (musicTimer !== null || !actx) return;
+  musicStep = 0; nextNoteTime = actx.currentTime + 0.06;
+  musicTimer = setInterval(function () {
+    if (!actx) return;
+    if (nextNoteTime < actx.currentTime) nextNoteTime = actx.currentTime + 0.05;
+    while (nextNoteTime < actx.currentTime + 0.12) {
+      scheduleStep(musicStep, nextNoteTime);
+      nextNoteTime += STEP_DUR; musicStep = (musicStep + 1) % 32;
+    }
+  }, 25);
+}
+function setMuted(m) { muted = m; muteBtn.textContent = muted ? "🔇" : "🔊"; }
+muteBtn.addEventListener("pointerdown", function (e) { e.stopPropagation(); e.preventDefault(); initAudio(); setMuted(!muted); });
+muteBtn.addEventListener("click", function (e) { e.stopPropagation(); e.preventDefault(); });
+
+// ---------- Game state ----------
+let state = "menu"; // menu | aim | flight | over
+let aimC = { x: 0, y: 0 };       // aim centre (player controlled)
+let wobT = Math.random() * 10;   // wobble phase
+let holding = false, holdT = 0;
+let darts = [];                  // {x, y, score, label}
+let total = 0, flightT = 0, flightTo = null, lastRes = null, resultTimer = 0;
+let best = 0;
+try { best = parseInt(localStorage.getItem("darts_best") || "0", 10) || 0; } catch (e) { best = 0; }
+
+function wobbleAmp() {
+  const base = BC.R * 0.16, min = BC.R * 0.030;
+  if (!holding) return base;
+  if (holdT < 2.2) return Math.max(min, base * Math.exp(-holdT / 0.55));
+  return min + (holdT - 2.2) * BC.R * 0.075; // tired arm drifts
+}
+function aimPoint() {
+  const a = wobbleAmp();
+  const wx = (Math.sin(wobT * 1.9) + Math.sin(wobT * 3.1 + 1.3) * 0.6) / 1.6;
+  const wy = (Math.cos(wobT * 2.3 + 0.6) + Math.sin(wobT * 2.7) * 0.6) / 1.6;
+  // a tired arm also pulls the centre down-right a touch
+  const drift = holding && holdT > 2.2 ? Math.min(BC.R * 0.10, (holdT - 2.2) * BC.R * 0.05) : 0;
+  return { x: aimC.x + wx * a + drift, y: aimC.y + wy * a + drift * 0.7, amp: a };
+}
+function startGame() {
+  initAudio();
+  darts = []; total = 0; lastRes = null;
+  aimC = { x: BC.x, y: BC.y };
+  holding = false; holdT = 0;
+  state = "aim";
+}
+function throwDart() {
+  if (state !== "aim") return;
+  const p = aimPoint();
+  const jit = p.amp * 0.22;
+  const x = p.x + (Math.random() * 2 - 1) * jit;
+  const y = p.y + (Math.random() * 2 - 1) * jit;
+  flightTo = { x, y };
+  flightT = 0;
+  holding = false; holdT = 0;
+  state = "flight";
+  sfxThrow();
+}
+function landDart() {
+  const res = scoreAt(flightTo.x, flightTo.y);
+  darts.push({ x: flightTo.x, y: flightTo.y, score: res.score, label: res.label });
+  total += res.score;
+  lastRes = res;
+  resultTimer = 0.95;
+  sfxStick(res.score >= 40);
+  if (res.score === 50) sfxBull();
+  if (darts.length >= 10) {
+    state = "over";
+    if (total > best) { best = total; try { localStorage.setItem("darts_best", String(best)); } catch (e) {} }
+  } else {
+    state = "aim";
+  }
+}
+function update(dt) {
+  wobT += dt;
+  if (holding) holdT += dt;
+  if (resultTimer > 0) resultTimer -= dt;
+  if (state === "flight") {
+    flightT += dt / 0.16;
+    if (flightT >= 1) landDart();
+  }
+}
+
+// ---------- Input ----------
+canvas.addEventListener("pointerdown", function (e) {
+  initAudio();
+  if (state === "menu" || state === "over") { startGame(); return; }
+  if (state === "aim") {
+    aimC = { x: e.clientX, y: e.clientY };
+    holding = true; holdT = 0;
+  }
+});
+canvas.addEventListener("pointermove", function (e) {
+  if (state === "aim") aimC = { x: e.clientX, y: e.clientY };
+});
+canvas.addEventListener("pointerup", function () {
+  if (state === "aim" && holding) throwDart();
+});
+canvas.addEventListener("pointercancel", function () { holding = false; holdT = 0; });
+let keys = {};
+window.addEventListener("keydown", function (e) {
+  keys[e.key] = true;
+  if (["ArrowLeft", "ArrowRight", "ArrowUp", "ArrowDown", " "].includes(e.key)) e.preventDefault();
+  initAudio();
+  if (e.key === "m" || e.key === "M") { setMuted(!muted); return; }
+  if (e.key === " " && state === "aim" && !holding) { holding = true; holdT = 0; }
+  if ((e.key === " " || e.key === "Enter") && state !== "aim") startGame();
+});
+window.addEventListener("keyup", function (e) {
+  keys[e.key] = false;
+  if (e.key === " " && state === "aim" && holding) throwDart();
+});
+function keyAim(dt) {
+  if (state !== "aim") return;
+  const sp = H * 0.55;
+  if (keys["ArrowLeft"]) aimC.x -= sp * dt;
+  if (keys["ArrowRight"]) aimC.x += sp * dt;
+  if (keys["ArrowUp"]) aimC.y -= sp * dt;
+  if (keys["ArrowDown"]) aimC.y += sp * dt;
+  aimC.x = clamp(aimC.x, 0, W); aimC.y = clamp(aimC.y, 0, H);
+}
+
+// ---------- Draw ----------
+const SEG_COLORS = i => (i % 2 === 0 ? "#f2e3c2" : "#23232a");
+function drawBoard() {
+  const { x: cx, y: cy, R } = BC;
+  // surround + number ring
+  ctx.fillStyle = "#1a1512";
+  ctx.beginPath(); ctx.arc(cx, cy, R * 1.16, 0, Math.PI * 2); ctx.fill();
+  ctx.strokeStyle = "#3d2c1c"; ctx.lineWidth = 3; ctx.stroke();
+  // segments
+  for (let i = 0; i < 20; i++) {
+    const a0 = (-90 + i * 18 - 9) * Math.PI / 180, a1 = (-90 + i * 18 + 9) * Math.PI / 180;
+    // single area (two bands drawn as one wedge, rings overlaid)
+    ctx.beginPath();
+    ctx.arc(cx, cy, R * RING.dblIn, a0, a1);
+    ctx.arc(cx, cy, R * RING.bullOut, a1, a0, true);
+    ctx.closePath();
+    ctx.fillStyle = SEG_COLORS(i); ctx.fill();
+    // treble band
+    ctx.beginPath();
+    ctx.arc(cx, cy, R * RING.trbOut, a0, a1);
+    ctx.arc(cx, cy, R * RING.trbIn, a1, a0, true);
+    ctx.closePath();
+    ctx.fillStyle = i % 2 === 0 ? "#c22f3d" : "#1d7a46"; ctx.fill();
+    // double band
+    ctx.beginPath();
+    ctx.arc(cx, cy, R, a0, a1);
+    ctx.arc(cx, cy, R * RING.dblIn, a1, a0, true);
+    ctx.closePath();
+    ctx.fillStyle = i % 2 === 0 ? "#c22f3d" : "#1d7a46"; ctx.fill();
+    // number
+    const na = (-90 + i * 18) * Math.PI / 180;
+    ctx.fillStyle = "#e8dcc2";
+    ctx.font = "bold " + Math.round(R * 0.105) + "px system-ui"; ctx.textAlign = "center"; ctx.textBaseline = "middle";
+    ctx.fillText(String(SEGMENTS[i]), cx + Math.cos(na) * R * 1.085, cy + Math.sin(na) * R * 1.085);
+  }
+  // wire rings
+  ctx.strokeStyle = "rgba(200,200,210,0.5)"; ctx.lineWidth = 1.2;
+  for (const rr of [RING.dblIn, RING.trbOut, RING.trbIn, RING.bullOut]) {
+    ctx.beginPath(); ctx.arc(cx, cy, R * rr, 0, Math.PI * 2); ctx.stroke();
+  }
+  // bulls
+  ctx.beginPath(); ctx.arc(cx, cy, R * RING.bullOut, 0, Math.PI * 2); ctx.fillStyle = "#1d7a46"; ctx.fill();
+  ctx.beginPath(); ctx.arc(cx, cy, R * RING.bullIn, 0, Math.PI * 2); ctx.fillStyle = "#c22f3d"; ctx.fill();
+}
+function drawDart(x, y, scale, stuck) {
+  ctx.save();
+  ctx.translate(x, y); ctx.scale(scale, scale);
+  // shaft
+  ctx.strokeStyle = stuck ? "#cfd6e4" : "#9aa4bb"; ctx.lineWidth = 3;
+  ctx.beginPath(); ctx.moveTo(6, 8); ctx.lineTo(0, 0); ctx.stroke();
+  // flights
+  ctx.fillStyle = "#ff5d5d";
+  ctx.beginPath(); ctx.moveTo(6, 8); ctx.lineTo(15, 3); ctx.lineTo(12, 12); ctx.closePath(); ctx.fill();
+  ctx.fillStyle = "#ffd94d";
+  ctx.beginPath(); ctx.moveTo(6, 8); ctx.lineTo(3, 16); ctx.lineTo(12, 12); ctx.closePath(); ctx.fill();
+  // point shadow
+  ctx.fillStyle = "rgba(0,0,0,0.35)";
+  ctx.beginPath(); ctx.arc(1.5, 1.5, 2.6, 0, Math.PI * 2); ctx.fill();
+  ctx.restore();
+}
+function draw() {
+  const g = ctx.createLinearGradient(0, 0, 0, H);
+  g.addColorStop(0, "#241611"); g.addColorStop(1, "#120b06");
+  ctx.fillStyle = g; ctx.fillRect(0, 0, W, H);
+  // wall glow behind board
+  const rg = ctx.createRadialGradient(BC.x, BC.y, BC.R * 0.3, BC.x, BC.y, BC.R * 1.7);
+  rg.addColorStop(0, "rgba(255,190,110,0.20)"); rg.addColorStop(1, "rgba(0,0,0,0)");
+  ctx.fillStyle = rg; ctx.fillRect(0, 0, W, H);
+  drawBoard();
+  // stuck darts
+  for (const d of darts) drawDart(d.x, d.y, 1, true);
+  // header
+  ctx.textAlign = "left"; ctx.textBaseline = "middle";
+  ctx.font = "bold " + Math.round(u * 4.8) + "px system-ui, sans-serif";
+  ctx.fillStyle = "#f5e6cc";
+  if (state !== "menu") {
+    ctx.fillText("TOTAL " + total, 12, 24);
+    ctx.font = Math.round(u * 3.8) + "px system-ui, sans-serif";
+    ctx.fillStyle = "#b8a888";
+    ctx.fillText("Dart " + Math.min(10, darts.length + 1) + " of 10 · Best: " + best, 12, 24 + u * 5.4);
+  }
+  // last result
+  if (lastRes && resultTimer > 0 && state !== "over") {
+    ctx.textAlign = "center";
+    ctx.font = "bold " + Math.round(u * 7.6) + "px system-ui, sans-serif";
+    ctx.fillStyle = lastRes.score >= 40 ? "#ffd94d" : lastRes.score === 0 ? "#ff7a6b" : "#f5e6cc";
+    ctx.fillText(lastRes.label + "  +" + lastRes.score, W / 2, H * 0.795);
+  }
+  // aim + wobble
+  if (state === "aim") {
+    const p = aimPoint();
+    // wobble ring
+    ctx.strokeStyle = holding ? "rgba(120,255,150,0.55)" : "rgba(255,255,255,0.30)";
+    ctx.lineWidth = 1.6;
+    ctx.beginPath(); ctx.arc(aimC.x, aimC.y, p.amp, 0, Math.PI * 2); ctx.stroke();
+    // wandering point
+    ctx.strokeStyle = "#ffd94d"; ctx.lineWidth = 2.4;
+    ctx.beginPath(); ctx.arc(p.x, p.y, 9, 0, Math.PI * 2); ctx.stroke();
+    ctx.beginPath();
+    ctx.moveTo(p.x - 15, p.y); ctx.lineTo(p.x - 5, p.y);
+    ctx.moveTo(p.x + 5, p.y); ctx.lineTo(p.x + 15, p.y);
+    ctx.moveTo(p.x, p.y - 15); ctx.lineTo(p.x, p.y - 5);
+    ctx.moveTo(p.x, p.y + 5); ctx.lineTo(p.x, p.y + 15);
+    ctx.stroke();
+    // steady meter
+    const mw = W * 0.62, mx = (W - mw) / 2, my = H * 0.885;
+    ctx.fillStyle = "rgba(0,0,0,0.45)"; ctx.fillRect(mx - 3, my - 3, mw + 6, u * 4.6 + 6);
+    const frac = clamp(1 - (p.amp - BC.R * 0.03) / (BC.R * 0.16 - BC.R * 0.03), 0, 1);
+    ctx.fillStyle = holding && holdT > 2.2 ? "#ff7a6b" : "#7be495";
+    ctx.fillRect(mx, my, mw * frac, u * 4.6);
+    ctx.fillStyle = "rgba(255,255,255,0.85)";
+    ctx.textAlign = "center"; ctx.font = Math.round(u * 3.8) + "px system-ui, sans-serif";
+    ctx.fillText(holding ? (holdT > 2.2 ? "ARM TIRED — THROW!" : "STEADY… release to throw") : "Drag to aim — HOLD to steady", W / 2, my - u * 4.6);
+  }
+  if (state === "flight" && flightTo) {
+    const t = Math.min(1, flightT);
+    const x = flightTo.x, y = flightTo.y + (1 - t) * 26;
+    drawDart(x, y, 1.6 - t * 0.6, false);
+  }
+  if (state === "menu" || state === "over") {
+    ctx.fillStyle = "rgba(6,3,2,0.82)";
+    ctx.fillRect(0, H * 0.60, W, H * 0.40);
+    ctx.textAlign = "center";
+    ctx.fillStyle = "#ffb02e";
+    ctx.font = "bold " + Math.round(u * 10) + "px system-ui, sans-serif";
+    ctx.fillText("🎯 DARTS", W / 2, H * 0.665);
+    ctx.fillStyle = "#f5e6cc";
+    ctx.font = Math.round(u * 4.3) + "px system-ui, sans-serif";
+    if (state === "menu") {
+      ctx.fillText("10 darts. Move to aim, HOLD to steady,", W / 2, H * 0.745);
+      ctx.fillText("release to throw. Treble 20 is 60 —", W / 2, H * 0.79);
+      ctx.fillText("but don't hold too long: arms tire.", W / 2, H * 0.835);
+      ctx.fillStyle = "#b8a888";
+      ctx.fillText("Best total: " + best, W / 2, H * 0.885);
+    } else {
+      ctx.fillStyle = "#ffd166";
+      ctx.font = "bold " + Math.round(u * 7) + "px system-ui, sans-serif";
+      ctx.fillText("TOTAL " + total, W / 2, H * 0.75);
+      ctx.fillStyle = "#f5e6cc";
+      ctx.font = Math.round(u * 4.3) + "px system-ui, sans-serif";
+      const bulls = darts.filter(d => d.score === 50).length;
+      const trebles = darts.filter(d => d.label.startsWith("Treble")).length;
+      ctx.fillText("Bulls: " + bulls + " · Trebles: " + trebles + " · Best: " + best, W / 2, H * 0.815);
+    }
+    ctx.fillStyle = "#ffb02e";
+    ctx.font = "bold " + Math.round(u * 5) + "px system-ui, sans-serif";
+    ctx.fillText(state === "menu" ? "TAP TO START" : "TAP TO PLAY AGAIN", W / 2, H * 0.925);
+  }
+}
+
+// ---------- Loop ----------
+let lastT = 0;
+function frame(t) {
+  requestAnimationFrame(frame);
+  const dt = Math.min(0.05, (t - lastT) / 1000 || 0); lastT = t;
+  keyAim(dt);
+  update(dt);
+  draw();
+}
+resize();
+aimC = { x: BC.x, y: BC.y };
+requestAnimationFrame(frame);
+
+// ---------- QA hooks ----------
+window.__qa = {
+  scoreAt: (x, y) => scoreAt(x, y),
+  pointFor: (s, r, a) => pointFor(s, r, a),
+  geom: () => ({ ...BC }),
+  state: () => state,
+  start: () => startGame(),
+  setAim: (x, y) => { aimC = { x, y }; },
+  holdStart: () => { if (state === "aim") { holding = true; holdT = 0; } },
+  holdRelease: () => { if (state === "aim" && holding) throwDart(); },
+  wobbleAmp: () => wobbleAmp(),
+  aimPoint: () => aimPoint(),
+  darts: () => darts.map(d => ({ ...d })),
+  total: () => total
+};
+</script>
+</body>
+</html>

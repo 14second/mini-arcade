@@ -1,0 +1,767 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, user-scalable=no">
+<meta name="theme-color" content="#0b1020">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<title>Bowling</title>
+<style>
+  * { margin:0; padding:0; box-sizing:border-box; }
+  html, body {
+    width:100%; height:100%; overflow:hidden; background:#0b1020;
+    font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+    touch-action:none; user-select:none; -webkit-user-select:none;
+    -webkit-tap-highlight-color: transparent;
+  }
+  canvas { position:fixed; inset:0; display:block; touch-action:none; }
+  #muteBtn {
+    position:fixed; top:10px; right:10px; z-index:10;
+    width:48px; height:48px; border-radius:12px;
+    border:2px solid rgba(160,170,255,.5); background:rgba(8,8,22,.62);
+    color:#fff; font-size:22px; line-height:1; cursor:pointer;
+    touch-action:none; user-select:none; -webkit-user-select:none;
+    display:flex; align-items:center; justify-content:center; padding:0;
+  }
+  .modeBtn {
+    position:fixed; left:50%; transform:translateX(-50%); z-index:10;
+    width:min(280px, 76vw); height:60px; border-radius:14px;
+    border:2px solid rgba(140,200,255,.65); background:rgba(14,20,44,.92);
+    color:#eaf4ff; font-size:20px; font-weight:700; cursor:pointer;
+    touch-action:none; user-select:none; -webkit-user-select:none;
+  }
+  #btn1p { top:46%; }
+  #btn2p { top:calc(46% + 76px); }
+</style>
+</head>
+<body>
+<canvas id="game"></canvas>
+<button id="muteBtn" aria-label="Toggle sound">🔊</button>
+<button class="modeBtn" id="btn1p">🎳 1 Player</button>
+<button class="modeBtn" id="btn2p">🎳 2 Players</button>
+<script>
+// iOS audio routing: route Web Audio to the media/playback channel (iOS 17+
+// Audio Session API) on the first gesture and inside audio init, so sound
+// plays even with the silent switch on.
+function iosPlaybackSession() {
+  try { if ('audioSession' in navigator) navigator.audioSession.type = 'playback'; } catch (e) {}
+}
+document.addEventListener('pointerdown', iosPlaybackSession, true);
+document.addEventListener('touchstart', iosPlaybackSession, true);
+
+"use strict";
+/* ============================================================
+   BOWLING — ten-pin bowling for portrait phones.
+   Drag to position the ball, flick up to throw. The faster the
+   flick the harder the throw; curving your flick hooks the ball.
+   Proper 10-frame scoring, strikes, spares and a full 10th frame.
+   1 Player solo, or 2 Players pass-and-play alternating frames.
+   ============================================================ */
+
+const canvas = document.getElementById("game");
+const ctx = canvas.getContext("2d");
+let W = 0, H = 0, DPR = 1, u = 4;
+
+function clamp(v, a, b) { return v < a ? a : (v > b ? b : v); }
+function lerp(a, b, t) { return a + (b - a) * t; }
+
+// Lane geometry (recomputed on resize)
+let laneX = 0, laneW = 0, laneTop = 0, foulY = 0, ballStartY = 0;
+let pinR = 8, ballR = 12, headPinY = 0, pinDX = 30, pinDY = 26;
+const PIN_HOME = []; // {x,y} per pin index 0..9
+
+function layoutPins() {
+  PIN_HOME.length = 0;
+  const cx = W / 2;
+  // rows from head pin (nearest the player) upward: 1,2,3,4
+  for (let row = 0; row < 4; row++) {
+    const y = headPinY - row * pinDY;
+    for (let k = 0; k <= row; k++) {
+      PIN_HOME.push({ x: cx + (k - row / 2) * pinDX, y: y });
+    }
+  }
+}
+function resize() {
+  DPR = Math.min(window.devicePixelRatio || 1, 2);
+  W = window.innerWidth; H = window.innerHeight;
+  canvas.width = Math.round(W * DPR); canvas.height = Math.round(H * DPR);
+  canvas.style.width = W + "px"; canvas.style.height = H + "px";
+  ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+  u = Math.min(W, H) / 100;
+  laneW = W * 0.60; laneX = (W - laneW) / 2;
+  laneTop = H * 0.055;
+  headPinY = H * 0.205;
+  foulY = H * 0.78;
+  ballStartY = H * 0.865;
+  pinR = Math.max(7, laneW * 0.047);
+  ballR = Math.max(10, laneW * 0.056);
+  pinDX = laneW * 0.128; pinDY = H * 0.0305;
+  layoutPins();
+  resetBallPos();
+}
+window.addEventListener("resize", resize);
+
+// ---------- Audio ----------
+let actx = null, muted = false;
+const muteBtn = document.getElementById("muteBtn");
+function initAudio() {
+  iosPlaybackSession();
+  if (!actx) {
+    try {
+      const AC = window.AudioContext || window.webkitAudioContext;
+      if (AC) actx = new AC();
+    } catch (e) { actx = null; }
+    if (actx) startMusicScheduler();
+  }
+  if (actx && actx.state === "suspended") actx.resume();
+}
+function beep(freq, dur, type, vol, slide) {
+  if (!actx || muted) return;
+  const t = actx.currentTime;
+  const o = actx.createOscillator(), g = actx.createGain();
+  o.type = type || "square";
+  o.frequency.setValueAtTime(freq, t);
+  if (slide) o.frequency.exponentialRampToValueAtTime(Math.max(20, slide), t + dur);
+  g.gain.setValueAtTime(vol || 0.08, t);
+  g.gain.exponentialRampToValueAtTime(0.0001, t + dur);
+  o.connect(g); g.connect(actx.destination);
+  o.start(t); o.stop(t + dur + 0.02);
+}
+function noiseBurst(dur, vol, freq) {
+  if (!actx || muted) return;
+  const t = actx.currentTime;
+  const len = Math.max(1, Math.floor(actx.sampleRate * dur));
+  const buf = actx.createBuffer(1, len, actx.sampleRate);
+  const d = buf.getChannelData(0);
+  for (let i = 0; i < len; i++) d[i] = (Math.random() * 2 - 1) * (1 - i / len);
+  const src = actx.createBufferSource(); src.buffer = buf;
+  const f = actx.createBiquadFilter(); f.type = "lowpass"; f.frequency.value = freq || 900;
+  const g = actx.createGain(); g.gain.value = vol || 0.15;
+  src.connect(f); f.connect(g); g.connect(actx.destination); src.start(t);
+}
+function sfxRoll()   { noiseBurst(0.25, 0.05, 400); }
+function sfxPin(n)   { noiseBurst(0.12, Math.min(0.28, 0.08 + n * 0.03), 1800); beep(190, 0.08, "triangle", 0.10); }
+function sfxGutter() { beep(160, 0.3, "sawtooth", 0.05, 70); }
+function sfxStrike() { [523,659,784,1046].forEach((f,i)=>setTimeout(()=>beep(f,0.13,"square",0.06), i*90)); }
+function sfxSpare()  { [523,659,784].forEach((f,i)=>setTimeout(()=>beep(f,0.12,"square",0.06), i*90)); }
+function sfxWin()    { [523,659,784,1046,1318].forEach((f,i)=>setTimeout(()=>beep(f,0.16,"square",0.06), i*110)); }
+
+// Laid-back groove, BPM 96. Bass notes >= MIDI 45, square/triangle voices.
+const BPM = 96, STEP_DUR = 60 / BPM / 2;
+const BASS = [
+  48,0,0,48, 0,0,55,0, 53,0,0,53, 0,0,50,0,
+  48,0,0,48, 0,0,55,0, 57,0,55,0, 53,0,50,0
+];
+const LEAD = [
+  72,0,0,76, 0,0,74,0, 72,0,0,0, 0,0,0,0,
+  69,0,0,72, 0,0,71,0, 72,0,0,0, 0,0,0,0
+];
+const PADS = [ [48,52,55], [53,57,60], [48,52,55], [50,53,57] ];
+let musicStep = 0, nextNoteTime = 0, musicTimer = null;
+function midiFreq(m) { return 440 * Math.pow(2, (m - 69) / 12); }
+function toneAt(midi, when, dur, type, vol) {
+  const o = actx.createOscillator(), g = actx.createGain();
+  o.type = type; o.frequency.setValueAtTime(midiFreq(midi), when);
+  g.gain.setValueAtTime(0.0001, when);
+  g.gain.exponentialRampToValueAtTime(vol, when + 0.012);
+  g.gain.exponentialRampToValueAtTime(0.0001, when + dur);
+  o.connect(g); g.connect(actx.destination);
+  o.start(when); o.stop(when + dur + 0.03);
+}
+function scheduleStep(step, when) {
+  if (muted) return;
+  const b = BASS[step % 32]; if (b) toneAt(b, when, STEP_DUR * 0.9, "square", 0.030);
+  const l = LEAD[step % 32]; if (l) toneAt(l, when, STEP_DUR * 1.5, "triangle", 0.018);
+  if (step % 8 === 0) {
+    const chord = PADS[Math.floor(step / 8) % PADS.length];
+    for (let i = 0; i < chord.length; i++) toneAt(chord[i], when, STEP_DUR * 7.6, "triangle", 0.009);
+  }
+}
+function startMusicScheduler() {
+  if (musicTimer !== null || !actx) return;
+  musicStep = 0; nextNoteTime = actx.currentTime + 0.06;
+  musicTimer = setInterval(function () {
+    if (!actx) return;
+    if (nextNoteTime < actx.currentTime) nextNoteTime = actx.currentTime + 0.05;
+    while (nextNoteTime < actx.currentTime + 0.12) {
+      scheduleStep(musicStep, nextNoteTime);
+      nextNoteTime += STEP_DUR; musicStep = (musicStep + 1) % 32;
+    }
+  }, 25);
+}
+function setMuted(m) { muted = m; muteBtn.textContent = muted ? "🔇" : "🔊"; }
+muteBtn.addEventListener("pointerdown", function (e) { e.stopPropagation(); e.preventDefault(); initAudio(); setMuted(!muted); });
+muteBtn.addEventListener("click", function (e) { e.stopPropagation(); e.preventDefault(); });
+
+// ---------- Scoring (pure; unit-verified) ----------
+function scoreRolls(r) {
+  let total = 0, i = 0;
+  for (let f = 0; f < 10; f++) {
+    if (f === 9) { while (i < r.length) total += r[i++]; }
+    else if (r[i] === 10) { total += 10 + (r[i + 1] || 0) + (r[i + 2] || 0); i += 1; }
+    else if ((r[i] || 0) + (r[i + 1] || 0) === 10) { total += 10 + (r[i + 2] || 0); i += 2; }
+    else { total += (r[i] || 0) + (r[i + 1] || 0); i += 2; }
+  }
+  return total;
+}
+// Cumulative per-frame totals; null where bonuses are not yet known.
+function cumulativeScores(r) {
+  const out = new Array(10).fill(null);
+  let total = 0, i = 0;
+  for (let f = 0; f < 10; f++) {
+    if (f === 9) {
+      // 10th frame complete?
+      let need = 2;
+      if (r[i] === 10 || (r[i] || 0) + (r[i + 1] || 0) === 10) need = 3;
+      let have = 0; for (let k = 0; k < need; k++) if (r[i + k] !== undefined) have++;
+      if (have >= need) { let s = 0; for (let k = 0; k < need; k++) s += r[i + k]; total += s; out[f] = total; }
+      break;
+    }
+    if (r[i] === undefined) break;
+    if (r[i] === 10) {
+      if (r[i + 1] !== undefined && r[i + 2] !== undefined) { total += 10 + r[i + 1] + r[i + 2]; out[f] = total; }
+      i += 1;
+    } else if (r[i + 1] !== undefined && r[i] + r[i + 1] === 10) {
+      if (r[i + 2] !== undefined) { total += 10 + r[i + 2]; out[f] = total; }
+      i += 2;
+    } else if (r[i + 1] !== undefined) {
+      total += r[i] + r[i + 1]; out[f] = total; i += 2;
+    } else break;
+  }
+  return out;
+}
+function rollMarks(r) {
+  // Standard scorecard marks per frame: array of 10 arrays of strings.
+  const frames = []; let i = 0;
+  for (let f = 0; f < 10; f++) {
+    const marks = [];
+    if (f < 9) {
+      if (r[i] === undefined) { frames.push(marks); continue; }
+      if (r[i] === 10) { marks.push("", "X"); i += 1; }
+      else {
+        marks.push(r[i] === 0 ? "–" : String(r[i]));
+        if (r[i + 1] !== undefined) marks.push(r[i] + r[i + 1] === 10 ? "/" : (r[i + 1] === 0 ? "–" : String(r[i + 1])));
+        i += 2;
+      }
+    } else {
+      let rack = 10;
+      for (let k = 0; k < 3; k++) {
+        const v = r[i + k]; if (v === undefined) break;
+        if (v === 10) marks.push("X");
+        else if (v === 0) marks.push("–");
+        else if (k > 0 && r[i + k - 1] !== 10 && rack < 10 && r[i + k - 1] + v === 10 && !(k === 2 && r[i] === 10 && r[i + 1] === 10)) marks.push("/");
+        else if (k === 2 && r[i] === 10 && r[i + 1] !== 10 && r[i + 1] + v === 10) marks.push("/");
+        else marks.push(String(v));
+        rack -= v; if (rack <= 0) rack = 10;
+      }
+    }
+    frames.push(marks);
+  }
+  return frames;
+}
+
+// ---------- Game state ----------
+let state = "menu"; // menu | aim | roll | settle | over
+let mode = 1; // 1 or 2 players
+let players = [];
+let cur = 0;           // current player index
+let turnFrame = 0;     // frame both players are on (0..9)
+let ballInFrame = 0;   // 0,1,2 within the frame (10th can reach 2)
+let firstBallStrike10 = false;
+let settleTimer = 0, bannerText = "", bannerTimer = 0;
+let hi = 0;
+try { hi = parseInt(localStorage.getItem("bowling_best") || "0", 10) || 0; } catch (e) { hi = 0; }
+
+const ball = { x: 0, y: 0, vx: 0, vy: 0, spin: 0, live: false, gutter: false, startY: 0 };
+let pins = []; // {x,y,vx,vy,standing,down,alpha}
+let fallenThisBall = 0, pinsHitSound = 0;
+
+function newRack() {
+  pins = PIN_HOME.map(p => ({ x: p.x, y: p.y, vx: 0, vy: 0, standing: true, down: false, alpha: 1 }));
+}
+function clearFallenPins() {
+  for (const p of pins) if (p.down) { p.standing = false; p.alpha = 0; }
+}
+function standingCount() { return pins.reduce((n, p) => n + (p.standing && !p.down ? 1 : 0), 0); }
+function resetBallPos() {
+  ball.x = W / 2; ball.y = ballStartY; ball.vx = 0; ball.vy = 0; ball.spin = 0;
+  ball.live = false; ball.gutter = false;
+}
+function makePlayers(n) {
+  players = [];
+  for (let i = 0; i < n; i++) players.push({ name: "P" + (i + 1), rolls: [], done: false });
+  cur = 0; turnFrame = 0; ballInFrame = 0; firstBallStrike10 = false;
+}
+function startGame(n) {
+  initAudio();
+  mode = n; makePlayers(n);
+  newRack(); resetBallPos();
+  state = "aim";
+  document.getElementById("btn1p").style.display = "none";
+  document.getElementById("btn2p").style.display = "none";
+  banner(players[cur].name + " — Frame 1", 1.1);
+}
+function banner(t, dur) { bannerText = t; bannerTimer = dur || 1.0; }
+
+function throwBall(power, drift, spin) {
+  if (state !== "aim") return false;
+  const speed = lerp(H * 0.78, H * 1.22, clamp(power, 0, 1));
+  ball.vx = clamp(drift, -1, 1) * H * 0.16;
+  ball.vy = -speed;
+  ball.spin = clamp(spin, -1, 1);
+  ball.live = true; ball.gutter = false; ball.startY = ball.y;
+  fallenThisBall = 0; pinsHitSound = 0;
+  state = "roll";
+  sfxRoll();
+  return true;
+}
+
+// After a ball settles: record it and advance the turn machine.
+function recordBall() {
+  const P = players[cur];
+  const fallen = fallenThisBall;
+  P.rolls.push(fallen);
+  const frameDone = advanceTurn(fallen);
+  if (state === "over") return;
+  if (frameDone) {
+    // next player (2P) or next frame
+    if (mode === 2) {
+      const other = 1 - cur;
+      if (!players[other].done || turnFrame < 9) {
+        // In frames 0-8 both always play; in the 10th, switch if other not done.
+        if (turnFrame < 9 || !players[other].done) cur = other;
+      }
+      if (P.done && players[other].done) { endGame(); return; }
+      if (P.done && turnFrame >= 9) { /* stay with other */ cur = other; }
+    }
+    if (turnFrame > 9) { endGame(); return; }
+    newRack();
+    banner(players[cur].name + " — Frame " + (turnFrame + 1), 1.0);
+  } else {
+    // same player, next ball in frame: sweep fallen pins (except 10th-frame resets handled in advanceTurn)
+    banner(fallen === 10 ? "" : (standingCount() + " pins left"), 0.7);
+  }
+  ballInFrameResetCheck();
+  resetBallPos();
+  state = "aim";
+}
+function ballInFrameResetCheck() { /* rack changes already applied in advanceTurn */ }
+
+// Returns true when the current player's frame is finished.
+function advanceTurn(fallen) {
+  const P = players[cur];
+  if (turnFrame < 9) {
+    if (ballInFrame === 0) {
+      if (fallen === 10) { // strike
+        if (cur === mode - 1) turnFrame++;
+        ballInFrame = 0;
+        if (fallen === 10) sfxStrike();
+        return true;
+      }
+      ballInFrame = 1;
+      clearFallenPins();
+      return false;
+    }
+    // second ball
+    const prev = P.rolls[P.rolls.length - 2];
+    if (prev + fallen === 10) sfxSpare();
+    ballInFrame = 0;
+    if (cur === mode - 1) turnFrame++;
+    return true;
+  }
+  // ---- 10th frame ----
+  if (ballInFrame === 0) {
+    firstBallStrike10 = (fallen === 10);
+    if (firstBallStrike10) { sfxStrike(); newRack(); }
+    else clearFallenPins();
+    ballInFrame = 1;
+    return false;
+  }
+  if (ballInFrame === 1) {
+    if (firstBallStrike10) {
+      // Shooting at a fresh rack (reset after the strike). If it is cleared
+      // again, reset once more for ball 3; otherwise sweep and shoot the rest.
+      if (standingCount() === 0) newRack();
+      else clearFallenPins();
+      ballInFrame = 2;
+      return false;
+    }
+    const first = P.rolls[P.rolls.length - 2];
+    if (first + fallen === 10) { // spare -> fresh rack, one more ball
+      sfxSpare();
+      newRack();
+      ballInFrame = 2;
+      return false;
+    }
+    P.done = true;
+    ballInFrame = 0;
+    if (cur === mode - 1) turnFrame++;
+    return true;
+  }
+  // third ball of the 10th
+  P.done = true;
+  ballInFrame = 0;
+  if (cur === mode - 1) turnFrame++;
+  return true;
+}
+function endGame() {
+  state = "over";
+  let best = 0;
+  for (const P of players) best = Math.max(best, scoreRolls(P.rolls));
+  if (mode === 1 && best > hi) {
+    hi = best;
+    try { localStorage.setItem("bowling_best", String(hi)); } catch (e) {}
+  }
+  sfxWin();
+}
+
+// ---------- Physics ----------
+function stepPins(dt) {
+  for (const p of pins) {
+    if (!p.down) continue;
+    p.x += p.vx * dt; p.y += p.vy * dt;
+    const fr = Math.pow(0.02, dt); // strong slide friction
+    p.vx *= fr; p.vy *= fr;
+    if (Math.abs(p.vx) < 4) p.vx = 0;
+    if (Math.abs(p.vy) < 4) p.vy = 0;
+    p.alpha = Math.max(0.25, p.alpha - dt * 0.25);
+  }
+  // pin -> pin chain reactions
+  for (const a of pins) {
+    if (!a.down) continue;
+    const spd = Math.hypot(a.vx, a.vy);
+    if (spd < 150) continue;
+    for (const b of pins) {
+      if (b === a || b.down || !b.standing) continue;
+      const dx = b.x - a.x, dy = b.y - a.y;
+      const d = Math.hypot(dx, dy);
+      if (d < pinR * 2 && d > 0.01) {
+        const nx = dx / d, ny = dy / d;
+        const transfer = spd * 0.55;
+        b.down = true; fallenThisBall++;
+        b.vx = nx * transfer + (Math.random() - 0.5) * 90;
+        b.vy = ny * transfer - Math.random() * 50;
+        a.vx *= 0.5; a.vy *= 0.5;
+      }
+    }
+  }
+}
+function stepBall(dt) {
+  if (!ball.live) return;
+  const sub = 3, sdt = dt / sub;
+  for (let s = 0; s < sub; s++) {
+    // Hook: lane oil keeps the ball straight early, grip bites late.
+    const travelled = (ball.startY - ball.y) / Math.max(1, ball.startY - headPinY);
+    const hook = ball.spin * H * 0.55 * clamp((travelled - 0.45) / 0.5, 0, 1);
+    ball.vx += hook * sdt;
+    ball.vy *= Math.pow(0.55, sdt); // rolling friction
+    ball.vx *= Math.pow(0.35, sdt);
+    ball.x += ball.vx * sdt;
+    ball.y += ball.vy * sdt;
+    // Gutters
+    if (!ball.gutter && (ball.x < laneX + ballR * 0.4 || ball.x > laneX + laneW - ballR * 0.4)) {
+      ball.gutter = true;
+      ball.x = ball.x < W / 2 ? laneX + ballR * 0.45 : laneX + laneW - ballR * 0.45;
+      ball.vx = 0; ball.spin = 0;
+      sfxGutter();
+    }
+    if (ball.gutter) ball.x = ball.x < W / 2 ? laneX + ballR * 0.45 : laneX + laneW - ballR * 0.45;
+    // Ball -> pins
+    if (!ball.gutter) {
+      for (const p of pins) {
+        if (!p.standing || p.down) continue;
+        const dx = p.x - ball.x, dy = p.y - ball.y;
+        const d = Math.hypot(dx, dy);
+        if (d < ballR + pinR && d > 0.01) {
+          const nx = dx / d, ny = dy / d;
+          const bs = Math.hypot(ball.vx, ball.vy);
+          p.down = true; fallenThisBall++; pinsHitSound++;
+          const jit = (Math.random() - 0.5) * 0.35;
+          const ca = Math.cos(jit), sa = Math.sin(jit);
+          const rx = nx * ca - ny * sa, ry = nx * sa + ny * ca;
+          p.vx = rx * bs * 0.5 + ball.vx * 0.35;
+          p.vy = ry * bs * 0.5 + ball.vy * 0.35 - 30;
+          // deflect the ball a little and bleed speed
+          ball.vx += nx * bs * 0.09;
+          ball.vy *= 0.78; ball.vx *= 0.88;
+          if (pinsHitSound <= 3) sfxPin(fallenThisBall);
+        }
+      }
+    }
+    stepPins(sdt);
+    if (ball.y < laneTop + 6 || Math.hypot(ball.vx, ball.vy) < 24) { ball.live = false; break; }
+  }
+}
+function update(dt) {
+  if (bannerTimer > 0) bannerTimer -= dt;
+  if (state === "roll") {
+    stepBall(dt);
+    if (!ball.live) { state = "settle"; settleTimer = 0.55; }
+  } else if (state === "settle") {
+    stepPins(dt);
+    settleTimer -= dt;
+    if (settleTimer <= 0) {
+      // one last pin-settle check, then record
+      const moving = pins.some(p => p.down && Math.hypot(p.vx, p.vy) > 130);
+      if (moving && settleTimer > -0.8) { /* give chains a moment */ }
+      else recordBall();
+    }
+  }
+}
+
+// ---------- Input ----------
+let ptr = null; // {id, samples:[{x,y,t}], moved}
+let keySpin = 0, keyAim = 0;
+canvas.addEventListener("pointerdown", function (e) {
+  initAudio();
+  if (state === "menu" || state === "over") return;
+  if (state === "aim") {
+    ptr = { id: e.pointerId, samples: [{ x: e.clientX, y: e.clientY, t: performance.now() }], startX: e.clientX };
+    ball.x = clamp(e.clientX, laneX + ballR, laneX + laneW - ballR);
+  }
+});
+canvas.addEventListener("pointermove", function (e) {
+  if (!ptr || e.pointerId !== ptr.id || state !== "aim") return;
+  const now = performance.now();
+  ptr.samples.push({ x: e.clientX, y: e.clientY, t: now });
+  while (ptr.samples.length > 2 && now - ptr.samples[0].t > 140) ptr.samples.shift();
+  ball.x = clamp(e.clientX, laneX + ballR, laneX + laneW - ballR);
+});
+function endPointer(e, cancelled) {
+  if (!ptr || (e.pointerId !== undefined && e.pointerId !== ptr.id)) return;
+  const samples = ptr.samples; ptr = null;
+  if (state !== "aim" || cancelled || samples.length < 2) return;
+  const now = performance.now();
+  const recent = samples.filter(s => now - s.t < 160);
+  if (recent.length < 2) return;
+  const a = recent[0], b = recent[recent.length - 1];
+  const dt = Math.max(16, b.t - a.t) / 1000;
+  const vy = (b.y - a.y) / dt; // px/s, negative = up
+  const vx = (b.x - a.x) / dt;
+  if (vy > -260) return; // not a real flick — just repositioning
+  const power = clamp((-vy - 260) / 900, 0.08, 1);
+  // spin: change in lateral velocity across the flick (curve of the swipe)
+  const mid = recent[Math.floor(recent.length / 2)];
+  const earlyVx = (mid.x - a.x) / Math.max(16, mid.t - a.t) * 1000;
+  const lateVx = (b.x - mid.x) / Math.max(16, b.t - mid.t) * 1000;
+  const spin = clamp((lateVx - earlyVx) / 1400, -1, 1);
+  const drift = clamp(vx / 900, -1, 1);
+  throwBall(power, drift, spin);
+}
+canvas.addEventListener("pointerup", function (e) { endPointer(e, false); });
+canvas.addEventListener("pointercancel", function (e) { endPointer(e, true); });
+let spaceHeld = 0;
+window.addEventListener("keydown", function (e) {
+  initAudio();
+  if (["ArrowLeft", "ArrowRight", " "].includes(e.key)) e.preventDefault();
+  if (e.key === "m" || e.key === "M") { setMuted(!muted); return; }
+  if (state === "aim") {
+    if (e.key === "ArrowLeft") keyAim = -1;
+    if (e.key === "ArrowRight") keyAim = 1;
+    if (e.key === "a" || e.key === "A") keySpin = -1;
+    if (e.key === "d" || e.key === "D") keySpin = 1;
+    if (e.key === " ") spaceHeld = Math.min(1, spaceHeld + 0.34);
+  }
+});
+window.addEventListener("keyup", function (e) {
+  if (e.key === "ArrowLeft" && keyAim === -1) keyAim = 0;
+  if (e.key === "ArrowRight" && keyAim === 1) keyAim = 0;
+  if ((e.key === "a" || e.key === "A") && keySpin === -1) keySpin = 0;
+  if ((e.key === "d" || e.key === "D") && keySpin === 1) keySpin = 0;
+  if (e.key === " " && state === "aim" && spaceHeld > 0) {
+    throwBall(clamp(spaceHeld, 0.25, 1), 0, keySpin * 0.8);
+    spaceHeld = 0;
+  }
+});
+document.getElementById("btn1p").addEventListener("click", function () { startGame(1); });
+document.getElementById("btn2p").addEventListener("click", function () { startGame(2); });
+
+// ---------- Draw ----------
+function drawPin(p) {
+  if (!p.standing) return;
+  ctx.save();
+  ctx.globalAlpha = p.down ? Math.max(0.25, p.alpha) : 1;
+  ctx.fillStyle = "rgba(0,0,0,0.25)";
+  ctx.beginPath(); ctx.ellipse(p.x + 2, p.y + pinR * 0.7, pinR * 0.9, pinR * 0.4, 0, 0, Math.PI * 2); ctx.fill();
+  ctx.fillStyle = p.down ? "#cfd4e2" : "#f7f8fc";
+  ctx.beginPath(); ctx.arc(p.x, p.y, pinR, 0, Math.PI * 2); ctx.fill();
+  ctx.strokeStyle = "#d43a4e"; ctx.lineWidth = Math.max(1.5, pinR * 0.22);
+  ctx.beginPath(); ctx.arc(p.x, p.y, pinR * 0.55, Math.PI * 1.15, Math.PI * 1.85); ctx.stroke();
+  ctx.restore();
+}
+function drawScoreCard() {
+  // compact card at top: one row per player
+  const boxH = mode === 2 ? H * 0.052 : H * 0.042;
+  ctx.fillStyle = "rgba(5,8,20,0.72)";
+  ctx.fillRect(0, 0, W, boxH + 10);
+  ctx.textAlign = "left"; ctx.textBaseline = "middle";
+  for (let i = 0; i < players.length; i++) {
+    const P = players[i];
+    const cum = cumulativeScores(P.rolls);
+    let known = 0; for (const c of cum) if (c !== null) known = c;
+    ctx.font = "bold " + Math.round(u * 3.4) + "px system-ui, sans-serif";
+    ctx.fillStyle = i === cur && state !== "over" ? "#ffd166" : "#aab4d8";
+    const label = mode === 2 ? P.name : "SCORE";
+    ctx.fillText(label + "  Frame " + Math.min(10, turnFrame + 1) + "  ·  " + known, 12, 12 + i * boxH + boxH * 0.35);
+  }
+}
+function draw() {
+  // backdrop
+  const g = ctx.createLinearGradient(0, 0, 0, H);
+  g.addColorStop(0, "#131a33"); g.addColorStop(1, "#0b1020");
+  ctx.fillStyle = g; ctx.fillRect(0, 0, W, H);
+  // gutters
+  ctx.fillStyle = "#05070f";
+  ctx.fillRect(laneX - u * 3.4, laneTop, u * 3.4, foulY - laneTop + u * 6);
+  ctx.fillRect(laneX + laneW, laneTop, u * 3.4, foulY - laneTop + u * 6);
+  // lane
+  const lg = ctx.createLinearGradient(laneX, 0, laneX + laneW, 0);
+  lg.addColorStop(0, "#b98548"); lg.addColorStop(0.5, "#d9a45e"); lg.addColorStop(1, "#b98548");
+  ctx.fillStyle = lg;
+  ctx.fillRect(laneX, laneTop, laneW, foulY - laneTop + u * 10);
+  // boards
+  ctx.strokeStyle = "rgba(90,55,20,0.35)"; ctx.lineWidth = 1;
+  for (let i = 1; i < 10; i++) {
+    const x = laneX + laneW * i / 10;
+    ctx.beginPath(); ctx.moveTo(x, laneTop); ctx.lineTo(x, foulY + u * 10); ctx.stroke();
+  }
+  // lane arrows
+  ctx.fillStyle = "rgba(90,55,20,0.4)";
+  for (let i = 0; i < 5; i++) {
+    const x = laneX + laneW * (0.16 + i * 0.17);
+    const y = foulY - H * 0.16 - (i % 2) * H * 0.02;
+    ctx.beginPath(); ctx.moveTo(x, y - 9); ctx.lineTo(x - 4, y + 6); ctx.lineTo(x + 4, y + 6); ctx.closePath(); ctx.fill();
+  }
+  // pin deck
+  ctx.fillStyle = "rgba(60,35,12,0.35)";
+  ctx.fillRect(laneX, laneTop, laneW, headPinY - laneTop + pinR * 2.2);
+  // foul line
+  ctx.fillStyle = "rgba(255,80,80,0.55)";
+  ctx.fillRect(laneX, foulY, laneW, 2);
+  // pins: draw back rows first
+  const sorted = pins.slice().sort((a, b) => a.y - b.y);
+  for (const p of sorted) drawPin(p);
+  // ball
+  if (state !== "menu" && state !== "over") {
+    ctx.fillStyle = "rgba(0,0,0,0.3)";
+    ctx.beginPath(); ctx.ellipse(ball.x + 3, ball.y + ballR * 0.6, ballR * 0.95, ballR * 0.45, 0, 0, Math.PI * 2); ctx.fill();
+    const bg = ctx.createRadialGradient(ball.x - ballR * 0.3, ball.y - ballR * 0.35, ballR * 0.2, ball.x, ball.y, ballR);
+    bg.addColorStop(0, "#7a86ff"); bg.addColorStop(1, "#232a6e");
+    ctx.fillStyle = bg;
+    ctx.beginPath(); ctx.arc(ball.x, ball.y, ballR, 0, Math.PI * 2); ctx.fill();
+    ctx.fillStyle = "rgba(10,10,25,0.65)";
+    for (const [hx, hy] of [[-0.25, -0.2], [0.22, -0.28], [0, 0.18]]) {
+      ctx.beginPath(); ctx.arc(ball.x + hx * ballR, ball.y + hy * ballR, ballR * 0.14, 0, Math.PI * 2); ctx.fill();
+    }
+    // spin indicator while aiming
+    if (state === "aim") {
+      ctx.strokeStyle = "rgba(255,255,255,0.35)"; ctx.setLineDash([4, 6]); ctx.lineWidth = 2;
+      ctx.beginPath(); ctx.moveTo(ball.x, ball.y - ballR - 4);
+      ctx.lineTo(ball.x + keySpin * 26, ball.y - H * 0.16); ctx.stroke(); ctx.setLineDash([]);
+    }
+  }
+  if (players.length) drawScoreCard();
+  // banner
+  if (bannerTimer > 0 && bannerText) {
+    ctx.textAlign = "center";
+    ctx.font = "bold " + Math.round(u * 6) + "px system-ui, sans-serif";
+    ctx.fillStyle = "rgba(255,209,102,0.95)";
+    ctx.fillText(bannerText, W / 2, H * 0.52);
+  }
+  if (state === "aim") {
+    ctx.textAlign = "center";
+    ctx.font = Math.round(u * 3.6) + "px system-ui, sans-serif";
+    ctx.fillStyle = "rgba(220,228,255,0.75)";
+    ctx.fillText("Drag to aim — flick up to bowl!", W / 2, H * 0.955);
+  }
+  if (state === "menu") {
+    ctx.fillStyle = "rgba(3,4,12,0.82)"; ctx.fillRect(0, 0, W, H);
+    ctx.textAlign = "center";
+    ctx.fillStyle = "#ffd166";
+    ctx.font = "bold " + Math.round(u * 10.5) + "px system-ui, sans-serif";
+    ctx.fillText("🎳 BOWLING", W / 2, H * 0.26);
+    ctx.fillStyle = "#e8eaff";
+    ctx.font = Math.round(u * 4.2) + "px system-ui, sans-serif";
+    ctx.fillText("Ten frames. Strikes, spares, the lot.", W / 2, H * 0.345);
+    ctx.fillText("Drag to aim, flick up to throw —", W / 2, H * 0.385);
+    ctx.fillText("curve the flick to hook the ball.", W / 2, H * 0.42);
+    ctx.fillStyle = "#8b90b8";
+    ctx.font = Math.round(u * 3.8) + "px system-ui, sans-serif";
+    ctx.fillText("Best solo game: " + hi, W / 2, H * 0.60);
+    ctx.fillText("2 Players: pass the phone, alternate frames.", W / 2, H * 0.645);
+  }
+  if (state === "over") {
+    ctx.fillStyle = "rgba(3,4,12,0.86)"; ctx.fillRect(0, 0, W, H);
+    ctx.textAlign = "center";
+    ctx.fillStyle = "#ffd166";
+    ctx.font = "bold " + Math.round(u * 8.5) + "px system-ui, sans-serif";
+    ctx.fillText("GAME OVER", W / 2, H * 0.16);
+    let y = H * 0.26;
+    const totals = players.map(P => scoreRolls(P.rolls));
+    let winner = 0;
+    for (let i = 1; i < players.length; i++) if (totals[i] > totals[winner]) winner = i;
+    for (let i = 0; i < players.length; i++) {
+      const P = players[i];
+      ctx.fillStyle = mode === 2 && i === winner ? "#8be04e" : "#e8eaff";
+      ctx.font = "bold " + Math.round(u * 6) + "px system-ui, sans-serif";
+      ctx.fillText((mode === 2 ? P.name + ": " : "") + totals[i] + (mode === 2 && i === winner ? "  🏆" : ""), W / 2, y);
+      y += u * 7;
+      // scorecard marks
+      const marks = rollMarks(P.rolls), cum = cumulativeScores(P.rolls);
+      ctx.font = Math.round(u * 3.1) + "px system-ui, sans-serif";
+      ctx.fillStyle = "#aab4d8";
+      for (let f = 0; f < 10; f++) {
+        const fx = W * 0.06 + f * (W * 0.088);
+        ctx.fillText(marks[f].join(" ") || "·", fx + W * 0.04, y);
+        ctx.fillText(cum[f] === null ? "" : String(cum[f]), fx + W * 0.04, y + u * 4.2);
+      }
+      y += u * 13;
+    }
+    if (mode === 1) {
+      ctx.fillStyle = "#8b90b8";
+      ctx.font = Math.round(u * 4) + "px system-ui, sans-serif";
+      ctx.fillText("Best solo game: " + hi, W / 2, y + u * 2);
+    }
+    // play again buttons reuse the mode buttons
+    document.getElementById("btn1p").style.display = "";
+    document.getElementById("btn2p").style.display = "";
+    document.getElementById("btn1p").textContent = "🎳 Play again — 1 Player";
+    document.getElementById("btn2p").textContent = "🎳 Play again — 2 Players";
+  }
+}
+
+// ---------- Loop ----------
+let lastT = 0;
+function frame(t) {
+  requestAnimationFrame(frame);
+  const dt = Math.min(0.05, (t - lastT) / 1000 || 0); lastT = t;
+  if (state === "aim" && keyAim !== 0) {
+    ball.x = clamp(ball.x + keyAim * 340 * dt, laneX + ballR, laneX + laneW - ballR);
+  }
+  update(dt);
+  draw();
+}
+resize();
+newRack();
+requestAnimationFrame(frame);
+
+// ---------- QA hooks ----------
+window.__qa = {
+  scoreRolls, cumulativeScores, rollMarks,
+  state: () => state,
+  start: n => startGame(n),
+  setBallX: x => { ball.x = clamp(x, laneX + ballR, laneX + laneW - ballR); },
+  ballX: () => ball.x,
+  centerX: () => W / 2,
+  throwBall: (p, d, s) => throwBall(p, d || 0, s || 0),
+  standing: () => standingCount(),
+  rolls: i => (players[i || 0] ? players[i || 0].rolls.slice() : []),
+  totals: () => players.map(P => scoreRolls(P.rolls)),
+  frame: () => turnFrame,
+  current: () => cur,
+  ballInFrame: () => ballInFrame
+};
+</script>
+</body>
+</html>

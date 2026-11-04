@@ -24,11 +24,23 @@
     touch-action:none; user-select:none; -webkit-user-select:none;
     display:flex; align-items:center; justify-content:center; padding:0;
   }
+  .modeBtn {
+    position:fixed; left:50%; transform:translateX(-50%); z-index:10;
+    width:min(280px, 76vw); height:58px; border-radius:14px;
+    border:2px solid rgba(140,170,255,.6); background:rgba(10,12,30,.92);
+    color:#e8eaff; font-size:19px; font-weight:700; cursor:pointer;
+    touch-action:none; user-select:none; -webkit-user-select:none;
+    display:none;
+  }
+  #btn1p { top:60%; }
+  #btn2p { top:calc(60% + 72px); }
 </style>
 </head>
 <body>
 <canvas id="game"></canvas>
 <button id="muteBtn" aria-label="Toggle sound">🔊</button>
+<button class="modeBtn" id="btn1p">🏓 1 Player — vs CPU</button>
+<button class="modeBtn" id="btn2p">🏓 2 Players — same phone</button>
 <script>
 // iOS audio routing: route Web Audio to the media/playback channel (iOS 17+
 // Audio Session API) on the first gesture and inside audio init, so sound
@@ -42,9 +54,12 @@ document.addEventListener('touchstart', iosPlaybackSession, true);
 "use strict";
 /* ============================================================
    PONG — vertical pong for portrait phones.
-   Your paddle is at the bottom. Drag or use arrow keys.
-   First to 7 wins. The rival paddle is quick but beatable:
-   it only chases when the ball comes at it, and it has a top speed.
+   1 Player: your paddle is at the bottom, the machine is at the
+   top (it only chases when the ball comes at it, has a top speed,
+   and gets quicker the more you score). Drag or use arrow keys.
+   2 Players: share the phone — bottom paddle drags on the bottom
+   half (or arrow keys), top paddle on the top half (or A / D).
+   First to 7 wins.
    ============================================================ */
 
 const canvas = document.getElementById("game");
@@ -155,12 +170,16 @@ muteBtn.addEventListener("click", function (e) { e.stopPropagation(); e.preventD
 // ---------- Game state ----------
 const WIN_SCORE = 7;
 let state = "menu"; // menu | play | over
-let hi = 0; // best margin / wins count: store wins
+let mode = 1; // 1 = vs CPU, 2 = two players sharing the phone
+let hi = 0; // 1P matches won vs the CPU
 try { hi = parseInt(localStorage.getItem("pong_wins") || "0", 10) || 0; } catch (e) { hi = 0; }
+let p2wins = { p1: 0, p2: 0 }; // 2P match wins per side
+try { const w = JSON.parse(localStorage.getItem("pong_p2_wins") || "{}"); p2wins = { p1: w.p1 | 0, p2: w.p2 | 0 }; } catch (e) {}
 const player = { x: 0 };
 const ai = { x: 0 };
 const ball = { x: 0, y: 0, vx: 0, vy: 0, speed: 300 };
 let pScore = 0, aScore = 0, rally = 0, serveTimer = 0, serveDir = 1, won = false;
+let aiTargetX = 0, aiReadT = 0;
 let keys = {};
 let dragging = false;
 
@@ -190,29 +209,60 @@ function pointToAI() {
 }
 function endGame(didWin) {
   state = "over"; won = didWin;
-  if (didWin) {
-    hi++; try { localStorage.setItem("pong_wins", String(hi)); } catch (e) {}
+  if (mode === 1) {
+    if (didWin) {
+      hi++; try { localStorage.setItem("pong_wins", String(hi)); } catch (e) {}
+      sfxWin();
+    }
+  } else {
+    if (didWin) p2wins.p1++; else p2wins.p2++;
+    try { localStorage.setItem("pong_p2_wins", JSON.stringify(p2wins)); } catch (e) {}
     sfxWin();
   }
+  showModeButtons();
 }
-function startGame() { initAudio(); reset(); state = "play"; }
+const btn1p = document.getElementById("btn1p"), btn2p = document.getElementById("btn2p");
+function showModeButtons() {
+  btn1p.style.display = ""; btn2p.style.display = "";
+  btn1p.textContent = state === "over" ? "🏓 Play again — 1 Player" : "🏓 1 Player — vs CPU";
+  btn2p.textContent = state === "over" ? "🏓 Play again — 2 Players" : "🏓 2 Players — same phone";
+}
+function hideModeButtons() { btn1p.style.display = "none"; btn2p.style.display = "none"; }
+function startGame(m) {
+  initAudio();
+  if (m) mode = m;
+  hideModeButtons();
+  reset(); state = "play";
+}
+btn1p.addEventListener("click", function () { startGame(1); });
+btn2p.addEventListener("click", function () { startGame(2); });
 
 // ---------- Input ----------
+// Each pointer owns the paddle on its half of the screen, so in 2P mode
+// both players can drag at once.
+const ptrSide = new Map();
+function applyPtr(e) {
+  const side = ptrSide.get(e.pointerId);
+  if (side === "top") ai.x = clamp(e.clientX, padW / 2, W - padW / 2);
+  else if (side === "bottom") player.x = clamp(e.clientX, padW / 2, W - padW / 2);
+}
 canvas.addEventListener("pointerdown", function (e) {
   initAudio();
-  if (state !== "play") { startGame(); return; }
-  dragging = true;
-  player.x = clamp(e.clientX, padW / 2, W - padW / 2);
+  if (state !== "play") return;
+  ptrSide.set(e.pointerId, e.clientY < H / 2 && mode === 2 ? "top" : "bottom");
+  applyPtr(e);
 });
 canvas.addEventListener("pointermove", function (e) {
-  if (dragging && state === "play") player.x = clamp(e.clientX, padW / 2, W - padW / 2);
+  if (state === "play") applyPtr(e);
 });
-window.addEventListener("pointerup", function () { dragging = false; });
+function releasePtr(e) { ptrSide.delete(e.pointerId); }
+window.addEventListener("pointerup", releasePtr);
+window.addEventListener("pointercancel", releasePtr);
 window.addEventListener("keydown", function (e) {
   keys[e.key] = true;
   if (["ArrowLeft","ArrowRight"," "].includes(e.key)) e.preventDefault();
   initAudio();
-  if (state !== "play" && (e.key === " " || e.key === "Enter")) startGame();
+  if (state !== "play" && (e.key === " " || e.key === "Enter")) startGame(mode);
   if (e.key === "m" || e.key === "M") setMuted(!muted);
 });
 window.addEventListener("keyup", function (e) { keys[e.key] = false; });
@@ -220,26 +270,39 @@ window.addEventListener("keyup", function (e) { keys[e.key] = false; });
 // ---------- Update ----------
 function update(dt) {
   if (state !== "play") return;
-  // Player keys
+  // Player keys (bottom paddle): arrows. In 1P, A/D work too.
   const kSpeed = 620;
-  if (keys["ArrowLeft"] || keys["a"] || keys["A"]) player.x -= kSpeed * dt;
-  if (keys["ArrowRight"] || keys["d"] || keys["D"]) player.x += kSpeed * dt;
+  if (keys["ArrowLeft"]) player.x -= kSpeed * dt;
+  if (keys["ArrowRight"]) player.x += kSpeed * dt;
+  if (mode === 1 && (keys["a"] || keys["A"])) player.x -= kSpeed * dt;
+  if (mode === 1 && (keys["d"] || keys["D"])) player.x += kSpeed * dt;
   player.x = clamp(player.x, padW / 2, W - padW / 2);
 
-  // AI: only chases while the ball travels toward it; capped speed and a
-  // small tracking lag keep it fair and beatable.
-  const aiMax = 265 + rally * 7; // px/s, caps via rally below
-  const aiSpeed = Math.min(aiMax, 330);
-  if (ball.vy < 0) {
-    const dx = ball.x - ai.x;
-    const step = clamp(dx, -aiSpeed * dt, aiSpeed * dt);
-    if (Math.abs(dx) > 3) ai.x += step;
+  if (mode === 2) {
+    // Top paddle keys: A / D
+    if (keys["a"] || keys["A"]) ai.x -= kSpeed * dt;
+    if (keys["d"] || keys["D"]) ai.x += kSpeed * dt;
+    ai.x = clamp(ai.x, padW / 2, W - padW / 2);
   } else {
-    // drift back toward centre slowly
-    const dx = W / 2 - ai.x;
-    ai.x += clamp(dx, -90 * dt, 90 * dt);
+    // AI: only chases while the ball travels toward it; capped speed and a
+    // human-like read delay (it re-reads the ball's position ~11x a second
+    // and commits in between) keep it fair and beatable. It gets quicker
+    // the longer the rally runs and the more points you score.
+    const aiMax = 262 + rally * 5 + pScore * 12;
+    const aiSpeed = Math.min(aiMax, 345);
+    aiReadT -= dt;
+    if (ball.vy < 0 && aiReadT <= 0) { aiTargetX = ball.x; aiReadT = 0.09; }
+    if (ball.vy < 0) {
+      const dx = aiTargetX - ai.x;
+      const step = clamp(dx, -aiSpeed * dt, aiSpeed * dt);
+      if (Math.abs(dx) > 3) ai.x += step;
+    } else {
+      // drift back toward centre slowly
+      const dx = W / 2 - ai.x;
+      ai.x += clamp(dx, -90 * dt, 90 * dt);
+    }
+    ai.x = clamp(ai.x, padW / 2, W - padW / 2);
   }
-  ai.x = clamp(ai.x, padW / 2, W - padW / 2);
 
   if (serveTimer > 0) { serveTimer -= dt; return; }
 
@@ -303,13 +366,15 @@ function draw() {
   ctx.fillText(String(pScore), W / 2, H * 0.70);
   ctx.font = Math.round(u * 3.6) + "px system-ui, sans-serif";
   ctx.fillStyle = "rgba(255,120,140,0.75)";
-  ctx.fillText("RIVAL", W / 2, H * 0.30 - u * 11);
+  ctx.fillText(mode === 2 ? "P2" : "RIVAL", W / 2, H * 0.30 - u * 11);
   ctx.fillStyle = "rgba(120,220,255,0.75)";
-  ctx.fillText("YOU", W / 2, H * 0.70 + u * 11.5);
+  ctx.fillText(mode === 2 ? "P1" : "YOU", W / 2, H * 0.70 + u * 11.5);
   ctx.font = Math.round(u * 3.4) + "px system-ui, sans-serif";
   ctx.fillStyle = "#8b90b8";
   ctx.textAlign = "left";
-  ctx.fillText("First to " + WIN_SCORE + " · Matches won: " + hi, 12, 24);
+  ctx.fillText(mode === 2
+    ? "First to " + WIN_SCORE + " · Match wins — P1: " + p2wins.p1 + " · P2: " + p2wins.p2
+    : "First to " + WIN_SCORE + " · Matches won: " + hi, 12, 24);
   // paddles
   ctx.fillStyle = "#ff5d7a"; rr(ai.x - padW / 2, aiY, padW, padH, padH / 2); ctx.fill();
   ctx.fillStyle = "#59c8ff"; rr(player.x - padW / 2, playerY, padW, padH, padH / 2); ctx.fill();
@@ -334,18 +399,22 @@ function draw() {
       ctx.fillStyle = "#ffd166";
       ctx.fillText("First to " + WIN_SCORE + " wins the match.", W / 2, H * 0.53);
       ctx.fillStyle = "#8b90b8";
-      ctx.fillText("Tip: hit with the paddle's edge for sharp angles.", W / 2, H * 0.585);
+      ctx.fillText("2 Players: one thumb on each half of the screen.", W / 2, H * 0.585);
     } else {
       ctx.fillStyle = won ? "#8be04e" : "#ff5d7a";
       ctx.font = "bold " + Math.round(u * 6) + "px system-ui, sans-serif";
-      ctx.fillText(won ? "YOU WIN " + pScore + " – " + aScore : "RIVAL WINS " + aScore + " – " + pScore, W / 2, H * 0.44);
-      ctx.fillStyle = "#8b90b8";
-      ctx.font = Math.round(u * 4.2) + "px system-ui, sans-serif";
-      ctx.fillText("Matches won so far: " + hi, W / 2, H * 0.51);
+      if (mode === 2) {
+        ctx.fillText(won ? "P1 WINS " + pScore + " – " + aScore : "P2 WINS " + aScore + " – " + pScore, W / 2, H * 0.44);
+        ctx.fillStyle = "#8b90b8";
+        ctx.font = Math.round(u * 4.2) + "px system-ui, sans-serif";
+        ctx.fillText("Match wins — P1: " + p2wins.p1 + " · P2: " + p2wins.p2, W / 2, H * 0.51);
+      } else {
+        ctx.fillText(won ? "YOU WIN " + pScore + " – " + aScore : "RIVAL WINS " + aScore + " – " + pScore, W / 2, H * 0.44);
+        ctx.fillStyle = "#8b90b8";
+        ctx.font = Math.round(u * 4.2) + "px system-ui, sans-serif";
+        ctx.fillText("Matches won so far: " + hi, W / 2, H * 0.51);
+      }
     }
-    ctx.fillStyle = "#59c8ff";
-    ctx.font = "bold " + Math.round(u * 5) + "px system-ui, sans-serif";
-    ctx.fillText(state === "menu" ? "TAP TO START" : "TAP TO PLAY AGAIN", W / 2, H * 0.66);
   }
 }
 
@@ -359,7 +428,22 @@ function frame(t) {
 }
 resize();
 reset();
+showModeButtons();
 requestAnimationFrame(frame);
+
+// ---------- QA hooks ----------
+window.__qa = {
+  state: () => state,
+  mode: () => mode,
+  start: m => startGame(m || 1),
+  scores: () => [pScore, aScore],
+  ball: () => ({ x: Math.round(ball.x), y: Math.round(ball.y), vy: Math.round(ball.vy) }),
+  setPaddle: (side, x) => {
+    if (side === "top") ai.x = clamp(x, padW / 2, W - padW / 2);
+    else player.x = clamp(x, padW / 2, W - padW / 2);
+  },
+  paddleX: side => (side === "top" ? ai.x : player.x)
+};
 </script>
 </body>
 </html>

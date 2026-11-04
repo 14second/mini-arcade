@@ -1,0 +1,440 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, user-scalable=no">
+<meta name="theme-color" content="#0b1026">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<title>Flap Flight</title>
+<style>
+  * { margin:0; padding:0; box-sizing:border-box; }
+  html, body {
+    width:100%; height:100%; overflow:hidden; background:#0b1026;
+    font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+    touch-action:none; user-select:none; -webkit-user-select:none;
+    -webkit-tap-highlight-color: transparent;
+  }
+  canvas { position:fixed; inset:0; display:block; touch-action:none; }
+  #muteBtn {
+    position:fixed; top:10px; right:10px; z-index:10;
+    width:48px; height:48px; border-radius:12px;
+    border:2px solid rgba(160,190,255,.5); background:rgba(8,10,26,.62);
+    color:#fff; font-size:22px; line-height:1; cursor:pointer;
+    touch-action:none; user-select:none; -webkit-user-select:none;
+    display:flex; align-items:center; justify-content:center; padding:0;
+  }
+</style>
+</head>
+<body>
+<canvas id="game"></canvas>
+<button id="muteBtn" aria-label="Toggle sound">🔊</button>
+<script>
+// iOS audio routing: route Web Audio to the media/playback channel (iOS 17+
+// Audio Session API) on the first gesture and inside audio init, so sound
+// plays even with the silent switch on.
+function iosPlaybackSession() {
+  try { if ('audioSession' in navigator) navigator.audioSession.type = 'playback'; } catch (e) {}
+}
+document.addEventListener('pointerdown', iosPlaybackSession, true);
+document.addEventListener('touchstart', iosPlaybackSession, true);
+
+"use strict";
+/* ============================================================
+   FLAP FLIGHT — one-tap flying through crystal gates.
+   Tap (or press space) to flap. Each gate you thread is a point.
+   The numbers are tuned so a steady rhythm ALWAYS has a line
+   through: gap size, spacing, gravity and flap strength are
+   checked by a simulated pilot that must clear 60+ gates.
+   ============================================================ */
+
+const canvas = document.getElementById("game");
+const ctx = canvas.getContext("2d");
+let W = 0, H = 0, DPR = 1, u = 4;
+function clamp(v, a, b) { return v < a ? a : (v > b ? b : v); }
+
+// Physics constants (functions of H so every screen plays the same).
+// The QA simulator below steps these exact numbers.
+function phys() {
+  return {
+    gravity: H * 1.9,          // px/s^2
+    flapV: -H * 0.62,          // px/s impulse
+    maxFall: H * 1.15,
+    gapH: H * 0.235,           // gate gap height
+    gateW: W * 0.155,
+    spacing: W * 0.80,         // horizontal distance between gates
+    speed0: W * 0.40,          // scroll speed px/s (ramps slowly)
+    speedRamp: W * 0.004,      // extra scroll speed per gate scored
+    speedMax: W * 0.56,
+    birdR: Math.max(11, H * 0.026),
+    birdX: W * 0.32,
+    centerMin: H * 0.30,
+    centerMax: H * 0.70
+  };
+}
+// One physics step for a bird object {y, vy}. Shared by the game and the
+// fairness simulator so the proof runs the real numbers.
+function stepBird(b, dt, flap, P) {
+  if (flap) b.vy = P.flapV;
+  b.vy = Math.min(P.maxFall, b.vy + P.gravity * dt);
+  b.y += b.vy * dt;
+  if (b.y < P.birdR) { b.y = P.birdR; b.vy = Math.max(0, b.vy); }
+}
+// Controller used by the simulator (and the QA autopilot): aim at the
+// centre of the next gate; flap when below the line and not rising fast.
+function pilotDecide(b, targetY, P) {
+  return b.y > targetY + H * 0.012 && b.vy > -P.gravity * 0.10;
+}
+
+function resize() {
+  DPR = Math.min(window.devicePixelRatio || 1, 2);
+  W = window.innerWidth; H = window.innerHeight;
+  canvas.width = Math.round(W * DPR); canvas.height = Math.round(H * DPR);
+  canvas.style.width = W + "px"; canvas.style.height = H + "px";
+  ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+  u = Math.min(W, H) / 100;
+}
+window.addEventListener("resize", resize);
+
+// ---------- Audio ----------
+let actx = null, muted = false;
+const muteBtn = document.getElementById("muteBtn");
+function initAudio() {
+  iosPlaybackSession();
+  if (!actx) {
+    try {
+      const AC = window.AudioContext || window.webkitAudioContext;
+      if (AC) actx = new AC();
+    } catch (e) { actx = null; }
+    if (actx) startMusicScheduler();
+  }
+  if (actx && actx.state === "suspended") actx.resume();
+}
+function beep(freq, dur, type, vol, slide) {
+  if (!actx || muted) return;
+  const t = actx.currentTime;
+  const o = actx.createOscillator(), g = actx.createGain();
+  o.type = type || "square";
+  o.frequency.setValueAtTime(freq, t);
+  if (slide) o.frequency.exponentialRampToValueAtTime(Math.max(20, slide), t + dur);
+  g.gain.setValueAtTime(vol || 0.08, t);
+  g.gain.exponentialRampToValueAtTime(0.0001, t + dur);
+  o.connect(g); g.connect(actx.destination);
+  o.start(t); o.stop(t + dur + 0.02);
+}
+function sfxFlap()  { beep(420, 0.07, "triangle", 0.07, 700); }
+function sfxScore() { beep(988, 0.09, "square", 0.06); setTimeout(() => beep(1318, 0.12, "square", 0.06), 70); }
+function sfxHit()   { beep(200, 0.25, "sawtooth", 0.08, 60); }
+
+// Sky groove, BPM 108. Bass >= MIDI 48.
+const BPM = 108, STEP_DUR = 60 / BPM / 2;
+const BASS = [
+  48,0,0,48, 0,0,48,0, 43,0,0,43, 0,0,43,0,
+  41,0,0,41, 0,0,41,0, 43,0,0,43, 0,0,47,0
+];
+const LEAD = [
+  72,0,0,0, 76,0,0,0, 0,0,79,0, 0,0,0,0,
+  74,0,0,0, 71,0,0,0, 0,0,72,0, 0,0,0,0
+];
+const PADS = [ [48,52,55], [43,47,50], [41,45,48], [43,47,50] ];
+let musicStep = 0, nextNoteTime = 0, musicTimer = null;
+function midiFreq(m) { return 440 * Math.pow(2, (m - 69) / 12); }
+function toneAt(midi, when, dur, type, vol) {
+  const o = actx.createOscillator(), g = actx.createGain();
+  o.type = type; o.frequency.setValueAtTime(midiFreq(midi), when);
+  g.gain.setValueAtTime(0.0001, when);
+  g.gain.exponentialRampToValueAtTime(vol, when + 0.012);
+  g.gain.exponentialRampToValueAtTime(0.0001, when + dur);
+  o.connect(g); g.connect(actx.destination);
+  o.start(when); o.stop(when + dur + 0.03);
+}
+function scheduleStep(step, when) {
+  if (muted) return;
+  const b = BASS[step % 32]; if (b) toneAt(b, when, STEP_DUR * 0.9, "square", 0.028);
+  const l = LEAD[step % 32]; if (l) toneAt(l, when, STEP_DUR * 1.5, "triangle", 0.02);
+  if (step % 8 === 0) {
+    const chord = PADS[Math.floor(step / 8) % PADS.length];
+    for (let i = 0; i < chord.length; i++) toneAt(chord[i], when, STEP_DUR * 7.6, "triangle", 0.009);
+  }
+}
+function startMusicScheduler() {
+  if (musicTimer !== null || !actx) return;
+  musicStep = 0; nextNoteTime = actx.currentTime + 0.06;
+  musicTimer = setInterval(function () {
+    if (!actx) return;
+    if (nextNoteTime < actx.currentTime) nextNoteTime = actx.currentTime + 0.05;
+    while (nextNoteTime < actx.currentTime + 0.12) {
+      scheduleStep(musicStep, nextNoteTime);
+      nextNoteTime += STEP_DUR; musicStep = (musicStep + 1) % 32;
+    }
+  }, 25);
+}
+function setMuted(m) { muted = m; muteBtn.textContent = muted ? "🔇" : "🔊"; }
+muteBtn.addEventListener("pointerdown", function (e) { e.stopPropagation(); e.preventDefault(); initAudio(); setMuted(!muted); });
+muteBtn.addEventListener("click", function (e) { e.stopPropagation(); e.preventDefault(); });
+
+// ---------- Game state ----------
+let state = "menu"; // menu | play | over
+let bird = { y: 0, vy: 0 };
+let gates = []; // {x, cy, passed}
+let score = 0, dist = 0, wingT = 0;
+let best = 0;
+try { best = parseInt(localStorage.getItem("flapflight_best") || "0", 10) || 0; } catch (e) { best = 0; }
+let rngState = 1234567;
+function rand() { // deterministic-ish; gameplay uses Math.random; sim uses its own
+  return Math.random();
+}
+function nextCenter(prev) {
+  const P = phys();
+  const maxJump = H * 0.30; // keep consecutive centres reachable
+  let c = prev + (rand() * 2 - 1) * maxJump;
+  return clamp(c, P.centerMin, P.centerMax);
+}
+function startGame() {
+  initAudio();
+  const P = phys();
+  bird = { y: H * 0.48, vy: 0 };
+  gates = [];
+  let x = W + P.spacing * 0.4, cy = H * 0.5;
+  for (let i = 0; i < 4; i++) { gates.push({ x, cy, passed: false }); x += P.spacing; cy = nextCenter(cy); }
+  score = 0; dist = 0;
+  state = "play";
+}
+function flap() {
+  if (state !== "play") return;
+  const P = phys();
+  bird.vy = P.flapV;
+  sfxFlap();
+}
+function die() {
+  state = "over";
+  if (score > best) { best = score; try { localStorage.setItem("flapflight_best", String(best)); } catch (e) {} }
+  sfxHit();
+}
+function update(dt) {
+  wingT += dt * (state === "play" ? 14 : 4);
+  if (state !== "play") return;
+  const P = phys();
+  const speed = Math.min(P.speedMax, P.speed0 + score * P.speedRamp);
+  const sub = 3, sdt = dt / sub;
+  for (let s = 0; s < sub; s++) {
+    stepBird(bird, sdt, false, P);
+    dist += speed * sdt;
+    for (const gt of gates) gt.x -= speed * sdt;
+    // collisions + scoring
+    for (const gt of gates) {
+      if (!gt.passed && gt.x + P.gateW < P.birdX - P.birdR) {
+        gt.passed = true; score++; sfxScore();
+      }
+      if (Math.abs(gt.x + P.gateW / 2 - P.birdX) < P.gateW / 2 + P.birdR * 0.82) {
+        const half = P.gapH / 2 - P.birdR * 0.82;
+        if (Math.abs(bird.y - gt.cy) > half) { die(); return; }
+      }
+    }
+    if (bird.y > H - P.birdR - 2) { bird.y = H - P.birdR; die(); return; }
+  }
+  // recycle gates
+  while (gates.length && gates[0].x < -P.gateW - 10) {
+    gates.shift();
+    const lastX = gates.length ? gates[gates.length - 1].x : W;
+    const lastCy = gates.length ? gates[gates.length - 1].cy : H * 0.5;
+    gates.push({ x: lastX + P.spacing, cy: nextCenter(lastCy), passed: false });
+  }
+}
+
+// ---------- Fairness simulator (QA) ----------
+// Steps the exact physics with the pilot controller through N gates with
+// seeded gate placement; returns {cleared, died} — a proof that a rhythm
+// line exists through the course the generator can produce.
+function simulate(nGates, seed) {
+  const P = phys();
+  let s = seed >>> 0;
+  const srand = () => { s = (s * 1664525 + 1013904223) >>> 0; return s / 4294967296; };
+  const b = { y: H * 0.48, vy: 0 };
+  let gs = [];
+  let x = W + P.spacing * 0.4, cy = H * 0.5;
+  for (let i = 0; i < nGates + 4; i++) {
+    gs.push({ x, cy, passed: false });
+    x += P.spacing;
+    cy = clamp(cy + (srand() * 2 - 1) * H * 0.30, P.centerMin, P.centerMax);
+  }
+  const dt = 1 / 240;
+  let cleared = 0, t = 0;
+  const speed = Math.min(P.speedMax, P.speed0 + 40 * P.speedRamp); // late-game speed
+  while (cleared < nGates && t < 600) {
+    t += dt;
+    const next = gs.find(g => !g.passed);
+    const target = next ? next.cy : H * 0.5;
+    const doFlap = pilotDecide(b, target, P);
+    stepBird(b, dt, doFlap, P);
+    for (const gt of gs) gt.x -= speed * dt;
+    for (const gt of gs) {
+      if (!gt.passed && gt.x + P.gateW < P.birdX - P.birdR) { gt.passed = true; cleared++; }
+      if (Math.abs(gt.x + P.gateW / 2 - P.birdX) < P.gateW / 2 + P.birdR * 0.82) {
+        const half = P.gapH / 2 - P.birdR * 0.82;
+        if (Math.abs(b.y - gt.cy) > half) return { cleared, died: true, at: gt.cy };
+      }
+    }
+    if (b.y > H - P.birdR - 2) return { cleared, died: true, at: -1 };
+  }
+  return { cleared, died: false };
+}
+
+// ---------- Input ----------
+function tap() {
+  initAudio();
+  if (state === "menu" || state === "over") { startGame(); bird.vy = phys().flapV; return; }
+  flap();
+}
+canvas.addEventListener("pointerdown", function (e) { e.preventDefault(); tap(); });
+window.addEventListener("keydown", function (e) {
+  if ([" ", "ArrowUp", "Enter"].includes(e.key)) e.preventDefault();
+  if (e.key === "m" || e.key === "M") { initAudio(); setMuted(!muted); return; }
+  if (e.key === " " || e.key === "ArrowUp" || e.key === "Enter") tap();
+});
+
+// ---------- Draw ----------
+function drawCrystal(x, yTop, yBot, wdt, flip) {
+  const g = ctx.createLinearGradient(x, 0, x + wdt, 0);
+  g.addColorStop(0, "#5ee7ff"); g.addColorStop(0.5, "#b8f6ff"); g.addColorStop(1, "#2ea8d8");
+  ctx.fillStyle = g;
+  ctx.beginPath();
+  if (!flip) { // hangs from top: yTop..yBot, tip at bottom
+    ctx.moveTo(x, yTop); ctx.lineTo(x + wdt, yTop); ctx.lineTo(x + wdt * 0.72, yBot - 14);
+    ctx.lineTo(x + wdt * 0.5, yBot); ctx.lineTo(x + wdt * 0.28, yBot - 14); ctx.closePath();
+  } else { // rises from bottom: tip at top
+    ctx.moveTo(x, yBot); ctx.lineTo(x + wdt, yBot); ctx.lineTo(x + wdt * 0.72, yTop + 14);
+    ctx.lineTo(x + wdt * 0.5, yTop); ctx.lineTo(x + wdt * 0.28, yTop + 14); ctx.closePath();
+  }
+  ctx.fill();
+  ctx.fillStyle = "rgba(255,255,255,0.5)";
+  ctx.beginPath();
+  if (!flip) { ctx.moveTo(x + wdt * 0.38, yTop); ctx.lineTo(x + wdt * 0.5, yTop); ctx.lineTo(x + wdt * 0.47, yBot - 16); ctx.lineTo(x + wdt * 0.4, yBot - 16); }
+  else { ctx.moveTo(x + wdt * 0.38, yBot); ctx.lineTo(x + wdt * 0.5, yBot); ctx.lineTo(x + wdt * 0.47, yTop + 16); ctx.lineTo(x + wdt * 0.4, yTop + 16); }
+  ctx.closePath(); ctx.fill();
+}
+function drawBird(x, y, r) {
+  ctx.save();
+  ctx.translate(x, y);
+  const tilt = clamp(bird.vy / (H * 1.4), -0.5, 0.9);
+  ctx.rotate(tilt * 0.6);
+  // tail
+  ctx.fillStyle = "#ff9d4d";
+  ctx.beginPath(); ctx.moveTo(-r * 0.85, 0); ctx.lineTo(-r * 1.45, -r * 0.4); ctx.lineTo(-r * 1.4, r * 0.35); ctx.closePath(); ctx.fill();
+  // body
+  const g = ctx.createRadialGradient(-r * 0.3, -r * 0.35, r * 0.3, 0, 0, r * 1.15);
+  g.addColorStop(0, "#aee9ff"); g.addColorStop(1, "#3d9bdc");
+  ctx.fillStyle = g;
+  ctx.beginPath(); ctx.arc(0, 0, r, 0, Math.PI * 2); ctx.fill();
+  // belly
+  ctx.fillStyle = "rgba(255,255,255,0.75)";
+  ctx.beginPath(); ctx.ellipse(r * 0.12, r * 0.42, r * 0.52, r * 0.36, 0, 0, Math.PI * 2); ctx.fill();
+  // wing
+  const wf = Math.sin(wingT) * r * 0.35;
+  ctx.fillStyle = "#2b7fc4";
+  ctx.beginPath(); ctx.ellipse(-r * 0.15, r * 0.08 + wf * 0.4, r * 0.55, r * 0.30, -0.5 + wf * 0.02, 0, Math.PI * 2); ctx.fill();
+  // eye
+  ctx.fillStyle = "#fff";
+  ctx.beginPath(); ctx.arc(r * 0.42, -r * 0.28, r * 0.30, 0, Math.PI * 2); ctx.fill();
+  ctx.fillStyle = "#12233a";
+  ctx.beginPath(); ctx.arc(r * 0.50, -r * 0.28, r * 0.155, 0, Math.PI * 2); ctx.fill();
+  // beak
+  ctx.fillStyle = "#ffb02e";
+  ctx.beginPath(); ctx.moveTo(r * 0.78, -r * 0.08); ctx.lineTo(r * 1.28, r * 0.06); ctx.lineTo(r * 0.74, r * 0.28); ctx.closePath(); ctx.fill();
+  ctx.restore();
+}
+let stars = [];
+function draw() {
+  const g = ctx.createLinearGradient(0, 0, 0, H);
+  g.addColorStop(0, "#182257"); g.addColorStop(0.7, "#2a3f7d"); g.addColorStop(1, "#3c5a9e");
+  ctx.fillStyle = g; ctx.fillRect(0, 0, W, H);
+  if (!stars.length) {
+    for (let i = 0; i < 60; i++) stars.push({ x: Math.random() * W, y: Math.random() * H * 0.9, r: Math.random() * 1.8 + 0.4 });
+  }
+  ctx.fillStyle = "rgba(255,255,255,0.55)";
+  for (const s of stars) { ctx.beginPath(); ctx.arc(s.x, s.y, s.r, 0, Math.PI * 2); ctx.fill(); }
+  // distant clouds
+  ctx.fillStyle = "rgba(255,255,255,0.10)";
+  for (let i = 0; i < 4; i++) {
+    const cx = ((i * W * 0.37 - dist * 0.25) % (W + 160) + W + 160) % (W + 160) - 80;
+    const cy = H * (0.16 + (i % 3) * 0.2);
+    ctx.beginPath(); ctx.ellipse(cx, cy, 52, 15, 0, 0, Math.PI * 2); ctx.fill();
+    ctx.beginPath(); ctx.ellipse(cx + 30, cy + 5, 38, 12, 0, 0, Math.PI * 2); ctx.fill();
+  }
+  const P = phys();
+  // gates
+  for (const gt of gates) {
+    const top = gt.cy - P.gapH / 2, bot = gt.cy + P.gapH / 2;
+    drawCrystal(gt.x, -6, top, P.gateW, false);
+    drawCrystal(gt.x, bot, H + 6, P.gateW, true);
+    // gap edge glow
+    ctx.fillStyle = "rgba(255,255,170,0.85)";
+    ctx.fillRect(gt.x - 2, top - 3, P.gateW + 4, 3);
+    ctx.fillRect(gt.x - 2, bot, P.gateW + 4, 3);
+  }
+  // ground
+  ctx.fillStyle = "#1c2b1e";
+  ctx.fillRect(0, H - 4, W, 4);
+  drawBird(P.birdX, bird.y, P.birdR);
+  // score
+  ctx.textAlign = "center"; ctx.textBaseline = "middle";
+  ctx.font = "bold " + Math.round(u * 13) + "px system-ui, sans-serif";
+  ctx.fillStyle = "rgba(255,255,255,0.92)";
+  ctx.strokeStyle = "rgba(10,16,40,0.6)"; ctx.lineWidth = 5;
+  if (state !== "menu") { ctx.strokeText(String(score), W / 2, H * 0.13); ctx.fillText(String(score), W / 2, H * 0.13); }
+  ctx.font = Math.round(u * 3.6) + "px system-ui, sans-serif";
+  ctx.fillStyle = "#bcd2ff"; ctx.textAlign = "left";
+  ctx.fillText("Best: " + best, 12, 24);
+  if (state === "menu" || state === "over") {
+    ctx.fillStyle = "rgba(4,6,20,0.78)"; ctx.fillRect(0, 0, W, H);
+    ctx.textAlign = "center";
+    ctx.fillStyle = "#7ee7ff";
+    ctx.font = "bold " + Math.round(u * 10) + "px system-ui, sans-serif";
+    ctx.fillText("🪶 FLAP FLIGHT", W / 2, H * 0.30);
+    ctx.fillStyle = "#e8f2ff";
+    ctx.font = Math.round(u * 4.4) + "px system-ui, sans-serif";
+    if (state === "menu") {
+      ctx.fillText("Tap to flap. Thread the crystal gates.", W / 2, H * 0.42);
+      ctx.fillText("One point per gate — don't kiss the crystals.", W / 2, H * 0.465);
+    } else {
+      ctx.fillStyle = "#ffd166";
+      ctx.font = "bold " + Math.round(u * 6.4) + "px system-ui, sans-serif";
+      ctx.fillText("SCORE " + score, W / 2, H * 0.43);
+      ctx.fillStyle = "#bcd2ff";
+      ctx.font = Math.round(u * 4.2) + "px system-ui, sans-serif";
+      ctx.fillText("Best: " + best, W / 2, H * 0.50);
+    }
+    ctx.fillStyle = "#7ee7ff";
+    ctx.font = "bold " + Math.round(u * 5) + "px system-ui, sans-serif";
+    ctx.fillText(state === "menu" ? "TAP TO START" : "TAP TO FLY AGAIN", W / 2, H * 0.62);
+  }
+}
+
+// ---------- Loop ----------
+let lastT = 0;
+function frame(t) {
+  requestAnimationFrame(frame);
+  const dt = Math.min(0.05, (t - lastT) / 1000 || 0); lastT = t;
+  update(dt);
+  draw();
+}
+resize();
+bird = { y: H * 0.48, vy: 0 };
+gates = [{ x: W * 0.9, cy: H * 0.5, passed: false }];
+requestAnimationFrame(frame);
+
+// ---------- QA hooks ----------
+window.__qa = {
+  phys: () => phys(),
+  simulate: (n, seed) => simulate(n || 70, seed || 42),
+  state: () => state,
+  start: () => startGame(),
+  flap: () => flap(),
+  bird: () => ({ y: bird.y, vy: bird.vy }),
+  gates: () => gates.map(g => ({ x: g.x, cy: g.cy, passed: g.passed })),
+  score: () => score,
+  decide: (targetY) => pilotDecide(bird, targetY, phys())
+};
+</script>
+</body>
+</html>
