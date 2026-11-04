@@ -34,11 +34,15 @@ document.addEventListener('touchstart', iosPlaybackSession, true);
 "use strict";
 /* DUCK SEASON — original tap shooter. Ducks dart across the sky; tap to
    shoot. 10 ducks per round, a hit quota to advance.
-   Fairness: duck speed is capped (MAX_SPEED = 260 px/s) and every duck's
-   path guarantees a minimum on-screen time of ~1.6s (420px view / 260px/s),
-   so every duck is humanly hittable. Shots per duck: 3. */
+   Fairness: duck speed is capped (MAX_SPEED = 260 px/s, "fast" ducks are
+   clamped to the same cap) and every duck's path guarantees a minimum
+   on-screen time of ~1.6s (420px view / 260px/s), so every duck is humanly
+   hittable. Ammo is PER DUCK: each duck launched adds SHOTS_PER_DUCK = 3 to
+   the flight ammo pool, so a round always offers 3 x 10 = 30 shots against
+   a maximum quota of 10 — a perfect player (1 shot per duck) can never be
+   shot-starved. */
 const VW = 420, VH = 720;
-const MAX_SPEED = 260, MIN_AIR_TIME = 1.6;
+const MAX_SPEED = 260, MIN_AIR_TIME = 1.6, SHOTS_PER_DUCK = 3;
 const canvas = document.getElementById("game"), ctx = canvas.getContext("2d");
 let W = 0, H = 0, DPR = 1, scale = 1, ox = 0, oy = 0;
 function resize() {
@@ -85,13 +89,13 @@ function startMusic() {
 }
 
 let state = "menu", round = 1, score = 0, best = 0, hits = 0, ducksSeen = 0;
-let ducks = [], spawnTimer = 0, shotsLeft = 3, roundMsg = "", roundMsgT = 0;
+let ducks = [], spawnTimer = 0, flightAmmo = 0, roundMsg = "", roundMsgT = 0;
 let crossX = VW / 2, crossY = VH / 2;
 best = parseInt(localStorage.getItem("dsBest") || "0", 10);
 function quota() { return Math.min(10, 5 + round); }
 function duckSpeed() { return Math.min(MAX_SPEED, 95 + round * 16); }
 function resetGame() {
-  round = 1; score = 0; hits = 0; ducksSeen = 0; ducks = []; spawnTimer = 0.6; shotsLeft = 3;
+  round = 1; score = 0; hits = 0; ducksSeen = 0; ducks = []; spawnTimer = 0.6; flightAmmo = 0;
   roundMsg = "Round 1 — hit 6 of 10!"; roundMsgT = 2.2;
 }
 function spawnDuck() {
@@ -100,10 +104,11 @@ function spawnDuck() {
   const fast = Math.random() < 0.2;
   ducks.push({
     x: dir > 0 ? -40 : VW + 40, y0, amp, ph, dir,
-    speed: duckSpeed() * (fast ? 1.25 : 1), t: 0, hit: false, fall: 0,
+    speed: Math.min(MAX_SPEED, duckSpeed() * (fast ? 1.25 : 1)), t: 0, hit: false, fall: 0,
     color: ["#6b4a2a", "#3a5a3a", "#4a3a6b"][Math.floor(Math.random() * 3)]
   });
   ducksSeen++;
+  flightAmmo += SHOTS_PER_DUCK; // this duck brings its own 3 shots
 }
 function update(dt) {
   if (state !== "play") return;
@@ -118,11 +123,11 @@ function update(dt) {
     d.x += d.dir * d.speed * dt;
   }
   ducks = ducks.filter(d => d.x > -70 && d.x < VW + 70 && !(d.hit && d.fall > 1.2));
-  if (ducks.length === 0 && state === "play") shotsLeft = 3; // fresh flight, fresh shots
+  if (ducks.length === 0 && state === "play") flightAmmo = 0; // sky empty: pool resets, next duck brings its own 3
   if (ducksSeen >= 10 && ducks.length === 0) {
     if (hits >= quota()) {
       score += hits * 20 + 200; sfx("win"); round++;
-      hits = 0; ducksSeen = 0; spawnTimer = 0.8; shotsLeft = 3;
+      hits = 0; ducksSeen = 0; spawnTimer = 0.8; flightAmmo = 0;
       roundMsg = "Round " + round + " — hit " + quota() + " of 10!"; roundMsgT = 2.2;
     } else {
       state = "over"; sfx("lose");
@@ -140,8 +145,8 @@ canvas.addEventListener("pointerdown", e => {
   if (state === "over") { state = "menu"; return; }
   const mx = (e.clientX * DPR - ox) / scale, my = (e.clientY * DPR - oy) / scale;
   crossX = mx; crossY = my;
-  if (shotsLeft <= 0) return;
-  shotsLeft--; sfx("shot");
+  if (flightAmmo <= 0) return;
+  flightAmmo--; sfx("shot");
   let got = null;
   for (const d of ducks) {
     if (d.hit) continue;
@@ -151,10 +156,7 @@ canvas.addEventListener("pointerdown", e => {
   if (got) {
     got.hit = true; got.fall = 0; hits++;
     score += 50 + Math.round(got.speed / 10); sfx("hit");
-  } else if (shotsLeft === 0) {
-    // out of shots for this flight: the current ducks escape
-    for (const d of ducks) if (!d.hit) d.x = d.dir > 0 ? VW + 60 : -60;
-    shotsLeft = 3;
+  } else {
     sfx("miss");
   }
 });
@@ -176,7 +178,7 @@ function draw() {
     ctx.fillStyle = "#1d3a4a"; ctx.textAlign = "center";
     ctx.font = "bold 42px system-ui"; ctx.fillText("🦆 Duck Season", VW / 2, 150);
     ctx.font = "20px system-ui"; ctx.fillText("Tap the ducks before they escape!", VW / 2, 210);
-    ctx.fillText("3 shots per flight • 10 ducks a round", VW / 2, 240);
+    ctx.fillText("3 shots per duck • 10 ducks a round", VW / 2, 240);
     ctx.font = "18px system-ui"; ctx.fillText("Best: " + best, VW / 2, 290);
     ctx.font = "bold 22px system-ui"; ctx.fillText("Tap to start", VW / 2, 400);
     return;
@@ -204,7 +206,7 @@ function draw() {
   ctx.fillStyle = "rgba(20,60,90,.7)"; ctx.fillRect(0, 0, VW, 44);
   ctx.fillStyle = "#fff"; ctx.font = "bold 18px system-ui"; ctx.textAlign = "left";
   ctx.fillText("Round " + round, 12, 28);
-  ctx.textAlign = "center"; ctx.fillText("🦆 " + hits + "/" + quota() + "  •  Shots: " + shotsLeft, VW / 2, 28);
+  ctx.textAlign = "center"; ctx.fillText("🦆 " + hits + "/" + quota() + "  •  Shots: " + flightAmmo, VW / 2, 28);
   ctx.textAlign = "right"; ctx.fillText(score + " pts", VW - 12, 28);
   if (roundMsgT > 0) {
     ctx.fillStyle = "#fff"; ctx.font = "bold 20px system-ui"; ctx.textAlign = "center";

@@ -45,7 +45,11 @@ document.addEventListener('pointerdown', iosPlaybackSession, true);
 document.addEventListener('touchstart', iosPlaybackSession, true);
 "use strict";
 /* BARREL CLIMB — original construction-climb arcade. Climb the girders,
-   dodge rolling barrels, reach the star at the top. Each round is faster.
+   dodge rolling barrels, reach the star at the top. Progression is DISTINCT
+   LEVELS: 4 authored layouts (girder heights, ladder placements, and gap
+   positions all differ) rotate 1->2->3->4 and loop, while barrel speed and
+   spawn rate keep scaling with the level number. From level 2, barrels also
+   enter from the right edge rolling left.
    Fairness: barrel spawn interval has a hard floor (MIN_SPAWN = 0.9s) so a
    survivable gap always exists; barrels roll at capped speeds and the player
    can always jump over a barrel on a girder. */
@@ -96,37 +100,65 @@ function startMusic() {
   }, 250);
 }
 
-// Girders: 6 levels, y positions, with ladders between them.
-// Girder i spans the full width; ladders connect girder i to i+1 at given x.
-const GIRDERS = [640, 545, 450, 355, 260, 165];
-const LADDERS = [
-  [{ x: 60 }, { x: 320 }],
-  [{ x: 130 }, { x: 360 }],
-  [{ x: 40 }, { x: 280 }],
-  [{ x: 200 }, { x: 350 }],
-  [{ x: 90 }, { x: 300 }]
-]; // LADDERS[i] connects girder i to girder i+1
+// LEVELS: 4 authored layouts. Each has 6 girders (bottom -> top y),
+// per-girder SEGMENTS (walk over a gap and you — and barrels — drop to the
+// girder below), and LADDERS[i] connecting girder i to i+1. Every ladder x
+// stands on a segment of BOTH girders it joins, the bottom girder is always
+// full width, and girder spacing is >= 88px while jump apex is ~82px
+// (560^2 / (2*1900)), so ladders are the only way up. Connectivity of every
+// layout is verified by graph search (see games-wave4-fixes-STATUS.md).
+const LAYOUTS = [
+  { name: "The Yard",
+    girders: [640, 545, 450, 355, 260, 165],
+    segs: [ [[0,420]], [[0,420]], [[0,420]], [[0,420]], [[0,420]], [[0,420]] ],
+    ladders: [ [{x:60},{x:320}], [{x:130},{x:360}], [{x:40},{x:280}], [{x:200},{x:350}], [{x:90},{x:300}] ] },
+  { name: "Split Decks",
+    girders: [648, 552, 456, 360, 264, 168],
+    segs: [ [[0,420]], [[0,250]], [[170,420]], [[0,250]], [[170,420]], [[0,420]] ],
+    ladders: [ [{x:70},{x:200}], [{x:210}], [{x:200}], [{x:215}], [{x:230},{x:360}] ] },
+  { name: "Zigzag",
+    girders: [636, 546, 452, 362, 268, 172],
+    segs: [ [[0,420]], [[0,300]], [[120,420]], [[0,300]], [[110,420]], [[0,420]] ],
+    ladders: [ [{x:60},{x:240}], [{x:180}], [{x:260}], [{x:150}], [{x:200},{x:330}] ] },
+  { name: "The Gauntlet",
+    girders: [642, 550, 460, 368, 276, 178],
+    segs: [ [[0,420]], [[0,150],[270,420]], [[0,190],[300,420]], [[130,420]], [[0,260]], [[0,420]] ],
+    ladders: [ [{x:80},{x:340}], [{x:100},{x:350}], [{x:160},{x:330}], [{x:180}], [{x:90},{x:220}] ] }
+];
+let GIRDERS = LAYOUTS[0].girders, LADDERS = LAYOUTS[0].ladders, SEGS = LAYOUTS[0].segs;
+function supported(gi, cx) { return SEGS[gi].some(s => cx >= s[0] && cx <= s[1]); }
 const MIN_SPAWN = 0.9; // seconds — hard floor, never faster
-let state = "menu", round = 1, lives = 3, score = 0, best = 0;
+let state = "menu", round = 1, lives = 3, score = 0, best = 0, bestLevel = 1;
+let levelMsg = "", levelMsgT = 0;
 let px = 0, py = 0, girder = 0, vy = 0, grounded = true, face = 1, invuln = 0;
 let barrels = [], spawnTimer = 0, jumpedBarrels = new Set();
 best = parseInt(localStorage.getItem("bcBest") || "0", 10);
+bestLevel = parseInt(localStorage.getItem("bcBestLevel") || "1", 10);
+// QA-only: ?level=N starts a new game at level N (no effect without the param)
+const START_LEVEL = Math.max(1, parseInt(new URLSearchParams(location.search).get("level") || "1", 10) || 1);
 
 function resetGame() {
-  round = 1; lives = 3; score = 0; startRound();
+  round = START_LEVEL; lives = 3; score = 0; startRound();
 }
 function startRound() {
+  const L = LAYOUTS[(round - 1) % LAYOUTS.length];
+  GIRDERS = L.girders; LADDERS = L.ladders; SEGS = L.segs;
   barrels = []; jumpedBarrels = new Set(); spawnTimer = 1.2;
   girder = 0; px = 40; py = GIRDERS[0] - 36; vy = 0; grounded = true; invuln = 1;
+  levelMsg = "LEVEL " + round + " — " + L.name; levelMsgT = 2.0;
+  if (round > bestLevel) { bestLevel = round; localStorage.setItem("bcBestLevel", String(bestLevel)); }
 }
 function barrelSpeed() { return Math.min(190, 90 + round * 14); }
 function spawnInterval() { return Math.max(MIN_SPAWN, 2.2 - round * 0.16); }
 function update(dt) {
   if (state !== "play") return;
+  if (levelMsgT > 0) levelMsgT -= dt;
   let mx = 0;
   if (keys.left || touch.left) { mx -= 1; face = -1; }
   if (keys.right || touch.right) { mx += 1; face = 1; }
   px = clamp(px + mx * 170 * dt, 8, VW - 44);
+  // standing over a gap in this girder? fall to a girder below
+  if (grounded && !supported(girder, px + 18)) { grounded = false; vy = 0; }
   // ladders
   const onLadder = LADDERS[girder] && LADDERS[girder].some(l => Math.abs(px + 18 - l.x) < 22);
   const belowLadder = girder > 0 && LADDERS[girder - 1].some(l => Math.abs(px + 18 - l.x) < 22);
@@ -145,18 +177,30 @@ function update(dt) {
   }
   if (!(keys.jump || touch.jump)) jumpHeld = false;
   if (!grounded) {
+    const prevFeet = py + 36;
     vy += 1900 * dt; py += vy * dt;
-    if (py >= GIRDERS[girder] - 36) { py = GIRDERS[girder] - 36; vy = 0; grounded = true; }
+    if (vy >= 0) { // falling: land on the first crossed girder surface that has a segment here
+      const feet = py + 36, cx = px + 18;
+      for (let gi = 0; gi < GIRDERS.length; gi++) {
+        if (prevFeet <= GIRDERS[gi] + 0.5 && feet >= GIRDERS[gi] && supported(gi, cx)) {
+          girder = gi; py = GIRDERS[gi] - 36; vy = 0; grounded = true; break;
+        }
+      }
+    }
   }
   // barrels
   spawnTimer -= dt;
   if (spawnTimer <= 0) {
     spawnTimer = spawnInterval();
     const g = Math.floor(Math.random() * (GIRDERS.length - 1));
-    barrels.push({ x: -20, y: GIRDERS[g] - 26, g, dir: 1, rot: 0, id: Math.random() });
+    // from level 2 on, a second spawn point: ~40% of barrels enter from the right
+    const fromRight = round >= 2 && Math.random() < 0.4;
+    barrels.push({ x: fromRight ? VW : -26, y: GIRDERS[g] - 26, g, dir: fromRight ? -1 : 1, rot: 0, id: Math.random() });
   }
   for (const b of barrels) {
-    b.x += b.dir * barrelSpeed() * dt; b.rot += dt * 6;
+    b.x += b.dir * barrelSpeed() * dt; b.rot += dt * 6 * b.dir;
+    // over a gap in its girder? the barrel drops to the girder below
+    while (b.g > 0 && !supported(b.g, b.x + 13)) { b.g--; b.y = GIRDERS[b.g] - 26; }
     // drop down a ladder sometimes
     if (Math.random() < dt * 0.25 && b.g < GIRDERS.length - 1) {
       const ls = LADDERS[b.g];
@@ -179,7 +223,7 @@ function update(dt) {
       return;
     }
   }
-  barrels = barrels.filter(b => b.x < VW + 30);
+  barrels = barrels.filter(b => b.x > -40 && b.x < VW + 40);
   if (invuln > 0) invuln -= dt;
 }
 
@@ -225,16 +269,18 @@ function draw() {
     ctx.font = "bold 42px system-ui"; ctx.fillText("🛢️ Barrel Climb", VW / 2, 130);
     ctx.font = "20px system-ui"; ctx.fillText("Climb the girders, dodge the barrels,", VW / 2, 190);
     ctx.fillText("reach the star at the top!", VW / 2, 220);
-    ctx.font = "18px system-ui"; ctx.fillText("Best: " + best, VW / 2, 270);
+    ctx.font = "18px system-ui"; ctx.fillText("Best: " + best + "  •  Best level: " + bestLevel, VW / 2, 270);
     ctx.fillText("◀ ▶ move • ▲ ▼ ladders • ⤒ jump", VW / 2, 320);
     ctx.font = "bold 22px system-ui"; ctx.fillText("Tap to start", VW / 2, 420);
     return;
   }
   // girders + ladders
   for (let i = 0; i < GIRDERS.length; i++) {
-    ctx.fillStyle = "#8a6a2a"; ctx.fillRect(0, GIRDERS[i], VW, 14);
-    ctx.fillStyle = "#5d4517";
-    for (let x = 0; x < VW; x += 28) ctx.fillRect(x, GIRDERS[i] + 4, 14, 6);
+    for (const s of SEGS[i]) {
+      ctx.fillStyle = "#8a6a2a"; ctx.fillRect(s[0], GIRDERS[i], s[1] - s[0], 14);
+      ctx.fillStyle = "#5d4517";
+      for (let x = s[0]; x + 14 <= s[1]; x += 28) ctx.fillRect(x, GIRDERS[i] + 4, 14, 6);
+    }
   }
   for (let i = 0; i < LADDERS.length; i++) {
     for (const l of LADDERS[i]) {
@@ -263,15 +309,19 @@ function draw() {
   }
   ctx.fillStyle = "rgba(30,20,5,.7)"; ctx.fillRect(0, 0, VW, 44);
   ctx.fillStyle = "#fff"; ctx.font = "bold 18px system-ui"; ctx.textAlign = "left";
-  ctx.fillText("Round " + round, 12, 28);
+  ctx.fillText("Level " + round, 12, 28);
   ctx.textAlign = "center"; ctx.fillText("❤️".repeat(lives), VW / 2, 28);
   ctx.textAlign = "right"; ctx.fillText(score + " pts", VW - 12, 28);
+  if (levelMsgT > 0) {
+    ctx.fillStyle = "#ffd93b"; ctx.font = "bold 26px system-ui"; ctx.textAlign = "center";
+    ctx.fillText(levelMsg, VW / 2, 84);
+  }
   if (state === "over") {
     ctx.fillStyle = "rgba(0,0,0,.6)"; ctx.fillRect(0, 0, VW, VH);
     ctx.fillStyle = "#fff"; ctx.textAlign = "center";
     ctx.font = "bold 38px system-ui"; ctx.fillText("Squashed!", VW / 2, VH / 2 - 20);
     ctx.font = "20px system-ui";
-    ctx.fillText("Score: " + score + "  •  Best: " + best, VW / 2, VH / 2 + 20);
+    ctx.fillText("Score: " + score + "  •  Reached level " + round, VW / 2, VH / 2 + 20);
     ctx.fillText("Tap to return to menu", VW / 2, VH / 2 + 60);
   }
 }
