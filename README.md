@@ -37,4 +37,17 @@ Tiny browser games, each a single dependency-free HTML file. Play them in any br
 - **Micro Mayhem** — 4-second microgames, faster every round.
 - **Tilt Maze** — roll the marble to the gate; mind the gaps in the floor.
 
+- **Gyro Labyrinth** — tilt your phone (or drag) to roll the steel ball to the cup; mind the holes.
+- **Kart Circuit** — top-down kart racing on 3 tracks with item boxes.
+- **Deep Signal** — explore a station, earn the blaster and double jump, drop the boss.
+- **Critter Clash** — catch a team of three original critters and climb the trainer ladder.
+- **Blockfall** — the falling-block stacker: clear rows, chase the quad.
+- **Home Run Derby** — read the pitch, time the swing, clear the fence.
+- **Gem Columns** — drop gem trios, cycle their order, match three in any direction.
+- **Bubble Wing** — cute scrolling shooter: pop the bases, scoop stars, shop up.
+- **Pocket Fairway** — 9 holes of mini golf: drag to aim, tap to lock power.
+- **Bomb Squad** — blast soft blocks, zap every critter, slip out the exit.
+- **Panel Pop** — swap tiles in a rising stack; chains multiply, don't top out.
+- **Wave Rider** — jet-ski slalom: thread every buoy gate on its marked side.
+
 Every game has synthesized music and sound effects generated in code — no audio files.

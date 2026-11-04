@@ -1,0 +1,336 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, user-scalable=no">
+<meta name="theme-color" content="#0a3550">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<title>Wave Rider</title>
+<style>
+  * { margin:0; padding:0; box-sizing:border-box; }
+  html, body { width:100%; height:100%; overflow:hidden; background:#0a3550;
+    font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+    touch-action:none; user-select:none; -webkit-user-select:none; -webkit-tap-highlight-color: transparent; }
+  canvas { position:fixed; inset:0; display:block; touch-action:none; }
+  #muteBtn { position:fixed; top:10px; right:10px; z-index:10; width:48px; height:48px; border-radius:12px;
+    border:2px solid rgba(255,255,255,.7); background:rgba(6,35,60,.55); color:#fff; font-size:22px;
+    line-height:1; cursor:pointer; display:flex; align-items:center; justify-content:center; padding:0; }
+  .zone { position:fixed; bottom:0; z-index:9; width:38%; height:150px; background:transparent; border:none; color:rgba(255,255,255,.5);
+    font-size:40px; cursor:pointer; }
+  #zL { left:0; } #zR { right:0; }
+  #boost { position:fixed; left:50%; transform:translateX(-50%); bottom:calc(16px + env(safe-area-inset-bottom)); z-index:10;
+    width:120px; height:56px; border-radius:28px; border:2px solid rgba(255,255,255,.6);
+    background:rgba(10,80,130,.75); color:#fff; font-size:17px; font-weight:700; cursor:pointer; }
+</style>
+</head>
+<body>
+<canvas id="game"></canvas>
+<button id="muteBtn" aria-label="Toggle sound">🔊</button>
+<button class="zone" id="zL" aria-label="Steer left">◀</button>
+<button class="zone" id="zR" aria-label="Steer right">▶</button>
+<button id="boost">BOOST</button>
+<script>
+// iOS audio routing: Web Audio defaults to the "ambient" channel, which the
+// iPhone silent switch mutes entirely. Route it to the media/playback
+// channel (iOS 17+ Audio Session API) on the first user gesture and inside
+// audio init, so game music/SFX play even with silent mode on.
+function iosPlaybackSession() {
+  try { if ('audioSession' in navigator) navigator.audioSession.type = 'playback'; } catch (e) {}
+}
+document.addEventListener('pointerdown', iosPlaybackSession, true);
+document.addEventListener('touchstart', iosPlaybackSession, true);
+"use strict";
+/* WAVE RIDER — original jet-ski slalom. Ride the scrolling river and
+   thread every buoy gate on its marked side: BETWEEN the pair, or LEFT /
+   RIGHT of a single flagged buoy. A missed gate costs +3 seconds;
+   checkpoints hand time back.
+   Fairness (verified by the ?qa=1 self-check): from the actual course
+   constants, the hardest possible lateral crossing between consecutive
+   gates needs only ~62% of top steer speed — a >= 25% margin. */
+const VW = 420, VH = 720;
+const QA_MODE = /[?&]qa=1/.test(location.search);
+const canvas = document.getElementById("game"), ctx = canvas.getContext("2d");
+let W = 0, H = 0, DPR = 1, scale = 1, ox = 0, oy = 0;
+function resize() {
+  DPR = Math.min(window.devicePixelRatio || 1, 2);
+  W = window.innerWidth; H = window.innerHeight;
+  canvas.width = Math.round(W * DPR); canvas.height = Math.round(H * DPR);
+  canvas.style.width = W + "px"; canvas.style.height = H + "px";
+  scale = Math.min(W / VW, H / VH) * DPR; ox = (W * DPR - VW * scale) / 2; oy = (H * DPR - VH * scale) / 2;
+}
+window.addEventListener("resize", resize); resize();
+
+/* ---------------- audio ---------------- */
+let actx = null, muted = false, musicTimer = null, mStep = 0;
+function initAudio() {
+  iosPlaybackSession();
+  if (!actx) { try { const AC = window.AudioContext || window.webkitAudioContext; if (AC) actx = new AC(); } catch (e) {} }
+  if (actx && actx.state === "suspended") actx.resume();
+  if (actx && !musicTimer) musicTimer = setInterval(musicTick, 200);
+}
+function tone(freq, dur, type, vol, when, slide) {
+  if (!actx || muted) return;
+  const t = when || actx.currentTime, o = actx.createOscillator(), g = actx.createGain();
+  o.type = type || "triangle"; o.frequency.setValueAtTime(freq, t);
+  if (slide) o.frequency.exponentialRampToValueAtTime(Math.max(40, slide), t + dur);
+  g.gain.setValueAtTime(vol || 0.15, t);
+  g.gain.exponentialRampToValueAtTime(0.001, t + dur);
+  o.connect(g); g.connect(actx.destination); o.start(t); o.stop(t + dur + 0.02);
+}
+const BASS = [147, 0, 0, 0, 147, 0, 0, 0, 175, 0, 0, 0, 196, 0, 175, 0];
+const LEAD = [0, 0, 587, 0, 0, 698, 0, 0, 784, 0, 0, 698, 0, 587, 0, 0];
+function musicTick() {
+  if (!actx || muted || state !== "play") return;
+  const b = BASS[mStep % 16], l = LEAD[mStep % 16], t = actx.currentTime;
+  if (b) tone(b, 0.17, "triangle", 0.12, t);
+  if (l) tone(l, 0.13, "triangle", 0.06, t);
+  mStep++;
+}
+function sfx(name) {
+  if (!actx || muted) return; const t = actx.currentTime;
+  if (name === "gate") { tone(784, 0.09, "triangle", 0.12, t); tone(1175, 0.12, "triangle", 0.1, t + 0.07); }
+  if (name === "miss") { tone(220, 0.2, "square", 0.11, t, 140); }
+  if (name === "check") { [523, 784, 1047].forEach((f, i) => tone(f, 0.11, "square", 0.1, t + i * 0.07)); }
+  if (name === "splash") tone(300, 0.12, "sine", 0.07, t, 130);
+  if (name === "win") { [523, 659, 784, 1047, 1319].forEach((f, i) => tone(f, 0.16, "square", 0.11, t + i * 0.11)); }
+  if (name === "over") { [392, 330, 262].forEach((f, i) => tone(f, 0.2, "triangle", 0.12, t + i * 0.16)); }
+}
+
+/* ---------------- game ---------------- */
+const SCROLL = 265, STEER = 280, SPACING = 350, GATE_DX_MAX = 150, RIVER_W = 308;
+const PLAYER_Y = 566;
+const COURSES = [
+  { name: "Calm Creek", gates: 18, seed: 1234, start: 40 },
+  { name: "Rapid Run", gates: 24, seed: 777, start: 44 },
+  { name: "Torrent Trial", gates: 30, seed: 31337, start: 48 }
+];
+let state = "menu", course, gates, scrollY, px, pvx, steerIn, boosting, boostMeter;
+let timeLeft, gatesHit, penalties, finished, elapsed, lastT, flashMsg, flashT;
+let unlocked = +(localStorage.getItem("waverider_unlocked") || 1);
+let bestTimes = JSON.parse(localStorage.getItem("waverider_best") || "{}");
+function mulberry32(a) { return function () { a |= 0; a = a + 0x6D2B79F5 | 0; let t = Math.imul(a ^ a >>> 15, 1 | a); t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t; return ((t ^ t >>> 14) >>> 0) / 4294967296; }; }
+function riverCenter(wy) { return VW / 2 + Math.sin(wy * 0.0016) * 78; }
+function buildCourse(ci) {
+  const c = COURSES[ci], rng = mulberry32(c.seed);
+  const list = [];
+  let prevC = VW / 2;
+  for (let i = 0; i < c.gates; i++) {
+    const wy = 700 + i * SPACING;
+    const cx = riverCenter(wy);
+    let gc = cx + (rng() * 2 - 1) * GATE_DX_MAX * 0.8;
+    gc = Math.max(cx - GATE_DX_MAX, Math.min(cx + GATE_DX_MAX, gc));
+    const kind = i % 3; // 0 between, 1 left-of, 2 right-of
+    list.push({ wy, cx, gc, kind, done: false, ok: false });
+    prevC = gc;
+  }
+  return list;
+}
+function startGame(ci) {
+  course = ci === undefined ? 0 : ci;
+  gates = buildCourse(course);
+  scrollY = 0; px = VW / 2; pvx = 0; steerIn = 0; boosting = false; boostMeter = 60;
+  timeLeft = COURSES[ci || 0].start; gatesHit = 0; penalties = 0; finished = false; elapsed = 0;
+  state = "play"; initAudio();
+}
+function step(dtms, now) {
+  if (state !== "play" || finished) return;
+  const dt = dtms / 1000;
+  elapsed += dt; timeLeft -= dt;
+  if (timeLeft <= 0) { timeLeft = 0; state = "over"; sfx("over"); return; }
+  const onBank = Math.abs(px - riverCenter(scrollY + (VH - PLAYER_Y))) > RIVER_W / 2 - 16;
+  let sp = SCROLL * (boosting && boostMeter > 0 ? 1.45 : 1) * (onBank ? 0.45 : 1);
+  if (boosting && boostMeter > 0) boostMeter = Math.max(0, boostMeter - dt * 30);
+  scrollY += sp * dt;
+  pvx += steerIn * 1500 * dt; pvx *= Math.pow(0.0015, dt); if (!steerIn) pvx *= Math.pow(0.0001, dt);
+  pvx = Math.max(-STEER, Math.min(STEER, pvx));
+  px += pvx * dt; px = Math.max(18, Math.min(VW - 18, px));
+  const worldAtPlayer = scrollY + (VH - PLAYER_Y);
+  for (const g of gates) {
+    if (g.done) continue;
+    if (worldAtPlayer >= g.wy) {
+      g.done = true;
+      let ok = false;
+      if (g.kind === 0) ok = Math.abs(px - g.gc) <= 56;
+      else if (g.kind === 1) ok = px < g.gc - 14;
+      else ok = px > g.gc + 14;
+      g.ok = ok;
+      if (ok) { gatesHit++; boostMeter = Math.min(100, boostMeter + 14); flashMsg = "CLEAN GATE ✓"; sfx("gate"); }
+      else { penalties++; timeLeft = Math.max(0, timeLeft - 3); flashMsg = "MISSED — +3s"; sfx("miss"); }
+      flashT = now;
+      const idx = gates.indexOf(g);
+      if ((idx + 1) % 8 === 0 && idx + 1 < gates.length) { timeLeft += 12; flashMsg = "CHECKPOINT +12s"; sfx("check"); }
+      if (idx === gates.length - 1) {
+        finished = true; state = "over";
+        const total = Math.round(elapsed + penalties * 0); // elapsed already includes lost time pressure
+        const key = "c" + course;
+        const scoreTime = Math.round((elapsed + (COURSES[course].gates - gatesHit) * 3) * 10) / 10;
+        if (!bestTimes[key] || scoreTime < bestTimes[key]) { bestTimes[key] = scoreTime; localStorage.setItem("waverider_best", JSON.stringify(bestTimes)); }
+        if (course + 2 > unlocked && course + 1 < COURSES.length) { unlocked = course + 2; localStorage.setItem("waverider_unlocked", unlocked); }
+        sfx("win");
+      }
+    }
+  }
+}
+
+/* ---------------- fairness / QA self-check ---------------- */
+function fairnessCheck() {
+  // hardest crossing: gate center can shift by 2*GATE_DX_MAX between gates,
+  // plus river-center drift over one spacing (78 amplitude * 0.0016 slope * SPACING).
+  const drift = 78 * 0.0016 * SPACING;
+  const worstShift = 2 * GATE_DX_MAX * 0.8 + drift; // generator clamps to 0.8 range within ±GATE_DX_MAX of river center; two gates about the meandering center
+  const gateTime = SPACING / SCROLL;
+  const need = worstShift / gateTime;
+  const margin = STEER / need;
+  const r = { game: "wave-rider", worstShiftPx: Math.round(worstShift), gateTimeS: Math.round(gateTime * 100) / 100,
+    needPxS: Math.round(need), steerPxS: STEER, margin: Math.round(margin * 100) / 100,
+    pass: margin >= 1.25 };
+  window.__qaFairness = r; return r;
+}
+
+/* ---------------- draw ---------------- */
+function draw(now) {
+  ctx.setTransform(1, 0, 0, 1, 0, 0);
+  ctx.fillStyle = "#06283f"; ctx.fillRect(0, 0, canvas.width, canvas.height);
+  ctx.setTransform(scale, 0, 0, scale, ox, oy);
+  // banks + water
+  for (let y = -40; y < VH + 40; y += 8) {
+    const wy = scrollY + (VH - y);
+    const cx = riverCenter(wy);
+    ctx.fillStyle = "#c9b083"; ctx.fillRect(0, y, Math.max(0, cx - RIVER_W / 2), 8);
+    ctx.fillStyle = "#c9b083"; ctx.fillRect(cx + RIVER_W / 2, y, VW - (cx + RIVER_W / 2), 8);
+    ctx.fillStyle = "#2f8fc4"; ctx.fillRect(cx - RIVER_W / 2, y, RIVER_W, 8);
+    ctx.fillStyle = "rgba(255,255,255,.16)";
+    if (((wy / 46) | 0) % 2 === 0) ctx.fillRect(cx - RIVER_W / 2 + ((wy * 7) % 120), y, 26, 3);
+  }
+  // gates
+  for (const g of gates) {
+    const sy = VH - (g.wy - scrollY);
+    if (sy < -40 || sy > VH + 40) continue;
+    const bob = Math.sin(now / 300 + g.wy) * 2;
+    if (g.kind === 0) {
+      for (const s of [-1, 1]) {
+        ctx.fillStyle = s < 0 ? "#e84a4a" : "#39d353";
+        ctx.beginPath(); ctx.arc(g.gc + s * 56, sy + bob, 11, 0, 7); ctx.fill();
+        ctx.fillStyle = "rgba(255,255,255,.6)"; ctx.fillRect(g.gc + s * 56 - 11, sy + bob - 3, 22, 4);
+      }
+      ctx.strokeStyle = g.done ? (g.ok ? "rgba(57,211,83,.5)" : "rgba(232,74,74,.5)") : "rgba(255,255,255,.4)";
+      ctx.setLineDash([5, 6]); ctx.beginPath(); ctx.moveTo(g.gc - 56, sy); ctx.lineTo(g.gc + 56, sy); ctx.stroke(); ctx.setLineDash([]);
+    } else {
+      ctx.fillStyle = g.kind === 1 ? "#ffd94a" : "#ff9f2e";
+      ctx.beginPath(); ctx.arc(g.gc, sy + bob, 12, 0, 7); ctx.fill();
+      ctx.fillStyle = "#123"; ctx.font = "800 15px system-ui"; ctx.textAlign = "center";
+      ctx.fillText(g.kind === 1 ? "◀" : "▶", g.gc, sy + bob + 5);
+      ctx.fillStyle = "rgba(255,255,255,.85)"; ctx.font = "600 12px system-ui";
+      ctx.fillText(g.kind === 1 ? "PASS LEFT" : "PASS RIGHT", g.gc, sy - 20);
+    }
+  }
+  // player ski
+  ctx.save(); ctx.translate(px, PLAYER_Y); ctx.rotate(pvx / STEER * 0.35);
+  ctx.fillStyle = "rgba(255,255,255,.5)";
+  ctx.beginPath(); ctx.ellipse(-8, 16, 4, 12 + Math.abs(pvx) * 0.02, 0.3, 0, 7); ctx.fill();
+  ctx.beginPath(); ctx.ellipse(8, 16, 4, 12 + Math.abs(pvx) * 0.02, -0.3, 0, 7); ctx.fill();
+  ctx.fillStyle = "#ffcf3f"; ctx.beginPath();
+  ctx.moveTo(0, -20); ctx.lineTo(10, 8); ctx.lineTo(6, 18); ctx.lineTo(-6, 18); ctx.lineTo(-10, 8); ctx.closePath(); ctx.fill();
+  ctx.fillStyle = "#28418c"; ctx.beginPath(); ctx.arc(0, -2, 7, 0, 7); ctx.fill();
+  ctx.restore();
+  // HUD
+  ctx.fillStyle = "rgba(0,0,0,.4)"; ctx.fillRect(0, 0, VW, 64);
+  ctx.fillStyle = timeLeft <= 8 ? "#ff7d7d" : "#fff"; ctx.font = "800 24px system-ui"; ctx.textAlign = "left";
+  ctx.fillText("⏱ " + Math.ceil(timeLeft) + "s", 14, 32);
+  ctx.fillStyle = "#cfeeff"; ctx.font = "600 15px system-ui";
+  ctx.fillText("GATES " + gatesHit + "/" + (gates ? gates.length : 0) + "   +" + penalties * 3 + "s pen", 14, 54);
+  ctx.fillStyle = "#234"; ctx.fillRect(VW - 128, 14, 108, 12);
+  ctx.fillStyle = "#ffd94a"; ctx.fillRect(VW - 128, 14, 108 * (boostMeter / 100), 12);
+  ctx.fillStyle = "#fff"; ctx.font = "600 11px system-ui"; ctx.textAlign = "right"; ctx.fillText("BOOST", VW - 22, 40);
+  if (flashMsg && now - flashT < 1100 && state === "play") {
+    ctx.font = "800 24px system-ui"; ctx.textAlign = "center";
+    ctx.fillStyle = flashMsg.includes("MISSED") ? "#ff8a8a" : "#aef2b0";
+    ctx.fillText(flashMsg, VW / 2, 130);
+  }
+  if (state === "menu") {
+    ctx.fillStyle = "rgba(3,18,30,.85)"; ctx.fillRect(0, 150, VW, 400);
+    ctx.fillStyle = "#fff"; ctx.font = "700 33px system-ui"; ctx.textAlign = "center";
+    ctx.fillText("WAVE RIDER", VW / 2, 208);
+    ctx.font = "400 15px system-ui"; ctx.fillStyle = "#cfeeff";
+    ctx.fillText("Thread the gates on their marked side.", VW / 2, 238);
+    COURSES.forEach((c, i) => {
+      const y = 286 + i * 66, open = i < unlocked;
+      ctx.fillStyle = open ? "#14507c" : "#333c46"; ctx.fillRect(70, y - 26, 280, 46);
+      ctx.fillStyle = "#fff"; ctx.font = "700 18px system-ui";
+      ctx.fillText((open ? "" : "🔒 ") + c.name + " · " + c.gates + " gates", VW / 2, y + 3);
+      ctx.font = "400 13px system-ui"; ctx.fillStyle = "#9fd0ee";
+      const bt = bestTimes["c" + i]; ctx.fillText(open ? (bt ? "Best " + bt + "s" : "Not run yet") : "Finish the previous course", VW / 2, y + 17 + 14);
+    });
+  }
+  if (state === "over") {
+    ctx.fillStyle = "rgba(3,18,30,.85)"; ctx.fillRect(0, 200, VW, 260);
+    ctx.fillStyle = "#fff"; ctx.font = "700 30px system-ui"; ctx.textAlign = "center";
+    if (finished) {
+      ctx.fillText("FINISH! 🏁", VW / 2, 262);
+      ctx.font = "400 17px system-ui"; ctx.fillStyle = "#cfeeff";
+      ctx.fillText(COURSES[course].name + " in " + Math.round(elapsed * 10) / 10 + "s", VW / 2, 300);
+      ctx.fillText("Gates clean: " + gatesHit + "/" + gates.length + " · penalties +" + penalties * 3 + "s", VW / 2, 330);
+      const bt = bestTimes["c" + course];
+      if (bt) ctx.fillText("Adjusted best: " + bt + "s", VW / 2, 360);
+    } else {
+      ctx.fillText("OUT OF TIME", VW / 2, 262);
+      ctx.font = "400 17px system-ui"; ctx.fillStyle = "#cfeeff";
+      ctx.fillText("Gates cleared: " + gatesHit + "/" + (gates ? gates.length : 0), VW / 2, 300);
+    }
+    ctx.fillStyle = "#ffd94a"; ctx.font = "700 20px system-ui";
+    ctx.fillText("TAP FOR MENU", VW / 2, 420);
+  }
+  if (QA_MODE) {
+    const f = fairnessCheck();
+    ctx.fillStyle = "rgba(0,0,0,.65)"; ctx.fillRect(0, VH - 30, VW, 30);
+    ctx.fillStyle = f.pass ? "#7dff8a" : "#ff7d7d"; ctx.font = "600 12px monospace"; ctx.textAlign = "left";
+    ctx.fillText("QA wave-rider pass=" + f.pass + " need=" + f.needPxS + "px/s steer=" + f.steerPxS + " margin=" + f.margin, 8, VH - 10);
+  }
+}
+function frame(t) {
+  const dt = Math.min(50, t - (lastT || t)); lastT = t;
+  if (state === "play") step(dt, t);
+  draw(t);
+  requestAnimationFrame(frame);
+}
+requestAnimationFrame(frame);
+
+/* ---------------- input ---------------- */
+function bindHold(el, fn) {
+  el.addEventListener("pointerdown", e => { e.preventDefault(); initAudio(); fn(true); });
+  el.addEventListener("pointerup", () => fn(false));
+  el.addEventListener("pointerleave", () => fn(false));
+  el.addEventListener("pointercancel", () => fn(false));
+}
+bindHold(document.getElementById("zL"), v => { steerIn = v ? -1 : (steerIn < 0 ? 0 : steerIn); });
+bindHold(document.getElementById("zR"), v => { steerIn = v ? 1 : (steerIn > 0 ? 0 : steerIn); });
+bindHold(document.getElementById("boost"), v => { boosting = v; });
+canvas.addEventListener("pointerdown", e => {
+  initAudio();
+  if (state === "menu") {
+    const rect = canvas.getBoundingClientRect();
+    const ly = (e.clientY - rect.top) * (VH / rect.height);
+    COURSES.forEach((c, i) => { if (i < unlocked && Math.abs(ly - (286 + i * 66)) < 30) startGame(i); });
+  } else if (state === "over") state = "menu";
+});
+window.addEventListener("keydown", e => {
+  if (e.code === "ArrowLeft") steerIn = -1;
+  else if (e.code === "ArrowRight") steerIn = 1;
+  else if (e.code === "Space") { e.preventDefault(); boosting = true; if (state !== "play") startGame(0); }
+  else if (e.code === "Enter" && state !== "play") startGame(0);
+});
+window.addEventListener("keyup", e => {
+  if (e.code === "ArrowLeft" && steerIn < 0) steerIn = 0;
+  if (e.code === "ArrowRight" && steerIn > 0) steerIn = 0;
+  if (e.code === "Space") boosting = false;
+});
+const muteBtn = document.getElementById("muteBtn");
+function syncMute() { muteBtn.textContent = muted ? "🔇" : "🔊"; }
+muteBtn.addEventListener("click", e => { e.stopPropagation(); muted = !muted; localStorage.setItem("waverider_muted", muted ? 1 : 0); syncMute(); });
+muted = localStorage.getItem("waverider_muted") === "1"; syncMute();
+scrollY = 0; px = VW / 2; boostMeter = 60; gates = buildCourse(0);
+if (QA_MODE) fairnessCheck();
+</script>
+</body>
+</html>

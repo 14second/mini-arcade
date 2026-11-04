@@ -1,0 +1,558 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, user-scalable=no">
+<meta name="theme-color" content="#0b1220">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<title>Deep Signal</title>
+<style>
+  * { margin:0; padding:0; box-sizing:border-box; }
+  html, body { width:100%; height:100%; overflow:hidden; background:#0b1220;
+    font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+    touch-action:none; user-select:none; -webkit-user-select:none; -webkit-tap-highlight-color: transparent; }
+  canvas { position:fixed; inset:0; display:block; touch-action:none; }
+  #muteBtn { position:fixed; top:10px; right:10px; z-index:10; width:48px; height:48px; border-radius:12px;
+    border:2px solid rgba(255,255,255,.7); background:rgba(8,18,35,.55); color:#fff; font-size:22px;
+    line-height:1; cursor:pointer; display:flex; align-items:center; justify-content:center; padding:0; }
+  #pad { position:fixed; left:0; right:0; bottom:0; z-index:10; display:flex; justify-content:space-between; align-items:flex-end;
+    padding:10px 12px calc(10px + env(safe-area-inset-bottom)); }
+  .cluster { display:flex; gap:10px; }
+  #pad button { width:62px; height:60px; border-radius:16px; border:2px solid rgba(255,255,255,.45);
+    background:rgba(15,35,60,.8); color:#fff; font-size:22px; cursor:pointer; padding:0; }
+  #pad button:active { background:rgba(45,85,140,.9); }
+  #fireBtn { background:rgba(140,45,30,.85); }
+  #mapBtn { position:fixed; top:66px; right:10px; z-index:10; width:48px; height:48px; border-radius:12px;
+    border:2px solid rgba(255,255,255,.5); background:rgba(8,18,35,.55); color:#fff; font-size:20px; cursor:pointer; }
+</style>
+</head>
+<body>
+<canvas id="game"></canvas>
+<button id="muteBtn" aria-label="Toggle sound">🔊</button>
+<button id="mapBtn" aria-label="Map">🗺</button>
+<div id="pad">
+  <div class="cluster">
+    <button id="bL" aria-label="Left">◀</button>
+    <button id="bR" aria-label="Right">▶</button>
+  </div>
+  <div class="cluster">
+    <button id="fireBtn" aria-label="Shoot">🔥</button>
+    <button id="jumpBtn" aria-label="Jump">⬆</button>
+  </div>
+</div>
+<script>
+// iOS audio routing: Web Audio defaults to the "ambient" channel, which the
+// iPhone silent switch mutes entirely. Route it to the media/playback
+// channel (iOS 17+ Audio Session API) on the first user gesture and inside
+// audio init, so game music/SFX play even with silent mode on.
+function iosPlaybackSession() {
+  try { if ('audioSession' in navigator) navigator.audioSession.type = 'playback'; } catch (e) {}
+}
+document.addEventListener('pointerdown', iosPlaybackSession, true);
+document.addEventListener('touchstart', iosPlaybackSession, true);
+"use strict";
+/* DEEP SIGNAL — original exploration platformer. One connected station,
+   two gating upgrades: the BLASTER (cracks cracked blocks) opens the
+   way to the DOUBLE JUMP, and only both together open the boss door.
+   Fairness (verified by the ?qa=1 self-check): a physics-aware search
+   over the real map (walk / fall / 3-tile jump, 6 with double jump)
+   proves the blaster is reachable with no upgrades, the double jump is
+   reachable with only the blaster, and the boss room needs — and is
+   reachable with — both. */
+const VW = 420, VH = 720, TILE = 30;
+const QA_MODE = /[?&]qa=1/.test(location.search);
+const canvas = document.getElementById("game"), ctx = canvas.getContext("2d");
+let W = 0, H = 0, DPR = 1, scale = 1, ox = 0, oy = 0;
+function resize() {
+  DPR = Math.min(window.devicePixelRatio || 1, 2);
+  W = window.innerWidth; H = window.innerHeight;
+  canvas.width = Math.round(W * DPR); canvas.height = Math.round(H * DPR);
+  canvas.style.width = W + "px"; canvas.style.height = H + "px";
+  scale = Math.min(W / VW, H / VH) * DPR; ox = (W * DPR - VW * scale) / 2; oy = (H * DPR - VH * scale) / 2;
+}
+window.addEventListener("resize", resize); resize();
+
+/* ---------------- audio ---------------- */
+let actx = null, muted = false, musicTimer = null, mStep = 0;
+function initAudio() {
+  iosPlaybackSession();
+  if (!actx) { try { const AC = window.AudioContext || window.webkitAudioContext; if (AC) actx = new AC(); } catch (e) {} }
+  if (actx && actx.state === "suspended") actx.resume();
+  if (actx && !musicTimer) musicTimer = setInterval(musicTick, 200);
+}
+function tone(freq, dur, type, vol, when, slide) {
+  if (!actx || muted) return;
+  const t = when || actx.currentTime, o = actx.createOscillator(), g = actx.createGain();
+  o.type = type || "triangle"; o.frequency.setValueAtTime(freq, t);
+  if (slide) o.frequency.exponentialRampToValueAtTime(Math.max(40, slide), t + dur);
+  g.gain.setValueAtTime(vol || 0.15, t);
+  g.gain.exponentialRampToValueAtTime(0.001, t + dur);
+  o.connect(g); g.connect(actx.destination); o.start(t); o.stop(t + dur + 0.02);
+}
+const BASS = [131, 0, 0, 0, 131, 0, 0, 0, 110, 0, 0, 0, 123, 0, 0, 0];
+const LEAD = [0, 0, 330, 0, 0, 392, 0, 0, 440, 0, 0, 392, 0, 330, 0, 0];
+function musicTick() {
+  if (!actx || muted || state !== "play") return;
+  const b = BASS[mStep % 16], l = LEAD[mStep % 16], t = actx.currentTime;
+  if (b) tone(b, 0.17, "triangle", 0.13, t);
+  if (l) tone(l, 0.14, "triangle", 0.05, t);
+  mStep++;
+}
+function sfx(name) {
+  if (!actx || muted) return; const t = actx.currentTime;
+  if (name === "jump") tone(300, 0.12, "square", 0.07, t, 560);
+  if (name === "djump") { tone(420, 0.1, "square", 0.07, t, 700); }
+  if (name === "pew") tone(840, 0.07, "square", 0.06, t, 420);
+  if (name === "crack") { tone(150, 0.14, "square", 0.14, t, 70); }
+  if (name === "hurt") tone(200, 0.18, "square", 0.13, t, 90);
+  if (name === "pickup") { [587, 784, 1175].forEach((f, i) => tone(f, 0.11, "square", 0.1, t + i * 0.07)); }
+  if (name === "boom") { tone(80, 0.4, "square", 0.2, t, 40); [523, 659, 880].forEach((f, i) => tone(f, 0.12, "triangle", 0.1, t + 0.1 + i * 0.08)); }
+  if (name === "door") { [440, 587, 880].forEach((f, i) => tone(f, 0.1, "triangle", 0.1, t + i * 0.06)); }
+  if (name === "die") { [330, 262, 196, 131].forEach((f, i) => tone(f, 0.16, "triangle", 0.12, t + i * 0.13)); }
+}
+
+/* ---------------- world build ---------------- */
+const MW = 100, MH = 36;
+function buildWorld() {
+  const g = Array.from({ length: MH }, () => new Array(MW).fill("#"));
+  const feats = { walkers: [], turrets: [], pickups: [], boss: null, spawn: null };
+  const carve = (x, y, w, h) => { for (let r = y; r < y + h; r++) for (let c = x; c < x + w; c++) g[r][c] = "."; };
+  const room = (x, y, w, h) => carve(x, y, w, h); // walls are whatever stays '#'
+  // R1 Dock (spawn + blaster)
+  room(2, 25, 22, 8);
+  feats.spawn = { c: 4, r: 32 };
+  g[32][20] = "#"; g[31][20] = "."; feats.pickups.push({ c: 20, r: 30, kind: "blaster", taken: false });
+  // cracked doorway R1 -> R2 (wall col 24, rows 30-32)
+  g[30][24] = "B"; g[31][24] = "B"; g[32][24] = "B";
+  // R2 Hangar
+  room(25, 25, 20, 8);
+  feats.walkers.push({ c: 30, r: 32 }, { c: 38, r: 32 });
+  feats.pickups.push({ c: 27, r: 32, kind: "health", taken: false });
+  // shaft R2 -> R3 with ledges (feet levels 29,26,23,20,17,14)
+  carve(42, 14, 3, 11);
+  g[30][43] = "#"; g[27][42] = "#"; g[24][44] = "#"; g[21][42] = "#"; g[18][44] = "#"; g[15][43] = "#";
+  // R3 Lab (double jump)
+  room(38, 6, 26, 8);
+  g[13][58] = "#"; feats.pickups.push({ c: 58, r: 12, kind: "djump", taken: false });
+  feats.turrets.push({ c: 48, r: 13 });
+  feats.walkers.push({ c: 44, r: 13 });
+  // drop shaft R3 -> R4 (hole in R3's floor at x61-63)
+  carve(61, 14, 3, 12);
+  // R4 Reactor (DJ-gated climb)
+  room(60, 26, 24, 8);
+  feats.walkers.push({ c: 66, r: 33 }, { c: 78, r: 33 });
+  feats.pickups.push({ c: 82, r: 33, kind: "health", taken: false });
+  g[32][62] = "#"; g[32][63] = "#";            // step A (feet 31)
+  g[29][66] = "#"; g[29][67] = "#";            // step A2 (feet 28)
+  g[26][68] = "#"; g[26][69] = "#";            // step B (feet 25) — the hop from B to the shaft ledge is 5 tiles: needs the double jump
+  carve(67, 18, 3, 8);                        // shaft R4 -> R5
+  g[21][69] = "#";                            // shaft ledge (feet 20)
+  // R5 Door room
+  room(66, 10, 14, 8);
+  feats.turrets.push({ c: 70, r: 17 });
+  // boss door in wall col 80, rows 15-17
+  g[15][80] = "D"; g[16][80] = "D"; g[17][80] = "D";
+  // R6 Boss vault
+  room(81, 10, 16, 8);
+  feats.boss = { c: 92, r: 16 };
+  feats.pickups.push({ c: 83, r: 17, kind: "health", taken: false });
+  feats.walkers.push({ c: 86, r: 17 });
+  return { g, feats };
+}
+const WORLD = buildWorld();
+const grid = WORLD.g;
+function tileAt(c, r) { if (c < 0 || r < 0 || c >= MW || r >= MH) return "#"; return grid[r][c]; }
+function solidTile(c, r, p) {
+  const t = tileAt(c, r);
+  if (t === "#") return true;
+  if (t === "B") return true;
+  if (t === "D") return !(p && p.blaster && p.djump);
+  return false;
+}
+
+/* ---------------- fairness / QA self-check ---------------- */
+function fairnessCheck() {
+  const pass = (c, r, f) => {
+    const t = tileAt(c, r);
+    if (t === "#") return false;
+    if (t === "B") return !!(f & 1);
+    if (t === "D") return f === 3;
+    return true;
+  };
+  const settle = (c, r, f) => { let y = r; while (y + 1 < MH && pass(c, y + 1, f)) y++; return y; };
+  const start = WORLD.feats.spawn;
+  const seen = new Set(), q = [[start.c, settle(start.c, start.r, 0), 0]];
+  seen.add(start.c + "," + settle(start.c, start.r, 0) + ",0");
+  const reach = (c, r, pred) => { /* checked via seen scan below */ return false; };
+  const found = { blasterNoUp: false, djBlasterOnly: false, bossBoth: false, bossNoDJ: false };
+  while (q.length) {
+    const [c, r, f] = q.pop();
+    // pickups on this cell?
+    let nf = f;
+    for (const pk of WORLD.feats.pickups) {
+      if (pk.c === c && (pk.r === r || pk.r === r - 1 || pk.r === r + 1)) {
+        if (pk.kind === "blaster") nf |= 1;
+        if (pk.kind === "djump") nf |= 2;
+      }
+    }
+    const push = (nc, nr, ff) => {
+      if (nc < 0 || nr < 0 || nc >= MW || nr >= MH) return;
+      if (!pass(nc, nr, ff)) return;
+      const sy = settle(nc, nr, ff), k = nc + "," + sy + "," + ff;
+      if (!seen.has(k)) { seen.add(k); q.push([nc, sy, ff]); }
+    };
+    if (nf !== f) push(c, r, nf);
+    push(c - 1, r, f); push(c + 1, r, f);
+    const rise = (f & 2) ? 6 : 3;
+    for (let dy = 1; dy <= rise; dy++) for (let dx = -4; dx <= 4; dx++) {
+      if (!pass(c + dx, r - dy, f)) continue;
+      let clear = true;
+      for (let k = 1; k <= dy; k++) if (!pass(c, r - k, f)) { clear = false; break; }
+      // the arc's top edge: intermediate columns at the target row must be
+      // open too — otherwise the search could vault a 1-wide wall or door
+      if (clear && dx !== 0) {
+        const s = Math.sign(dx);
+        for (let k = 1; k < Math.abs(dx); k++) if (!pass(c + s * k, r - dy, f)) { clear = false; break; }
+      }
+      if (clear) push(c + dx, r - dy, f);
+    }
+  }
+  for (const k of seen) {
+    const [c, r, f] = k.split(",").map(Number);
+    for (const pk of WORLD.feats.pickups) {
+      if (Math.abs(pk.c - c) <= 1 && Math.abs(pk.r - r) <= 1) {
+        if (pk.kind === "blaster" && f === 0) found.blasterNoUp = true;
+        if (pk.kind === "djump" && f === 1) found.djBlasterOnly = true;
+      }
+    }
+    if (c >= 81 && r <= 17 && f === 3) found.bossBoth = true;
+    if (c >= 81 && r <= 17 && f !== 3) found.bossNoDJ = true;
+  }
+  const r = { game: "deep-signal", blasterReachableNoUpgrades: found.blasterNoUp, doubleJumpReachableBlasterOnly: found.djBlasterOnly,
+    bossReachableWithBoth: found.bossBoth, bossLeaksWithoutBoth: found.bossNoDJ, statesExplored: seen.size,
+    pass: found.blasterNoUp && found.djBlasterOnly && found.bossBoth && !found.bossNoDJ };
+  window.__qaFairness = r; return r;
+}
+
+/* ---------------- game state ---------------- */
+let state = "menu", player, bullets, ebolts, walkers, turrets, boss, camX, camY, startT, elapsed, lastT, msg, msgT, showMap, bestTime;
+bestTime = +(localStorage.getItem("deepsignal_best") || 0);
+let keys = { left: false, right: false };
+let fireHeld = false;
+function resetDynamics() {
+  const f = WORLD.feats;
+  walkers = f.walkers.map(w => ({ x: (w.c + 0.5) * TILE, y: (w.r + 1) * TILE, dir: 1, hp: 2, t: Math.random() * 7 }));
+  turrets = f.turrets.map(t => ({ c: t.c, r: t.r, hp: 5, fireT: 1200 + Math.random() * 900, alive: true }));
+  boss = { c: f.boss.c, r: f.boss.r, hp: 22, fireT: 1000, spreadT: 2600, alive: true };
+  bullets = []; ebolts = [];
+}
+function startGame() {
+  // restore world tiles (cracked blocks / door) — rebuild fresh grid copy
+  const fresh = buildWorld();
+  for (let r = 0; r < MH; r++) for (let c = 0; c < MW; c++) grid[r][c] = fresh.g[r][c];
+  WORLD.feats.pickups.forEach(p => p.taken = false);
+  const s = WORLD.feats.spawn;
+  player = { x: (s.c + 0.5) * TILE, y: (s.r + 1) * TILE, vx: 0, vy: 0, w: 20, h: 26, face: 1,
+    hp: 6, blaster: false, djump: false, jumps: 0, invulnT: 0, fireCd: 0, dead: false,
+    respawnX: (s.c + 0.5) * TILE, respawnY: (s.r + 1) * TILE };
+  resetDynamics();
+  startT = performance.now(); elapsed = 0; msg = "";
+  state = "play"; showMap = false; initAudio();
+}
+function hurtPlayer(fromX) {
+  if (player.invulnT > 0 || player.dead) return;
+  player.hp--; player.invulnT = 1100;
+  player.vx = (player.x < fromX ? -1 : 1) * 190; player.vy = -260;
+  sfx("hurt");
+  if (player.hp <= 0) {
+    player.dead = true; sfx("die");
+    setTimeout(() => {
+      player.x = player.respawnX; player.y = player.respawnY; player.vx = player.vy = 0;
+      player.hp = 6; player.dead = false; player.invulnT = 1500;
+      resetDynamics();
+    }, 900);
+  }
+}
+function collideMove(dt) {
+  const p = player;
+  // X axis
+  p.x += p.vx * dt;
+  let box = { l: p.x - p.w / 2, r: p.x + p.w / 2, t: p.y - p.h, b: p.y };
+  let c0 = Math.floor(box.l / TILE), c1 = Math.floor(box.r / TILE), r0 = Math.floor(box.t / TILE), r1 = Math.floor(box.b / TILE);
+  for (let r = r0; r <= r1; r++) for (let c = c0; c <= c1; c++) if (solidTile(c, r, p)) {
+    if (p.vx > 0) p.x = c * TILE - p.w / 2 - 0.01; else if (p.vx < 0) p.x = (c + 1) * TILE + p.w / 2 + 0.01;
+    p.vx = 0; box = { l: p.x - p.w / 2, r: p.x + p.w / 2, t: p.y - p.h, b: p.y };
+  }
+  // Y axis
+  p.y += p.vy * dt;
+  box = { l: p.x - p.w / 2, r: p.x + p.w / 2, t: p.y - p.h, b: p.y };
+  c0 = Math.floor(box.l / TILE); c1 = Math.floor(box.r / TILE); r0 = Math.floor(box.t / TILE); r1 = Math.floor(box.b / TILE);
+  let grounded = false;
+  for (let r = r0; r <= r1; r++) for (let c = c0; c <= c1; c++) if (solidTile(c, r, p)) {
+    if (p.vy > 0) { p.y = r * TILE; grounded = true; }
+    else if (p.vy < 0) p.y = (r + 1) * TILE + p.h + 0.01;
+    p.vy = 0; box = { l: p.x - p.w / 2, r: p.x + p.w / 2, t: p.y - p.h, b: p.y };
+  }
+  return grounded;
+}
+function step(dtms, now) {
+  if (state !== "play" || player.dead) return;
+  const dt = Math.min(0.033, dtms / 1000);
+  elapsed = (now - startT) / 1000;
+  const p = player;
+  if (p.invulnT > 0) p.invulnT -= dtms;
+  const targetVx = ((keys.left ? -1 : 0) + (keys.right ? 1 : 0)) * 168;
+  p.vx += (targetVx - p.vx) * Math.min(1, dt * 14);
+  if (keys.left) p.face = -1; if (keys.right) p.face = 1;
+  p.vy = Math.min(880, p.vy + 1500 * dt);
+  const grounded = collideMove(dt);
+  if (grounded) p.jumps = 0;
+  p.onGround = grounded;
+  // checkpoints by area
+  const pc = Math.floor(p.x / TILE);
+  if (pc >= 25 && pc < 60) { p.respawnX = 26.5 * TILE; p.respawnY = 33 * TILE; }
+  if (pc >= 60 && Math.floor(p.y / TILE) < 20) { p.respawnX = 67.5 * TILE; p.respawnY = 18 * TILE; }
+  if (pc >= 81) { p.respawnX = 82.5 * TILE; p.respawnY = 18 * TILE; }
+  // firing
+  p.fireCd -= dtms;
+  if (fireHeld && p.blaster && p.fireCd <= 0) {
+    p.fireCd = 215;
+    bullets.push({ x: p.x + p.face * 16, y: p.y - 14, vx: p.face * 430, life: 620 });
+    sfx("pew");
+  }
+  for (const b of bullets) { b.x += b.vx * dt; b.life -= dtms; }
+  // bullet hits
+  for (const b of bullets) {
+    const c = Math.floor(b.x / TILE), r = Math.floor(b.y / TILE);
+    if (tileAt(c, r) === "B" && Math.abs(b.vx) > 0) { grid[r][c] = "."; b.life = 0; sfx("crack"); continue; }
+    if (solidTile(c, r, p)) { b.life = 0; continue; }
+    for (const w of walkers) if (w.hp > 0 && Math.abs(b.x - w.x) < 15 && Math.abs(b.y - (w.y - 12)) < 15) { w.hp--; b.life = 0; if (w.hp <= 0) { scorePop(w.x, w.y); } break; }
+    if (b.life > 0) for (const t of turrets) if (t.alive && Math.abs(b.x - (t.c + 0.5) * TILE) < 18 && Math.abs(b.y - (t.r + 0.5) * TILE) < 18) { t.hp--; b.life = 0; if (t.hp <= 0) { t.alive = false; sfx("crack"); } break; }
+    if (b.life > 0 && boss.alive && Math.abs(b.x - (boss.c + 0.5) * TILE) < 32 && Math.abs(b.y - (boss.r + 0.5) * TILE) < 30) {
+      boss.hp--; b.life = 0;
+      if (boss.hp <= 0) { boss.alive = false; sfx("boom"); state = "win"; if (!bestTime || elapsed < bestTime) { bestTime = Math.round(elapsed); localStorage.setItem("deepsignal_best", bestTime); } }
+    }
+  }
+  bullets = bullets.filter(b => b.life > 0);
+  // walkers
+  for (const w of walkers) {
+    if (w.hp <= 0) continue;
+    w.t += dt;
+    const aheadC = Math.floor((w.x + w.dir * 16) / TILE), feetR = Math.floor(w.y / TILE);
+    if (solidTile(aheadC, feetR - 1, null) || !solidTile(aheadC, feetR, null)) w.dir *= -1;
+    w.x += w.dir * 42 * dt;
+    if (Math.abs(w.x - p.x) < 20 && Math.abs(w.y - p.y) < 26) hurtPlayer(w.x);
+  }
+  // turrets + boss fire
+  const shootAt = (fx, fy, spd) => {
+    const a = Math.atan2((p.y - 12) - fy, p.x - fx);
+    ebolts.push({ x: fx, y: fy, vx: Math.cos(a) * spd, vy: Math.sin(a) * spd });
+  };
+  for (const t of turrets) {
+    if (!t.alive) continue;
+    t.fireT -= dtms;
+    const tx = (t.c + 0.5) * TILE, ty = (t.r + 0.5) * TILE;
+    if (t.fireT <= 0 && Math.hypot(p.x - tx, p.y - ty) < 330) { t.fireT = 2100; shootAt(tx, ty, 132); }
+  }
+  if (boss.alive) {
+    boss.fireT -= dtms; boss.spreadT -= dtms;
+    if (boss.fireT <= 0) { boss.fireT = 1500; shootAt((boss.c + 0.5) * TILE, (boss.r + 0.5) * TILE, 140); }
+    if (boss.spreadT <= 0) {
+      boss.spreadT = 3200;
+      for (const off of [-0.4, 0, 0.4]) { const a = Math.atan2((p.y - 12) - (boss.r + 0.5) * TILE, p.x - (boss.c + 0.5) * TILE) + off; ebolts.push({ x: (boss.c + 0.5) * TILE, y: (boss.r + 0.5) * TILE, vx: Math.cos(a) * 125, vy: Math.sin(a) * 125 }); }
+    }
+  }
+  for (const b of ebolts) { b.x += b.vx * dt; b.y += b.vy * dt; }
+  ebolts = ebolts.filter(b => !solidTile(Math.floor(b.x / TILE), Math.floor(b.y / TILE), null) && b.x > 0 && b.y > 0);
+  for (const b of ebolts) if (Math.abs(b.x - p.x) < 13 && Math.abs(b.y - (p.y - 13)) < 15) { b.x = -99; hurtPlayer(b.x + 99); }
+  // pickups
+  for (const pk of WORLD.feats.pickups) {
+    if (pk.taken) continue;
+    const px = (pk.c + 0.5) * TILE, py = (pk.r + 0.5) * TILE;
+    if (Math.abs(p.x - px) < 24 && Math.abs((p.y - 13) - py) < 28) {
+      pk.taken = true; sfx("pickup");
+      if (pk.kind === "blaster") { p.blaster = true; msg = "BLASTER! 🔥 breaks cracked blocks"; }
+      if (pk.kind === "djump") { p.djump = true; msg = "DOUBLE JUMP! ⬆⬆"; }
+      if (pk.kind === "health") { p.hp = Math.min(6, p.hp + 2); msg = "+2 HULL"; }
+      msgT = now;
+    }
+  }
+  // door message
+  const dc = Math.floor(p.x / TILE), dr = Math.floor((p.y - 10) / TILE);
+  if (tileAt(dc + p.face, dr) === "D" && !(p.blaster && p.djump)) { /* solid anyway */ }
+  // camera
+  camX = Math.max(0, Math.min(MW * TILE - VW, p.x - VW / 2));
+  camY = Math.max(0, Math.min(MH * TILE - VH, p.y - VH / 2));
+}
+let popT = [];
+function scorePop(x, y) { popT.push({ x, y, t: 0 }); sfx("crack"); }
+function doJump() {
+  initAudio();
+  if (state !== "play" || player.dead) return;
+  if (player.onGround) { player.vy = -545; player.jumps = 1; sfx("jump"); }
+  else if (player.djump && player.jumps < 2) { player.vy = -520; player.jumps = 2; sfx("djump"); }
+}
+
+/* ---------------- draw ---------------- */
+function draw(now) {
+  ctx.setTransform(1, 0, 0, 1, 0, 0);
+  ctx.fillStyle = "#060a14"; ctx.fillRect(0, 0, canvas.width, canvas.height);
+  ctx.setTransform(scale, 0, 0, scale, ox, oy);
+  const cx = state === "menu" ? 0 : (camX || 0), cy = state === "menu" ? 350 : (camY || 0);
+  ctx.save(); ctx.translate(-Math.round(cx), -Math.round(cy));
+  const c0 = Math.max(0, Math.floor(cx / TILE)), c1 = Math.min(MW - 1, Math.ceil((cx + VW) / TILE));
+  const r0 = Math.max(0, Math.floor(cy / TILE)), r1 = Math.min(MH - 1, Math.ceil((cy + VH) / TILE));
+  for (let r = r0; r <= r1; r++) for (let c = c0; c <= c1; c++) {
+    const t = grid[r][c], x = c * TILE, y = r * TILE;
+    if (t === "#") {
+      ctx.fillStyle = "#26355c"; ctx.fillRect(x, y, TILE, TILE);
+      ctx.fillStyle = "#33477a"; ctx.fillRect(x, y, TILE, 4);
+      ctx.fillStyle = "#1a2745"; ctx.fillRect(x + TILE - 4, y, 4, TILE);
+    } else {
+      ctx.fillStyle = ((r + c) % 2) ? "#0d1730" : "#0c1428"; ctx.fillRect(x, y, TILE, TILE);
+      if (t === "B") { ctx.fillStyle = "#8a6a3a"; ctx.fillRect(x + 1, y + 1, TILE - 2, TILE - 2); ctx.strokeStyle = "#3a2c14"; ctx.lineWidth = 2; ctx.beginPath(); ctx.moveTo(x + 5, y + 4); ctx.lineTo(x + 16, y + 15); ctx.lineTo(x + 11, y + 26); ctx.moveTo(x + 25, y + 6); ctx.lineTo(x + 16, y + 15); ctx.stroke(); }
+      if (t === "D") {
+        const open = player && player.blaster && player.djump;
+        ctx.fillStyle = open ? "rgba(57,211,83,.25)" : "rgba(232,74,120,.35)"; ctx.fillRect(x + 2, y, TILE - 4, TILE);
+        ctx.strokeStyle = open ? "#39d353" : "#e84a78"; ctx.lineWidth = 2; ctx.strokeRect(x + 3, y + 2, TILE - 6, TILE - 4);
+      }
+    }
+  }
+  for (const pk of WORLD.feats.pickups) {
+    if (pk.taken) continue;
+    const px = (pk.c + 0.5) * TILE, py = (pk.r + 0.5) * TILE + Math.sin(now / 300 + pk.c) * 3;
+    ctx.fillStyle = pk.kind === "health" ? "#39d353" : "#ffd94a";
+    ctx.beginPath(); ctx.arc(px, py, 11, 0, 7); ctx.fill();
+    ctx.fillStyle = "#14213d"; ctx.font = "700 13px system-ui"; ctx.textAlign = "center";
+    ctx.fillText(pk.kind === "blaster" ? "🔥" : pk.kind === "djump" ? "⬆" : "✚", px, py + 5);
+  }
+  for (const w of walkers) {
+    if (w.hp <= 0) continue;
+    ctx.fillStyle = "#e8734a"; ctx.fillRect(w.x - 11, w.y - 20, 22, 16);
+    ctx.fillStyle = "#ffd94a"; ctx.beginPath(); ctx.arc(w.x, w.y - 24, 6, 0, 7); ctx.fill();
+    ctx.fillStyle = "#222"; ctx.fillRect(w.x - 9, w.y - 4, 6, 4); ctx.fillRect(w.x + 3, w.y - 4, 6, 4);
+  }
+  for (const t of turrets) {
+    if (!t.alive) continue;
+    const tx = (t.c + 0.5) * TILE, ty = (t.r + 1) * TILE;
+    ctx.fillStyle = "#7a4a8e"; ctx.fillRect(tx - 13, ty - 24, 26, 24);
+    ctx.fillStyle = "#e84a78"; ctx.beginPath(); ctx.arc(tx, ty - 26, 6, 0, 7); ctx.fill();
+  }
+  if (boss && boss.alive) {
+    const bx = (boss.c + 0.5) * TILE, by = (boss.r + 1) * TILE;
+    ctx.fillStyle = "#5c2a3a"; ctx.fillRect(bx - 28, by - 52, 56, 52);
+    ctx.fillStyle = "#e84a4a"; ctx.beginPath(); ctx.arc(bx, by - 54, 10, 0, 7); ctx.fill();
+    ctx.fillStyle = "#222"; ctx.fillRect(bx - 28, by - 66, 56, 8);
+    ctx.fillStyle = "#e84a4a"; ctx.fillRect(bx - 28, by - 66, 56 * Math.max(0, boss.hp / 22), 8);
+  }
+  ctx.fillStyle = "#ffe27a"; for (const b of bullets) { ctx.fillRect(b.x - 4, b.y - 2, 9, 4); }
+  ctx.fillStyle = "#ff8ab0"; for (const b of ebolts) { ctx.beginPath(); ctx.arc(b.x, b.y, 5, 0, 7); ctx.fill(); }
+  if (player && state !== "menu") {
+    const p = player, blink = p.invulnT > 0 && Math.floor(now / 110) % 2 === 0;
+    if (!blink && !p.dead) {
+      ctx.fillStyle = "#3fa7e8"; ctx.fillRect(p.x - 10, p.y - 26, 20, 20);
+      ctx.fillStyle = "#cfe8ff"; ctx.fillRect(p.x - 10, p.y - 26, 20, 7);
+      ctx.fillStyle = "#28418c"; ctx.fillRect(p.x - 9, p.y - 6, 7, 6); ctx.fillRect(p.x + 2, p.y - 6, 7, 6);
+      if (p.blaster) { ctx.fillStyle = "#ffd94a"; ctx.fillRect(p.x + p.face * 8 - (p.face < 0 ? 12 : 0), p.y - 17, 13, 5); }
+    }
+  }
+  ctx.restore();
+  // HUD
+  ctx.fillStyle = "rgba(0,0,0,.45)"; ctx.fillRect(0, 0, VW, 58);
+  ctx.fillStyle = "#fff"; ctx.font = "700 17px system-ui"; ctx.textAlign = "left";
+  ctx.fillText("DEEP SIGNAL", 14, 25);
+  ctx.font = "600 13px system-ui"; ctx.fillStyle = "#a9c6e8";
+  if (player) {
+    let hearts = ""; for (let i = 0; i < 6; i++) hearts += i < player.hp ? "♥" : "♡";
+    ctx.fillStyle = "#ff8ab0"; ctx.fillText(hearts, 14, 48);
+    ctx.fillStyle = "#a9c6e8";
+    ctx.fillText((player.blaster ? "🔥 Blaster  " : "") + (player.djump ? "⬆⬆ Double Jump  " : "") + "⏱ " + Math.floor(elapsed || 0) + "s", 120, 48);
+  }
+  if (msg && performance.now() - msgT < 2200 && state === "play") {
+    ctx.fillStyle = "rgba(0,0,0,.6)"; ctx.fillRect(0, 300, VW, 44);
+    ctx.fillStyle = "#ffd94a"; ctx.font = "800 19px system-ui"; ctx.textAlign = "center";
+    ctx.fillText(msg, VW / 2, 329);
+  }
+  if (showMap && state === "play") {
+    ctx.fillStyle = "rgba(4,8,18,.92)"; ctx.fillRect(20, 90, VW - 40, 400);
+    const mw = (VW - 60) / MW, mh = (400 - 60) / MH;
+    for (let r = 0; r < MH; r++) for (let c = 0; c < MW; c++) {
+      const t = grid[r][c];
+      ctx.fillStyle = t === "#" ? "#33477a" : t === "B" ? "#8a6a3a" : t === "D" ? "#e84a78" : "#101c38";
+      ctx.fillRect(30 + c * mw, 110 + r * mh, Math.max(1, mw - 0.4), Math.max(1, mh - 0.4));
+    }
+    for (const pk of WORLD.feats.pickups) if (!pk.taken) { ctx.fillStyle = "#ffd94a"; ctx.fillRect(30 + pk.c * mw - 1, 110 + pk.r * mh - 1, 4, 4); }
+    ctx.fillStyle = "#fff"; ctx.beginPath(); ctx.arc(30 + (player.x / TILE) * mw, 110 + (player.y / TILE) * mh, 3.4, 0, 7); ctx.fill();
+    ctx.fillStyle = "#fff"; ctx.font = "700 15px system-ui"; ctx.textAlign = "center";
+    ctx.fillText("STATION MAP — you are the white dot", VW / 2, 478);
+  }
+  if (state === "menu") {
+    ctx.fillStyle = "rgba(4,8,18,.85)"; ctx.fillRect(0, 190, VW, 280);
+    ctx.fillStyle = "#fff"; ctx.font = "700 32px system-ui"; ctx.textAlign = "center";
+    ctx.fillText("DEEP SIGNAL", VW / 2, 256);
+    ctx.font = "400 16px system-ui"; ctx.fillStyle = "#c4d6f2";
+    ctx.fillText("Explore the station. Find the BLASTER to crack", VW / 2, 292);
+    ctx.fillText("cracked blocks, then the DOUBLE JUMP —", VW / 2, 318);
+    ctx.fillText("only both together open the boss door.", VW / 2, 344);
+    ctx.fillStyle = "#ffd94a"; ctx.font = "700 21px system-ui";
+    ctx.fillText("TAP TO START", VW / 2, 402);
+  }
+  if (state === "win") {
+    ctx.fillStyle = "rgba(4,8,18,.88)"; ctx.fillRect(0, 210, VW, 250);
+    ctx.fillStyle = "#ffd94a"; ctx.font = "700 30px system-ui"; ctx.textAlign = "center";
+    ctx.fillText("SIGNAL RESTORED! 🏆", VW / 2, 280);
+    ctx.font = "400 17px system-ui"; ctx.fillStyle = "#c4d6f2";
+    ctx.fillText("Boss down in " + Math.floor(elapsed) + "s" + (bestTime ? " · Best " + bestTime + "s" : ""), VW / 2, 318);
+    ctx.fillStyle = "#ffd94a"; ctx.font = "700 20px system-ui";
+    ctx.fillText("TAP TO PLAY AGAIN", VW / 2, 388);
+  }
+  if (QA_MODE) {
+    const f = fairnessCheck();
+    ctx.fillStyle = "rgba(0,0,0,.7)"; ctx.fillRect(0, VH - 96, VW, 26);
+    ctx.fillStyle = f.pass ? "#7dff8a" : "#ff7d7d"; ctx.font = "600 11px monospace"; ctx.textAlign = "left";
+    ctx.fillText("QA deep-signal pass=" + f.pass + " blaster=" + f.blasterReachableNoUpgrades + " dj=" + f.doubleJumpReachableBlasterOnly + " boss=" + f.bossReachableWithBoth + " leak=" + f.bossLeaksWithoutBoth, 8, VH - 79);
+  }
+}
+function frame(t) {
+  const dt = Math.min(50, t - (lastT || t)); lastT = t;
+  if (state === "play") step(dt, t);
+  draw(t);
+  requestAnimationFrame(frame);
+}
+requestAnimationFrame(frame);
+
+/* ---------------- input ---------------- */
+function bindHold(id, fn) {
+  const el = document.getElementById(id);
+  el.addEventListener("pointerdown", e => { e.preventDefault(); initAudio(); fn(true); });
+  const off = () => fn(false);
+  el.addEventListener("pointerup", off); el.addEventListener("pointerleave", off); el.addEventListener("pointercancel", off);
+}
+bindHold("bL", v => keys.left = v); bindHold("bR", v => keys.right = v);
+bindHold("fireBtn", v => { fireHeld = v; if (v && state !== "play") startGame(); });
+document.getElementById("jumpBtn").addEventListener("pointerdown", e => { e.preventDefault(); if (state === "play") doJump(); else startGame(); });
+document.getElementById("mapBtn").addEventListener("click", e => { e.stopPropagation(); showMap = !showMap; });
+canvas.addEventListener("pointerdown", () => { initAudio(); if (state !== "play") startGame(); });
+window.addEventListener("keydown", e => {
+  if (e.code === "ArrowLeft") keys.left = true;
+  else if (e.code === "ArrowRight") keys.right = true;
+  else if (e.code === "ArrowUp" || e.code === "Space") { e.preventDefault(); if (!e.repeat) { if (state === "play") doJump(); else startGame(); } }
+  else if (e.code === "KeyZ") fireHeld = true;
+  else if (e.code === "KeyM") showMap = !showMap;
+});
+window.addEventListener("keyup", e => {
+  if (e.code === "ArrowLeft") keys.left = false;
+  if (e.code === "ArrowRight") keys.right = false;
+  if (e.code === "KeyZ") fireHeld = false;
+});
+const muteBtn = document.getElementById("muteBtn");
+function syncMute() { muteBtn.textContent = muted ? "🔇" : "🔊"; }
+muteBtn.addEventListener("click", e => { e.stopPropagation(); muted = !muted; localStorage.setItem("deepsignal_muted", muted ? 1 : 0); syncMute(); });
+muted = localStorage.getItem("deepsignal_muted") === "1"; syncMute();
+camX = 0; camY = 0; player = null; showMap = false;
+walkers = []; turrets = []; bullets = []; ebolts = []; boss = { alive: false, hp: 0, c: 0, r: 0 };
+if (QA_MODE) fairnessCheck();
+</script>
+</body>
+</html>

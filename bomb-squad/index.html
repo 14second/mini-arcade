@@ -1,0 +1,423 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, user-scalable=no">
+<meta name="theme-color" content="#1c1c26">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<title>Bomb Squad</title>
+<style>
+  * { margin:0; padding:0; box-sizing:border-box; }
+  html, body { width:100%; height:100%; overflow:hidden; background:#1c1c26;
+    font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+    touch-action:none; user-select:none; -webkit-user-select:none; -webkit-tap-highlight-color: transparent; }
+  canvas { position:fixed; inset:0; display:block; touch-action:none; }
+  #muteBtn { position:fixed; top:10px; right:10px; z-index:10; width:48px; height:48px; border-radius:12px;
+    border:2px solid rgba(255,255,255,.7); background:rgba(25,25,40,.55); color:#fff; font-size:22px;
+    line-height:1; cursor:pointer; display:flex; align-items:center; justify-content:center; padding:0; }
+  #pad { position:fixed; left:0; right:0; bottom:0; z-index:10; display:flex; justify-content:space-between; align-items:flex-end;
+    padding:10px 14px calc(10px + env(safe-area-inset-bottom)); }
+  #dpad { display:grid; grid-template-columns:52px 52px 52px; grid-template-rows:52px 52px; gap:5px; }
+  #dpad button, #bombBtn { border-radius:14px; border:2px solid rgba(255,255,255,.45); background:rgba(40,40,64,.78); color:#fff; font-size:22px; cursor:pointer; padding:0; }
+  #dpad button:active, #bombBtn:active { background:rgba(90,90,150,.85); }
+  #dUp { grid-column:2; grid-row:1; } #dLeft { grid-column:1; grid-row:2; } #dDown { grid-column:2; grid-row:2; } #dRight { grid-column:3; grid-row:2; }
+  #bombBtn { width:84px; height:84px; border-radius:50%; font-size:34px; background:rgba(120,40,30,.8); }
+</style>
+</head>
+<body>
+<canvas id="game"></canvas>
+<button id="muteBtn" aria-label="Toggle sound">🔊</button>
+<div id="pad">
+  <div id="dpad">
+    <button id="dUp" aria-label="Up">▲</button>
+    <button id="dLeft" aria-label="Left">◀</button>
+    <button id="dDown" aria-label="Down">▼</button>
+    <button id="dRight" aria-label="Right">▶</button>
+  </div>
+  <button id="bombBtn" aria-label="Drop bomb">💣</button>
+</div>
+<script>
+// iOS audio routing: Web Audio defaults to the "ambient" channel, which the
+// iPhone silent switch mutes entirely. Route it to the media/playback
+// channel (iOS 17+ Audio Session API) on the first user gesture and inside
+// audio init, so game music/SFX play even with silent mode on.
+function iosPlaybackSession() {
+  try { if ('audioSession' in navigator) navigator.audioSession.type = 'playback'; } catch (e) {}
+}
+document.addEventListener('pointerdown', iosPlaybackSession, true);
+document.addEventListener('touchstart', iosPlaybackSession, true);
+"use strict";
+/* BOMB SQUAD — original grid bomber. Drop 2-second bombs, blast the soft
+   blocks, zap every wandering critter, and slip out the hidden exit door
+   before the clock runs out. One power-up hides in every level.
+   Fairness (verified by the ?qa=1 self-check): the 3x3 spawn corner is
+   always clear, and a BFS treating soft blocks as passable reaches every
+   playable cell — so the door and power-up are always findable. */
+const VW = 420, VH = 720;
+const QA_MODE = /[?&]qa=1/.test(location.search);
+const canvas = document.getElementById("game"), ctx = canvas.getContext("2d");
+let W = 0, H = 0, DPR = 1, scale = 1, ox = 0, oy = 0;
+function resize() {
+  DPR = Math.min(window.devicePixelRatio || 1, 2);
+  W = window.innerWidth; H = window.innerHeight;
+  canvas.width = Math.round(W * DPR); canvas.height = Math.round(H * DPR);
+  canvas.style.width = W + "px"; canvas.style.height = H + "px";
+  scale = Math.min(W / VW, H / VH) * DPR; ox = (W * DPR - VW * scale) / 2; oy = (H * DPR - VH * scale) / 2;
+}
+window.addEventListener("resize", resize); resize();
+
+/* ---------------- audio ---------------- */
+let actx = null, muted = false, musicTimer = null, mStep = 0;
+function initAudio() {
+  iosPlaybackSession();
+  if (!actx) { try { const AC = window.AudioContext || window.webkitAudioContext; if (AC) actx = new AC(); } catch (e) {} }
+  if (actx && actx.state === "suspended") actx.resume();
+  if (actx && !musicTimer) musicTimer = setInterval(musicTick, 195);
+}
+function tone(freq, dur, type, vol, when, slide) {
+  if (!actx || muted) return;
+  const t = when || actx.currentTime, o = actx.createOscillator(), g = actx.createGain();
+  o.type = type || "triangle"; o.frequency.setValueAtTime(freq, t);
+  if (slide) o.frequency.exponentialRampToValueAtTime(Math.max(40, slide), t + dur);
+  g.gain.setValueAtTime(vol || 0.15, t);
+  g.gain.exponentialRampToValueAtTime(0.001, t + dur);
+  o.connect(g); g.connect(actx.destination); o.start(t); o.stop(t + dur + 0.02);
+}
+const BASS = [131, 0, 131, 0, 0, 0, 147, 0, 131, 0, 131, 0, 0, 165, 0, 147];
+const LEAD = [0, 392, 0, 392, 0, 0, 440, 0, 0, 392, 0, 330, 0, 392, 0, 0];
+function musicTick() {
+  if (!actx || muted || state !== "play") return;
+  const b = BASS[mStep % 16], l = LEAD[mStep % 16], t = actx.currentTime;
+  if (b) tone(b, 0.16, "triangle", 0.12, t);
+  if (l) tone(l, 0.12, "square", 0.05, t);
+  mStep++;
+}
+function sfx(name) {
+  if (!actx || muted) return; const t = actx.currentTime;
+  if (name === "place") tone(220, 0.06, "square", 0.09, t);
+  if (name === "boom") { tone(90, 0.35, "square", 0.2, t, 45); tone(60, 0.4, "triangle", 0.2, t, 40); }
+  if (name === "pop") { tone(660, 0.08, "triangle", 0.12, t); tone(990, 0.1, "triangle", 0.1, t + 0.06); }
+  if (name === "power") { [523, 659, 784, 1047].forEach((f, i) => tone(f, 0.1, "square", 0.1, t + i * 0.06)); }
+  if (name === "die") { [440, 330, 262, 165].forEach((f, i) => tone(f, 0.16, "triangle", 0.12, t + i * 0.12)); }
+  if (name === "door") { [587, 784, 1175].forEach((f, i) => tone(f, 0.13, "triangle", 0.12, t + i * 0.08)); }
+  if (name === "over") { [392, 330, 262, 196].forEach((f, i) => tone(f, 0.22, "triangle", 0.12, t + i * 0.18)); }
+}
+
+/* ---------------- game ---------------- */
+const GC = 13, GR = 11, CELL = 30, GX = 15, GY = 132;
+// cell codes: 0 empty, 1 border/pillar (solid forever), 2 soft block
+let state = "menu", grid, player, bombs, blasts, critters, door, power, doorOpen, powerTaken;
+let level, lives, score, bestScore, bestLevel, timeLeft, keys, invulnT, lastT, levelT;
+bestScore = +(localStorage.getItem("bombsquad_best") || 0);
+bestLevel = +(localStorage.getItem("bombsquad_bestlevel") || 0);
+function mulberry32(a) { return function () { a |= 0; a = a + 0x6D2B79F5 | 0; let t = Math.imul(a ^ a >>> 15, 1 | a); t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t; return ((t ^ t >>> 14) >>> 0) / 4294967296; }; }
+function genLevel(lv, rng) {
+  const g = [];
+  for (let r = 0; r < GR; r++) {
+    g.push([]);
+    for (let c = 0; c < GC; c++) {
+      let v = 0;
+      if (r === 0 || c === 0 || r === GR - 1 || c === GC - 1) v = 1;
+      else if (r % 2 === 0 && c % 2 === 0) v = 1;
+      g[r].push(v);
+    }
+  }
+  const softCells = [];
+  const density = Math.min(0.78, 0.6 + lv * 0.03);
+  for (let r = 1; r < GR - 1; r++) for (let c = 1; c < GC - 1; c++) {
+    if (g[r][c] !== 0) continue;
+    if (r <= 2 && c <= 2) continue; // 3x3 spawn corner stays clear
+    if (rng() < density) { g[r][c] = 2; softCells.push([r, c]); }
+  }
+  // door + power-up under two distinct soft blocks (not adjacent to spawn)
+  const far = softCells.filter(([r, c]) => r + c >= 6);
+  const pool = (far.length >= 2 ? far : softCells).slice();
+  const di = Math.floor(rng() * pool.length); const doorCell = pool.splice(di, 1)[0];
+  const pi = Math.floor(rng() * pool.length); const powerCell = pool.splice(pi, 1)[0];
+  return { g, doorCell, powerCell };
+}
+function solidAt(r, c, forCritter) {
+  if (r < 0 || c < 0 || r >= GR || c >= GC) return true;
+  if (grid[r][c] !== 0) return true;
+  if (bombs.some(b => b.r === r && b.c === c)) {
+    // bombs are solid once you step off them (player) / always for critters
+    if (forCritter) return true;
+    const pc = Math.floor((player.x - GX) / CELL), pr = Math.floor((player.y - GY) / CELL);
+    if (!(pr === r && pc === c)) return true;
+  }
+  return false;
+}
+function loadLevel(lv) {
+  const gen = genLevel(lv, Math.random);
+  grid = gen.g; door = { r: gen.doorCell[0], c: gen.doorCell[1], revealed: false };
+  power = { r: gen.powerCell[0], c: gen.powerCell[1], revealed: false, type: lv % 2 ? "bomb" : "blast" };
+  doorOpen = false; powerTaken = false;
+  bombs = []; blasts = []; critters = [];
+  player = { x: GX + 1.5 * CELL, y: GY + 1.5 * CELL, maxBombs: 1 + Math.floor((lv - 1) / 3), blastLen: 1, dead: false };
+  invulnT = 2000;
+  const n = Math.min(9, 3 + lv);
+  const rng = Math.random;
+  let placed = 0, guard = 0;
+  while (placed < n && guard++ < 400) {
+    const r = 1 + Math.floor(rng() * (GR - 2)), c = 1 + Math.floor(rng() * (GC - 2));
+    if (grid[r][c] !== 0 || (r <= 2 && c <= 2)) continue;
+    if (critters.some(e => e.r === r && e.c === c)) continue;
+    critters.push({ x: GX + (c + 0.5) * CELL, y: GY + (r + 0.5) * CELL, dir: Math.floor(rng() * 4), spd: 52 + lv * 5, alive: true });
+    placed++;
+  }
+  timeLeft = 120; levelT = 0;
+}
+function startGame() { level = 1; lives = 3; score = 0; loadLevel(1); state = "play"; initAudio(); }
+function cellOf(x, y) { return { c: Math.floor((x - GX) / CELL), r: Math.floor((y - GY) / CELL) }; }
+function explode(b) {
+  b.gone = true; sfx("boom");
+  const cells = [[b.r, b.c]];
+  const dirs = [[1, 0], [-1, 0], [0, 1], [0, -1]];
+  for (const [dr, dc] of dirs) {
+    for (let i = 1; i <= player.blastLen; i++) {
+      const r = b.r + dr * i, c = b.c + dc * i;
+      if (r < 0 || c < 0 || r >= GR || c >= GC || grid[r][c] === 1) break;
+      cells.push([r, c]);
+      if (grid[r][c] === 2) {
+        grid[r][c] = 0; score += 10;
+        if (door.r === r && door.c === c) { door.revealed = true; }
+        if (power.r === r && power.c === c) { power.revealed = true; }
+        break;
+      }
+      const other = bombs.find(o => !o.gone && o !== b && o.r === r && o.c === c);
+      if (other && other.fuse > 120) other.fuse = 120; // chain reaction
+    }
+  }
+  blasts.push({ cells, t: 450 });
+  const inBlast = (x, y) => { const cc = cellOf(x, y); return cells.some(([r, c]) => r === cc.r && c === cc.c); };
+  for (const e of critters) if (e.alive && inBlast(e.x, e.y)) { e.alive = false; score += 100; sfx("pop"); }
+  if (inBlast(player.x, player.y)) killPlayer();
+  if (critters.every(e => !e.alive) && !doorOpen) { doorOpen = true; sfx("door"); }
+}
+function killPlayer() {
+  if (player.dead) return;
+  player.dead = true; lives--; sfx("die");
+  setTimeout(() => {
+    if (lives < 0) { state = "over"; if (score > bestScore) { bestScore = score; localStorage.setItem("bombsquad_best", bestScore); } if (level > bestLevel) { bestLevel = level; localStorage.setItem("bombsquad_bestlevel", bestLevel); } sfx("over"); }
+    else loadLevel(level);
+  }, 900);
+}
+function step(dtms) {
+  if (state !== "play" || player.dead) return;
+  const dt = Math.min(0.04, dtms / 1000);
+  timeLeft -= dt; levelT += dtms;
+  if (timeLeft <= 0) { timeLeft = 0; killPlayer(); return; }
+  if (invulnT > 0) invulnT -= dtms;
+  // player movement
+  const spd = 138;
+  let mx = 0, my = 0;
+  if (keys.left) mx = -1; else if (keys.right) mx = 1;
+  if (keys.up) my = -1; else if (keys.down) my = 1;
+  const tryMove = (dx, dy) => {
+    const nx = player.x + dx, ny = player.y + dy, rad = 10.5;
+    const corners = [[nx - rad, ny - rad], [nx + rad, ny - rad], [nx - rad, ny + rad], [nx + rad, ny + rad]];
+    for (const [cx, cy] of corners) { const cc = cellOf(cx, cy); if (solidAt(cc.r, cc.c, false)) return; }
+    player.x = nx; player.y = ny;
+  };
+  if (mx) tryMove(mx * spd * dt, 0);
+  if (my) tryMove(0, my * spd * dt);
+  // bombs
+  for (const b of bombs) { b.fuse -= dtms; if (b.fuse <= 0 && !b.gone) explode(b); }
+  bombs = bombs.filter(b => !b.gone);
+  for (const bl of blasts) bl.t -= dtms;
+  blasts = blasts.filter(b => b.t > 0);
+  // critters
+  for (const e of critters) {
+    if (!e.alive) continue;
+    const dirs = [[0, -1], [0, 1], [-1, 0], [1, 0]];
+    let [dx, dy] = dirs[e.dir];
+    const nx = e.x + dx * e.spd * dt, ny = e.y + dy * e.spd * dt;
+    const cc = cellOf(nx + dx * 12, ny + dy * 12);
+    const centerDist = Math.hypot((e.x - GX) % CELL - CELL / 2, (e.y - GY) % CELL - CELL / 2);
+    if (solidAt(cc.r, cc.c, true) || centerDist < 4 && Math.random() < 0.012) {
+      e.dir = Math.floor(Math.random() * 4);
+      // snap toward cell center when turning
+      e.x = GX + (Math.floor((e.x - GX) / CELL) + 0.5) * CELL * 0 + e.x; // keep
+    } else { e.x = nx; e.y = ny; }
+    const pc = cellOf(player.x, player.y), ec = cellOf(e.x, e.y);
+    if (pc.r === ec.r && pc.c === ec.c && invulnT <= 0) killPlayer();
+  }
+  // power-up pickup + door
+  const pc = cellOf(player.x, player.y);
+  if (power.revealed && !powerTaken && pc.r === power.r && pc.c === power.c) {
+    powerTaken = true; score += 50; sfx("power");
+    if (power.type === "bomb") player.maxBombs++; else player.blastLen++;
+  }
+  if (door.revealed && doorOpen && pc.r === door.r && pc.c === door.c) {
+    score += 200 + Math.ceil(timeLeft) * 2; sfx("door");
+    level++; loadLevel(level);
+  }
+}
+function dropBomb() {
+  if (state !== "play" || player.dead) return;
+  const cc = cellOf(player.x, player.y);
+  if (bombs.length >= player.maxBombs) return;
+  if (bombs.some(b => b.r === cc.r && b.c === cc.c)) return;
+  if (grid[cc.r][cc.c] !== 0) return;
+  bombs.push({ r: cc.r, c: cc.c, fuse: 2000, gone: false });
+  sfx("place");
+}
+
+/* ---------------- fairness / QA self-check ---------------- */
+function fairnessCheck() {
+  const rng = mulberry32(4242);
+  const { g, doorCell, powerCell } = genLevel(3, rng);
+  // spawn corner clear of soft blocks: the three movable cells around the
+  // spawn (the (2,2) cell is a fixed pillar by design, as in the genre)
+  const spawnClear = g[1][1] === 0 && g[2][1] === 0 && g[1][2] === 0;
+  // BFS with soft blocks passable from spawn (1,1)
+  const seen = new Set(["1,1"]), q = [[1, 1]];
+  while (q.length) {
+    const [r, c] = q.pop();
+    for (const [dr, dc] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) {
+      const nr = r + dr, nc = c + dc, k = nr + "," + nc;
+      if (nr < 0 || nc < 0 || nr >= GR || nc >= GC || seen.has(k) || g[nr][nc] === 1) continue;
+      seen.add(k); q.push([nr, nc]);
+    }
+  }
+  let reachable = 0, playable = 0;
+  for (let r = 0; r < GR; r++) for (let c = 0; c < GC; c++) if (g[r][c] !== 1) { playable++; if (seen.has(r + "," + c)) reachable++; }
+  const doorOk = g[doorCell[0]][doorCell[1]] === 2 && seen.has(doorCell[0] + "," + doorCell[1]);
+  const powerOk = g[powerCell[0]][powerCell[1]] === 2 && seen.has(powerCell[0] + "," + powerCell[1]);
+  const r = { game: "bomb-squad", spawnClear, reachable, playable, doorOk, powerOk,
+    pass: spawnClear && reachable === playable && doorOk && powerOk };
+  window.__qaFairness = r; return r;
+}
+
+/* ---------------- draw ---------------- */
+function draw() {
+  ctx.setTransform(1, 0, 0, 1, 0, 0);
+  ctx.fillStyle = "#12121c"; ctx.fillRect(0, 0, canvas.width, canvas.height);
+  ctx.setTransform(scale, 0, 0, scale, ox, oy);
+  ctx.fillStyle = "#f2f2fa"; ctx.font = "700 23px system-ui"; ctx.textAlign = "left";
+  ctx.fillText("BOMB SQUAD", 15, 36);
+  ctx.font = "600 15px system-ui"; ctx.fillStyle = "#a9a9c9";
+  ctx.fillText("LV " + level + "  ·  SCORE " + score + "  ·  BEST " + bestScore, 15, 62);
+  ctx.fillText("💣×" + (player ? player.maxBombs : 1) + "  🔥" + (player ? player.blastLen : 1) + "  ·  CRITTERS " + (critters ? critters.filter(e => e.alive).length : 0), 15, 86);
+  ctx.textAlign = "right";
+  ctx.fillStyle = timeLeft <= 15 ? "#ff7d7d" : "#a9a9c9";
+  ctx.fillText("⏱ " + Math.ceil(timeLeft) + "s   ❤ " + Math.max(0, lives), VW - 70, 62);
+  if (grid) {
+    for (let r = 0; r < GR; r++) for (let c = 0; c < GC; c++) {
+      const x = GX + c * CELL, y = GY + r * CELL;
+      ctx.fillStyle = (r + c) % 2 ? "#23233a" : "#282844"; ctx.fillRect(x, y, CELL, CELL);
+      if (grid[r][c] === 1) { ctx.fillStyle = "#565670"; ctx.fillRect(x + 1, y + 1, CELL - 2, CELL - 2); ctx.fillStyle = "#76768f"; ctx.fillRect(x + 1, y + 1, CELL - 2, 5); }
+      else if (grid[r][c] === 2) { ctx.fillStyle = "#c98d4b"; ctx.fillRect(x + 2, y + 2, CELL - 4, CELL - 4); ctx.fillStyle = "#a87434"; ctx.fillRect(x + 2, y + CELL / 2 - 1, CELL - 4, 3); ctx.fillRect(x + CELL / 2 - 1, y + 2, 3, CELL - 4); }
+    }
+    if (door.revealed) {
+      const x = GX + door.c * CELL, y = GY + door.r * CELL;
+      ctx.fillStyle = doorOpen ? "#39d353" : "#5a4a7a"; ctx.fillRect(x + 3, y + 3, CELL - 6, CELL - 6);
+      ctx.fillStyle = "#fff"; ctx.font = "700 15px system-ui"; ctx.textAlign = "center"; ctx.fillText("EXIT", x + CELL / 2, y + CELL / 2 + 5);
+    }
+    if (power.revealed && !powerTaken) {
+      const x = GX + power.c * CELL, y = GY + power.r * CELL;
+      ctx.fillStyle = "#ffd94a"; ctx.beginPath(); ctx.arc(x + CELL / 2, y + CELL / 2, 11, 0, 7); ctx.fill();
+      ctx.fillStyle = "#222"; ctx.font = "700 14px system-ui"; ctx.textAlign = "center";
+      ctx.fillText(power.type === "bomb" ? "💣" : "🔥", x + CELL / 2, y + CELL / 2 + 5);
+    }
+    for (const b of bombs) {
+      const x = GX + (b.c + 0.5) * CELL, y = GY + (b.r + 0.5) * CELL;
+      const pulse = b.fuse < 500 ? 1 + Math.sin(performance.now() / 40) * 0.12 : 1;
+      ctx.fillStyle = "#17171f"; ctx.beginPath(); ctx.arc(x, y, 11 * pulse, 0, 7); ctx.fill();
+      ctx.fillStyle = "#ffd94a"; ctx.fillRect(x + 4, y - 14, 3, 6);
+      if (b.fuse < 500) { ctx.fillStyle = "#ff5b4a"; ctx.beginPath(); ctx.arc(x + 6, y - 15, 3.4, 0, 7); ctx.fill(); }
+    }
+    for (const bl of blasts) {
+      ctx.fillStyle = "rgba(255,140,40," + Math.min(0.9, bl.t / 300) + ")";
+      for (const [r, c] of bl.cells) ctx.fillRect(GX + c * CELL + 2, GY + r * CELL + 2, CELL - 4, CELL - 4);
+      ctx.fillStyle = "rgba(255,220,120," + Math.min(0.9, bl.t / 300) + ")";
+      for (const [r, c] of bl.cells) ctx.fillRect(GX + c * CELL + 8, GY + r * CELL + 8, CELL - 16, CELL - 16);
+    }
+    for (const e of critters) {
+      if (!e.alive) continue;
+      ctx.fillStyle = "#7ee08a"; ctx.beginPath(); ctx.arc(e.x, e.y, 11, 0, 7); ctx.fill();
+      ctx.fillStyle = "#12351a"; ctx.beginPath(); ctx.arc(e.x - 4, e.y - 2, 2.2, 0, 7); ctx.arc(e.x + 4, e.y - 2, 2.2, 0, 7); ctx.fill();
+      ctx.strokeStyle = "#12351a"; ctx.beginPath(); ctx.arc(e.x, e.y + 3, 5, 0.15 * Math.PI, 0.85 * Math.PI); ctx.stroke();
+    }
+    if (player && !player.dead) {
+      const blink = invulnT > 0 && Math.floor(performance.now() / 130) % 2 === 0;
+      if (!blink) {
+        ctx.fillStyle = "#3fa7e8"; ctx.beginPath(); ctx.arc(player.x, player.y, 12, 0, 7); ctx.fill();
+        ctx.fillStyle = "#ffd94a"; ctx.fillRect(player.x - 12, player.y - 15, 24, 6);
+        ctx.fillStyle = "#fff"; ctx.beginPath(); ctx.arc(player.x - 4, player.y - 2, 2.4, 0, 7); ctx.arc(player.x + 4, player.y - 2, 2.4, 0, 7); ctx.fill();
+      }
+    }
+  }
+  if (state === "menu") {
+    ctx.fillStyle = "rgba(8,8,16,.82)"; ctx.fillRect(0, 200, VW, 250);
+    ctx.fillStyle = "#fff"; ctx.font = "700 33px system-ui"; ctx.textAlign = "center";
+    ctx.fillText("BOMB SQUAD", VW / 2, 268);
+    ctx.font = "400 16px system-ui"; ctx.fillStyle = "#cfcfe8";
+    ctx.fillText("Blast blocks, zap every critter, find the EXIT.", VW / 2, 304);
+    ctx.fillText("Bombs blow in 2 seconds — don't stand in the cross!", VW / 2, 330);
+    ctx.fillStyle = "#ffd94a"; ctx.font = "700 21px system-ui";
+    ctx.fillText("TAP TO START", VW / 2, 388);
+  }
+  if (state === "over") {
+    ctx.fillStyle = "rgba(8,8,16,.84)"; ctx.fillRect(0, 200, VW, 250);
+    ctx.fillStyle = "#fff"; ctx.font = "700 32px system-ui"; ctx.textAlign = "center";
+    ctx.fillText("GAME OVER", VW / 2, 272);
+    ctx.font = "400 18px system-ui"; ctx.fillStyle = "#cfcfe8";
+    ctx.fillText("Reached level " + level + " · Score " + score, VW / 2, 312);
+    ctx.fillText("Best " + bestScore + " (level " + Math.max(bestLevel, level) + ")", VW / 2, 340);
+    ctx.fillStyle = "#ffd94a"; ctx.font = "700 20px system-ui";
+    ctx.fillText("TAP TO PLAY AGAIN", VW / 2, 396);
+  }
+  if (QA_MODE) {
+    const f = fairnessCheck();
+    ctx.fillStyle = "rgba(0,0,0,.65)"; ctx.fillRect(0, VH - 30, VW, 30);
+    ctx.fillStyle = f.pass ? "#7dff8a" : "#ff7d7d"; ctx.font = "600 12px monospace"; ctx.textAlign = "left";
+    ctx.fillText("QA bomb-squad pass=" + f.pass + " reach=" + f.reachable + "/" + f.playable + " spawn=" + f.spawnClear, 8, VH - 10);
+  }
+}
+function frame(t) {
+  const dt = Math.min(50, t - (lastT || t)); lastT = t;
+  if (state === "play") step(dt);
+  draw();
+  requestAnimationFrame(frame);
+}
+requestAnimationFrame(frame);
+
+/* ---------------- input ---------------- */
+keys = { left: false, right: false, up: false, down: false };
+function bindHold(id, k) {
+  const el = document.getElementById(id);
+  el.addEventListener("pointerdown", e => { e.preventDefault(); initAudio(); keys[k] = true; });
+  const off = () => { keys[k] = false; };
+  el.addEventListener("pointerup", off); el.addEventListener("pointerleave", off); el.addEventListener("pointercancel", off);
+}
+bindHold("dLeft", "left"); bindHold("dRight", "right"); bindHold("dUp", "up"); bindHold("dDown", "down");
+document.getElementById("bombBtn").addEventListener("pointerdown", e => { e.preventDefault(); initAudio(); if (state === "play") dropBomb(); else startGame(); });
+canvas.addEventListener("pointerdown", () => { initAudio(); if (state !== "play") startGame(); });
+window.addEventListener("keydown", e => {
+  if (e.code === "ArrowLeft") keys.left = true;
+  else if (e.code === "ArrowRight") keys.right = true;
+  else if (e.code === "ArrowUp") keys.up = true;
+  else if (e.code === "ArrowDown") keys.down = true;
+  else if (e.code === "KeyZ" || e.code === "Space") { e.preventDefault(); if (state === "play") dropBomb(); else startGame(); }
+});
+window.addEventListener("keyup", e => {
+  if (e.code === "ArrowLeft") keys.left = false;
+  else if (e.code === "ArrowRight") keys.right = false;
+  else if (e.code === "ArrowUp") keys.up = false;
+  else if (e.code === "ArrowDown") keys.down = false;
+});
+const muteBtn = document.getElementById("muteBtn");
+function syncMute() { muteBtn.textContent = muted ? "🔇" : "🔊"; }
+muteBtn.addEventListener("click", e => { e.stopPropagation(); muted = !muted; localStorage.setItem("bombsquad_muted", muted ? 1 : 0); syncMute(); });
+muted = localStorage.getItem("bombsquad_muted") === "1"; syncMute();
+grid = genLevel(1, Math.random).g;
+bombs = []; blasts = []; critters = [];
+door = { r: -1, c: -1, revealed: false };
+power = { r: -1, c: -1, revealed: false, type: "bomb" };
+player = null;
+if (QA_MODE) fairnessCheck();
+</script>
+</body>
+</html>

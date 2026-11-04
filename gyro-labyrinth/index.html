@@ -1,0 +1,435 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, user-scalable=no">
+<meta name="theme-color" content="#4a2f18">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<title>Gyro Labyrinth</title>
+<style>
+  * { margin:0; padding:0; box-sizing:border-box; }
+  html, body { width:100%; height:100%; overflow:hidden; background:#4a2f18;
+    font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+    touch-action:none; user-select:none; -webkit-user-select:none; -webkit-tap-highlight-color: transparent; }
+  canvas { position:fixed; inset:0; display:block; touch-action:none; }
+  #muteBtn { position:fixed; top:10px; right:10px; z-index:10; width:48px; height:48px; border-radius:12px;
+    border:2px solid rgba(255,255,255,.7); background:rgba(50,30,10,.55); color:#fff; font-size:22px;
+    line-height:1; cursor:pointer; display:flex; align-items:center; justify-content:center; padding:0; }
+  #tiltBtn { position:fixed; left:50%; transform:translateX(-50%); bottom:calc(18px + env(safe-area-inset-bottom)); z-index:10;
+    min-width:230px; height:54px; border-radius:27px; border:2px solid #ffe9a8; display:none;
+    background:rgba(90,55,15,.9); color:#fff; font-size:16px; font-weight:700; cursor:pointer; padding:0 18px; }
+</style>
+</head>
+<body>
+<canvas id="game"></canvas>
+<button id="muteBtn" aria-label="Toggle sound">🔊</button>
+<button id="tiltBtn">📐 TAP TO ENABLE TILT</button>
+<script>
+// iOS audio routing: Web Audio defaults to the "ambient" channel, which the
+// iPhone silent switch mutes entirely. Route it to the media/playback
+// channel (iOS 17+ Audio Session API) on the first user gesture and inside
+// audio init, so game music/SFX play even with silent mode on.
+function iosPlaybackSession() {
+  try { if ('audioSession' in navigator) navigator.audioSession.type = 'playback'; } catch (e) {}
+}
+document.addEventListener('pointerdown', iosPlaybackSession, true);
+document.addEventListener('touchstart', iosPlaybackSession, true);
+"use strict";
+/* GYRO LABYRINTH — original wooden tilt-maze. Roll the steel ball to
+   the brass cup; the black holes swallow it (3 balls per game).
+   Input priority: the phone's gyroscope — on Android it just works; on
+   iOS a tap-to-enable button requests permission (Apple requires the
+   gesture). Drag-to-tilt and arrow keys always work as fallbacks, and
+   flat is re-calibrated every time a board starts.
+   Fairness (verified by the ?qa=1 self-check): on all 5 boards a BFS
+   that treats holes as blocked finds a spawn-to-cup path, and every
+   corridor is one 30 px cell vs the 22 px ball (diameter + margin). */
+const VW = 420, VH = 720, CELL = 30, BALL_R = 11, OX = 15, OY = 138;
+const QA_MODE = /[?&]qa=1/.test(location.search);
+const canvas = document.getElementById("game"), ctx = canvas.getContext("2d");
+let W = 0, H = 0, DPR = 1, scale = 1, ox = 0, oy = 0;
+function resize() {
+  DPR = Math.min(window.devicePixelRatio || 1, 2);
+  W = window.innerWidth; H = window.innerHeight;
+  canvas.width = Math.round(W * DPR); canvas.height = Math.round(H * DPR);
+  canvas.style.width = W + "px"; canvas.style.height = H + "px";
+  scale = Math.min(W / VW, H / VH) * DPR; ox = (W * DPR - VW * scale) / 2; oy = (H * DPR - VH * scale) / 2;
+}
+window.addEventListener("resize", resize); resize();
+
+/* ---------------- audio ---------------- */
+let actx = null, muted = false, musicTimer = null, mStep = 0;
+function initAudio() {
+  iosPlaybackSession();
+  if (!actx) { try { const AC = window.AudioContext || window.webkitAudioContext; if (AC) actx = new AC(); } catch (e) {} }
+  if (actx && actx.state === "suspended") actx.resume();
+  if (actx && !musicTimer) musicTimer = setInterval(musicTick, 215);
+}
+function tone(freq, dur, type, vol, when, slide) {
+  if (!actx || muted) return;
+  const t = when || actx.currentTime, o = actx.createOscillator(), g = actx.createGain();
+  o.type = type || "triangle"; o.frequency.setValueAtTime(freq, t);
+  if (slide) o.frequency.exponentialRampToValueAtTime(Math.max(40, slide), t + dur);
+  g.gain.setValueAtTime(vol || 0.15, t);
+  g.gain.exponentialRampToValueAtTime(0.001, t + dur);
+  o.connect(g); g.connect(actx.destination); o.start(t); o.stop(t + dur + 0.02);
+}
+const BASS = [147, 0, 0, 0, 147, 0, 0, 0, 175, 0, 0, 0, 165, 0, 147, 0];
+const LEAD = [0, 440, 0, 523, 0, 440, 0, 392, 0, 440, 0, 494, 0, 523, 0, 0];
+function musicTick() {
+  if (!actx || muted || state !== "play") return;
+  const b = BASS[mStep % 16], l = LEAD[mStep % 16], t = actx.currentTime;
+  if (b) tone(b, 0.18, "triangle", 0.11, t);
+  if (l) tone(l, 0.14, "triangle", 0.05, t);
+  mStep++;
+}
+function sfx(name) {
+  if (!actx || muted) return; const t = actx.currentTime;
+  if (name === "bump") tone(150, 0.06, "square", 0.07, t, 100);
+  if (name === "fall") tone(600, 0.4, "triangle", 0.13, t, 70);
+  if (name === "cup") { [659, 880, 1175, 1568].forEach((f, i) => tone(f, 0.13, "triangle", 0.11, t + i * 0.08)); }
+  if (name === "win") { [523, 659, 784, 1047, 1319].forEach((f, i) => tone(f, 0.16, "square", 0.11, t + i * 0.11)); }
+  if (name === "over") { [392, 330, 262].forEach((f, i) => tone(f, 0.2, "triangle", 0.12, t + i * 0.16)); }
+}
+
+/* ---------------- boards ---------------- */
+/* # wall · . floor · S start · G cup · O hole */
+const BOARDS = [
+  { name: "First Tilt", rows: [
+    "#############",
+    "#S....#.....#",
+    "#.##..#..#..#",
+    "#..#.....#..#",
+    "#..#.####...#",
+    "#..#....#O#.#",
+    "#.####..#.#.#",
+    "#....#..#.#.#",
+    "#.##.#..#...#",
+    "#..#.#.####.#",
+    "#..#.#....#.#",
+    "#....###..#G#",
+    "#############" ] },
+  { name: "Hole Lot of Trouble", rows: [
+    "#############",
+    "#S..#.......#",
+    "#.#.#.#####.#",
+    "#.#...#...#.#",
+    "#.#####.#.#.#",
+    "#.....#.#.#.#",
+    "#.###.#.#.#.#",
+    "#...#...#O#.#",
+    "##.######.#.#",
+    "#.........#.#",
+    "#.#########.#",
+    "#..........G#",
+    "#############" ] },
+  { name: "The Gauntlet", rows: [
+    "#############",
+    "#S#.........#",
+    "#.#.#######.#",
+    "#.#.#.....#.#",
+    "#.#.#.O...#.#",
+    "#.#.#####.#.#",
+    "#.#.....#.#.#",
+    "#.#####.#.#.#",
+    "#.....#.#.#.#",
+    "#.###.#.#.#.#",
+    "#...#...#.#.#",
+    "###.#####.#G#",
+    "#############" ] },
+  { name: "Crosswinds", rows: [
+    "#############",
+    "#S....#.....#",
+    "#.##..#..O..#",
+    "#..#..##....#",
+    "#..#.....##.#",
+    "#.####.##...#",
+    "#....#....#.#",
+    "#.##.####.#.#",
+    "#..#....#.#.#",
+    "#..###..#.#.#",
+    "#..#....#O#.#",
+    "#..#....#..G#",
+    "#############" ] },
+  { name: "Master's Maze", rows: [
+    "#############",
+    "#S#.........#",
+    "#.#.######..#",
+    "#.#.#....#..#",
+    "#...#.##.#.##",
+    "#.###.##.#..#",
+    "#.#...##.##.#",
+    "#.#.####..#.#",
+    "#.#....#.O#.#",
+    "#.####.#..#.#",
+    "#......#.##.#",
+    "#O#####.....#",
+    "#.........#G#",
+    "#############" ] }
+];
+let state = "menu", boardIdx, ball, ballsLeft, boardTime, totalTime, runTimes, lastT, keys, dragTilt, msgT, msg;
+let bestTotal = +(localStorage.getItem("gyrolab_best") || 0);
+let boardBests = JSON.parse(localStorage.getItem("gyrolab_boards") || "{}");
+function boardData(i) {
+  const rows = BOARDS[i].rows, H = rows.length, Wd = rows[0].length;
+  let S = null, G = null; const holes = [];
+  rows.forEach((row, r) => { for (let c = 0; c < row.length; c++) {
+    if (row[c] === "S") S = { r, c }; if (row[c] === "G") G = { r, c }; if (row[c] === "O") holes.push({ r, c });
+  } });
+  return { rows, H, W: Wd, S, G, holes };
+}
+function isWall(i, r, c) {
+  const d = boardData(i);
+  if (r < 0 || c < 0 || r >= d.H || c >= d.W) return true;
+  return d.rows[r][c] === "#";
+}
+
+/* ---------------- tilt input ---------------- */
+let gyro = { on: false, beta: 0, gamma: 0, baseB: null, baseG: null, seen: false };
+function onOrient(e) {
+  if (e.beta === null || e.gamma === null) return;
+  gyro.seen = true; gyro.beta = e.beta; gyro.gamma = e.gamma;
+  if (gyro.baseB === null) { gyro.baseB = e.beta; gyro.baseG = e.gamma; }
+}
+function enableGyro() {
+  if (typeof DeviceOrientationEvent !== "undefined" && typeof DeviceOrientationEvent.requestPermission === "function") {
+    DeviceOrientationEvent.requestPermission().then(res => {
+      if (res === "granted") { window.addEventListener("deviceorientation", onOrient); gyro.on = true; }
+      hideTiltBtn();
+    }).catch(() => hideTiltBtn());
+  } else {
+    window.addEventListener("deviceorientation", onOrient); gyro.on = true;
+    setTimeout(() => { if (!gyro.seen) showTiltBtn(true); }, 1600);
+  }
+}
+const tiltBtn = document.getElementById("tiltBtn");
+function showTiltBtn(fallbackOnly) {
+  if (typeof DeviceOrientationEvent !== "undefined" && typeof DeviceOrientationEvent.requestPermission === "function") {
+    tiltBtn.style.display = "block";
+  } else if (fallbackOnly) {
+    tiltBtn.textContent = "No gyro found — drag or use arrow keys";
+    tiltBtn.style.display = "block";
+    setTimeout(hideTiltBtn, 2600);
+  }
+}
+function hideTiltBtn() { tiltBtn.style.display = "none"; }
+tiltBtn.addEventListener("click", e => { e.stopPropagation(); initAudio(); enableGyro(); });
+function tiltVector() {
+  // returns {x, y} in degrees-equivalent, clamped
+  if (gyro.on && gyro.seen && gyro.baseB !== null) {
+    let dx = gyro.gamma - gyro.baseG, dy = gyro.beta - gyro.baseB;
+    dx = Math.max(-24, Math.min(24, dx)); dy = Math.max(-24, Math.min(24, dy));
+    return { x: dx, y: dy };
+  }
+  if (dragTilt) return dragTilt;
+  const kx = (keys.right ? 14 : 0) - (keys.left ? 14 : 0);
+  const ky = (keys.down ? 14 : 0) - (keys.up ? 14 : 0);
+  return { x: kx, y: ky };
+}
+
+/* ---------------- game flow ---------------- */
+function loadBoard(i) {
+  boardIdx = i;
+  const d = boardData(i);
+  ball = { x: OX + (d.S.c + 0.5) * CELL, y: OY + (d.S.r + 0.5) * CELL, vx: 0, vy: 0 };
+  boardTime = 0;
+  gyro.baseB = null; gyro.baseG = null; // re-calibrate flat at board start
+}
+function startGame() {
+  ballsLeft = 3; totalTime = 0; runTimes = [];
+  loadBoard(0); state = "play"; initAudio(); enableGyro();
+  if (typeof DeviceOrientationEvent !== "undefined" && typeof DeviceOrientationEvent.requestPermission === "function" && !gyro.on && "ontouchstart" in window) showTiltBtn(false);
+}
+function respawn() {
+  const d = boardData(boardIdx);
+  ball = { x: OX + (d.S.c + 0.5) * CELL, y: OY + (d.S.r + 0.5) * CELL, vx: 0, vy: 0 };
+}
+function step(dtms, now) {
+  if (state !== "play") return;
+  const dt = Math.min(0.033, dtms / 1000);
+  boardTime += dt;
+  const tv = tiltVector();
+  ball.vx += tv.x * 46 * dt; ball.vy += tv.y * 46 * dt;
+  const fr = Math.pow(0.35, dt);
+  ball.vx *= fr; ball.vy *= fr;
+  const maxV = 460; const sp = Math.hypot(ball.vx, ball.vy);
+  if (sp > maxV) { ball.vx = ball.vx / sp * maxV; ball.vy = ball.vy / sp * maxV; }
+  // move + collide per axis
+  moveAxis("x", ball.vx * dt); moveAxis("y", ball.vy * dt);
+  const d = boardData(boardIdx);
+  for (const h of d.holes) {
+    const hx = OX + (h.c + 0.5) * CELL, hy = OY + (h.r + 0.5) * CELL;
+    if (Math.hypot(ball.x - hx, ball.y - hy) < 9) {
+      ballsLeft--; sfx("fall");
+      if (ballsLeft <= 0) { state = "over"; sfx("over"); }
+      else { msg = "Into the hole! " + ballsLeft + " balls left"; msgT = now; respawn(); }
+      return;
+    }
+  }
+  const gx = OX + (d.G.c + 0.5) * CELL, gy = OY + (d.G.r + 0.5) * CELL;
+  if (Math.hypot(ball.x - gx, ball.y - gy) < 13) {
+    sfx("cup");
+    runTimes.push(boardTime); totalTime += boardTime;
+    const key = "b" + boardIdx;
+    if (!boardBests[key] || boardTime < boardBests[key]) { boardBests[key] = Math.round(boardTime * 10) / 10; localStorage.setItem("gyrolab_boards", JSON.stringify(boardBests)); }
+    if (boardIdx + 1 >= BOARDS.length) {
+      state = "win";
+      if (!bestTotal || totalTime < bestTotal) { bestTotal = Math.round(totalTime * 10) / 10; localStorage.setItem("gyrolab_best", bestTotal); }
+      sfx("win");
+    } else { msg = "Board clear! " + boardTime.toFixed(1) + "s"; msgT = now; loadBoard(boardIdx + 1); }
+  }
+}
+function moveAxis(axis, delta) {
+  if (delta === 0) return;
+  if (axis === "x") ball.x += delta; else ball.y += delta;
+  const d = boardData(boardIdx);
+  const c0 = Math.floor((ball.x - BALL_R - OX) / CELL), c1 = Math.floor((ball.x + BALL_R - OX) / CELL);
+  const r0 = Math.floor((ball.y - BALL_R - OY) / CELL), r1 = Math.floor((ball.y + BALL_R - OY) / CELL);
+  for (let r = r0; r <= r1; r++) for (let c = c0; c <= c1; c++) {
+    if (!isWall(boardIdx, r, c)) continue;
+    const wx = OX + c * CELL, wy = OY + r * CELL;
+    const nx = Math.max(wx, Math.min(ball.x, wx + CELL)), ny = Math.max(wy, Math.min(ball.y, wy + CELL));
+    const dist = Math.hypot(ball.x - nx, ball.y - ny);
+    if (dist < BALL_R) {
+      if (axis === "x") { ball.x = delta > 0 ? wx - BALL_R - 0.01 : wx + CELL + BALL_R + 0.01; if (Math.abs(ball.vx) > 60) sfx("bump"); ball.vx = 0; }
+      else { ball.y = delta > 0 ? wy - BALL_R - 0.01 : wy + CELL + BALL_R + 0.01; if (Math.abs(ball.vy) > 60) sfx("bump"); ball.vy = 0; }
+    }
+  }
+}
+
+/* ---------------- fairness / QA self-check ---------------- */
+function fairnessCheck() {
+  const boards = BOARDS.map((b, i) => {
+    const d = boardData(i);
+    const blocked = new Set(d.holes.map(h => h.r + "," + h.c));
+    const seen = new Set([d.S.r + "," + d.S.c]), q = [[d.S.r, d.S.c, 0]];
+    let pathLen = -1;
+    while (q.length) {
+      const [r, c, n] = q.shift();
+      if (r === d.G.r && c === d.G.c) { pathLen = n; break; }
+      for (const [dr, dc] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) {
+        const nr = r + dr, nc = c + dc, k = nr + "," + nc;
+        if (nr < 0 || nc < 0 || nr >= d.H || nc >= d.W || seen.has(k) || blocked.has(k)) continue;
+        if (d.rows[nr][nc] === "#") continue;
+        seen.add(k); q.push([nr, nc, n + 1]);
+      }
+    }
+    return { board: i + 1, path: pathLen, holes: d.holes.length, pass: pathLen > 0 };
+  });
+  const r = { game: "gyro-labyrinth", boards, corridorPx: CELL, ballPx: BALL_R * 2,
+    pass: boards.every(b => b.pass) && CELL >= BALL_R * 2 + 8 };
+  window.__qaFairness = r; return r;
+}
+
+/* ---------------- draw ---------------- */
+function draw(now) {
+  ctx.setTransform(1, 0, 0, 1, 0, 0);
+  ctx.fillStyle = "#33200f"; ctx.fillRect(0, 0, canvas.width, canvas.height);
+  ctx.setTransform(scale, 0, 0, scale, ox, oy);
+  ctx.fillStyle = "#ffeedd"; ctx.font = "700 24px system-ui"; ctx.textAlign = "left";
+  ctx.fillText("GYRO LABYRINTH", 15, 38);
+  ctx.font = "600 15px system-ui"; ctx.fillStyle = "#dcbd93";
+  const d = boardData(boardIdx || 0);
+  ctx.fillText("BOARD " + ((boardIdx || 0) + 1) + "/5 · " + BOARDS[boardIdx || 0].name + "  ·  ⚪×" + Math.max(0, ballsLeft || 3), 15, 64);
+  ctx.fillText("⏱ " + (state === "play" ? boardTime.toFixed(1) : "0.0") + "s  ·  TOTAL " + (totalTime || 0).toFixed(1) + "s" + (bestTotal ? "  ·  BEST " + bestTotal + "s" : ""), 15, 88);
+  ctx.fillStyle = gyro.on && gyro.seen ? "#9fe870" : "#ffb347"; ctx.font = "600 13px system-ui";
+  ctx.fillText(gyro.on && gyro.seen ? "📐 Gyro live — tilt your phone" : "Drag, arrow keys, or enable tilt ↓", 15, 110);
+  // board frame
+  ctx.fillStyle = "#6b4423"; ctx.fillRect(OX - 10, OY - 10, d.W * CELL + 20, d.H * CELL + 20);
+  ctx.fillStyle = "#a9743f"; ctx.fillRect(OX - 5, OY - 5, d.W * CELL + 10, d.H * CELL + 10);
+  for (let r = 0; r < d.H; r++) for (let c = 0; c < d.W; c++) {
+    const x = OX + c * CELL, y = OY + r * CELL, ch = d.rows[r][c];
+    ctx.fillStyle = (r + c) % 2 ? "#c08b52" : "#c99156"; ctx.fillRect(x, y, CELL, CELL);
+    if (ch === "#") { ctx.fillStyle = "#7a4e26"; ctx.fillRect(x, y, CELL, CELL); ctx.fillStyle = "#8f5e2f"; ctx.fillRect(x, y, CELL, 5); ctx.fillRect(x, y, 5, CELL); }
+    if (ch === "O") { ctx.fillStyle = "#120a04"; ctx.beginPath(); ctx.arc(x + CELL / 2, y + CELL / 2, 10.5, 0, 7); ctx.fill(); ctx.strokeStyle = "rgba(0,0,0,.5)"; ctx.stroke(); }
+    if (ch === "G") {
+      ctx.fillStyle = "#8a6d1f"; ctx.beginPath(); ctx.arc(x + CELL / 2, y + CELL / 2, 12, 0, 7); ctx.fill();
+      ctx.fillStyle = "#1c1206"; ctx.beginPath(); ctx.arc(x + CELL / 2, y + CELL / 2, 8.5, 0, 7); ctx.fill();
+      ctx.fillStyle = "#ffd94a"; ctx.beginPath(); ctx.arc(x + CELL / 2, y + CELL / 2, 12, 0, 1.4); ctx.lineTo(x + CELL / 2, y + CELL / 2); ctx.fill();
+    }
+    if (ch === "S") { ctx.strokeStyle = "rgba(255,255,255,.5)"; ctx.lineWidth = 2; ctx.beginPath(); ctx.arc(x + CELL / 2, y + CELL / 2, 11, 0, 7); ctx.stroke(); }
+  }
+  if (ball && state !== "menu") {
+    const grd = ctx.createRadialGradient(ball.x - 4, ball.y - 4, 2, ball.x, ball.y, BALL_R + 2);
+    grd.addColorStop(0, "#ffffff"); grd.addColorStop(0.55, "#c9ccd6"); grd.addColorStop(1, "#7d8191");
+    ctx.fillStyle = grd; ctx.beginPath(); ctx.arc(ball.x, ball.y, BALL_R, 0, 7); ctx.fill();
+  }
+  if (msg && now - msgT < 1600 && state === "play") {
+    ctx.fillStyle = "rgba(0,0,0,.55)"; ctx.fillRect(0, 330, VW, 46);
+    ctx.fillStyle = "#ffd94a"; ctx.font = "800 20px system-ui"; ctx.textAlign = "center";
+    ctx.fillText(msg, VW / 2, 360);
+  }
+  if (state === "menu") {
+    ctx.fillStyle = "rgba(20,10,2,.85)"; ctx.fillRect(0, 210, VW, 262);
+    ctx.fillStyle = "#fff"; ctx.font = "700 31px system-ui"; ctx.textAlign = "center";
+    ctx.fillText("GYRO LABYRINTH", VW / 2, 276);
+    ctx.font = "400 16px system-ui"; ctx.fillStyle = "#f0dcbc";
+    ctx.fillText("Tilt your phone to roll the steel ball", VW / 2, 310);
+    ctx.fillText("to the brass cup. Black holes eat the ball.", VW / 2, 336);
+    ctx.fillText("No gyro? Drag on the board, or use arrow keys.", VW / 2, 362);
+    ctx.fillStyle = "#ffd94a"; ctx.font = "700 21px system-ui";
+    ctx.fillText("TAP TO START", VW / 2, 416);
+  }
+  if (state === "over" || state === "win") {
+    ctx.fillStyle = "rgba(20,10,2,.87)"; ctx.fillRect(0, 210, VW, 250);
+    ctx.fillStyle = "#fff"; ctx.font = "700 30px system-ui"; ctx.textAlign = "center";
+    ctx.fillText(state === "win" ? "ALL BOARDS CLEAR! 🏆" : "OUT OF BALLS", VW / 2, 276);
+    ctx.font = "400 17px system-ui"; ctx.fillStyle = "#f0dcbc";
+    if (state === "win") ctx.fillText("Total time " + totalTime.toFixed(1) + "s · Best " + bestTotal + "s", VW / 2, 314);
+    else ctx.fillText("You reached board " + (boardIdx + 1) + " of 5.", VW / 2, 314);
+    ctx.fillStyle = "#ffd94a"; ctx.font = "700 20px system-ui";
+    ctx.fillText("TAP TO PLAY AGAIN", VW / 2, 378);
+  }
+  if (QA_MODE) {
+    const f = fairnessCheck();
+    ctx.fillStyle = "rgba(0,0,0,.65)"; ctx.fillRect(0, VH - 30, VW, 30);
+    ctx.fillStyle = f.pass ? "#7dff8a" : "#ff7d7d"; ctx.font = "600 12px monospace"; ctx.textAlign = "left";
+    ctx.fillText("QA gyro pass=" + f.pass + " paths=" + f.boards.map(b => b.path).join("/"), 8, VH - 10);
+  }
+}
+function frame(t) {
+  const dt = Math.min(50, t - (lastT || t)); lastT = t;
+  if (state === "play") step(dt, t);
+  draw(t);
+  requestAnimationFrame(frame);
+}
+requestAnimationFrame(frame);
+
+/* ---------------- input ---------------- */
+keys = { left: false, right: false, up: false, down: false };
+let dragStart = null;
+canvas.addEventListener("pointerdown", e => {
+  initAudio();
+  if (state !== "play") { startGame(); return; }
+  const r = canvas.getBoundingClientRect();
+  dragStart = { x: e.clientX, y: e.clientY };
+});
+canvas.addEventListener("pointermove", e => {
+  if (dragStart) {
+    dragTilt = { x: Math.max(-20, Math.min(20, (e.clientX - dragStart.x) / 6)), y: Math.max(-20, Math.min(20, (e.clientY - dragStart.y) / 6)) };
+  }
+});
+canvas.addEventListener("pointerup", () => { dragStart = null; dragTilt = null; });
+window.addEventListener("keydown", e => {
+  if (e.code === "ArrowLeft") keys.left = true;
+  else if (e.code === "ArrowRight") keys.right = true;
+  else if (e.code === "ArrowUp") keys.up = true;
+  else if (e.code === "ArrowDown") keys.down = true;
+  else if (e.code === "Space") { e.preventDefault(); if (state !== "play") startGame(); }
+});
+window.addEventListener("keyup", e => {
+  if (e.code === "ArrowLeft") keys.left = false;
+  if (e.code === "ArrowRight") keys.right = false;
+  if (e.code === "ArrowUp") keys.up = false;
+  if (e.code === "ArrowDown") keys.down = false;
+});
+const muteBtn = document.getElementById("muteBtn");
+function syncMute() { muteBtn.textContent = muted ? "🔇" : "🔊"; }
+muteBtn.addEventListener("click", e => { e.stopPropagation(); muted = !muted; localStorage.setItem("gyrolab_muted", muted ? 1 : 0); syncMute(); });
+muted = localStorage.getItem("gyrolab_muted") === "1"; syncMute();
+boardIdx = 0; ballsLeft = 3; totalTime = 0; boardTime = 0; loadBoard(0);
+if (QA_MODE) fairnessCheck();
+</script>
+</body>
+</html>

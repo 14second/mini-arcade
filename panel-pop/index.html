@@ -1,0 +1,346 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, user-scalable=no">
+<meta name="theme-color" content="#241033">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<title>Panel Pop</title>
+<style>
+  * { margin:0; padding:0; box-sizing:border-box; }
+  html, body { width:100%; height:100%; overflow:hidden; background:#241033;
+    font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+    touch-action:none; user-select:none; -webkit-user-select:none; -webkit-tap-highlight-color: transparent; }
+  canvas { position:fixed; inset:0; display:block; touch-action:none; }
+  #muteBtn { position:fixed; top:10px; right:10px; z-index:10; width:48px; height:48px; border-radius:12px;
+    border:2px solid rgba(255,255,255,.7); background:rgba(40,15,60,.55); color:#fff; font-size:22px;
+    line-height:1; cursor:pointer; display:flex; align-items:center; justify-content:center; padding:0; }
+  #pad { position:fixed; left:0; right:0; bottom:0; z-index:10; display:flex; justify-content:center; gap:8px; padding:10px 8px calc(10px + env(safe-area-inset-bottom)); }
+  #pad button { flex:1; max-width:66px; height:56px; border-radius:14px; border:2px solid rgba(255,255,255,.45);
+    background:rgba(60,25,90,.72); color:#fff; font-size:21px; cursor:pointer; padding:0; }
+  #pad button:active { background:rgba(110,60,170,.85); }
+</style>
+</head>
+<body>
+<canvas id="game"></canvas>
+<button id="muteBtn" aria-label="Toggle sound">🔊</button>
+<div id="pad">
+  <button data-k="left" aria-label="Cursor left">◀</button>
+  <button data-k="right" aria-label="Cursor right">▶</button>
+  <button data-k="up" aria-label="Cursor up">▲</button>
+  <button data-k="down" aria-label="Cursor down">▼</button>
+  <button data-k="swap" aria-label="Swap">⇄</button>
+  <button data-k="raise" aria-label="Raise stack">⏫</button>
+</div>
+<script>
+// iOS audio routing: Web Audio defaults to the "ambient" channel, which the
+// iPhone silent switch mutes entirely. Route it to the media/playback
+// channel (iOS 17+ Audio Session API) on the first user gesture and inside
+// audio init, so game music/SFX play even with silent mode on.
+function iosPlaybackSession() {
+  try { if ('audioSession' in navigator) navigator.audioSession.type = 'playback'; } catch (e) {}
+}
+document.addEventListener('pointerdown', iosPlaybackSession, true);
+document.addEventListener('touchstart', iosPlaybackSession, true);
+"use strict";
+/* PANEL POP — original rising-stack tile swapper. Swap two side-by-side
+   tiles, match three or more to clear, chain for multipliers, and don't
+   let the rising stack reach the top. RAISE pushes a fresh row up when
+   you want the pressure.
+   Fairness (verified by the ?qa=1 self-check): across 200 seeded boards
+   the generator never deals an existing 3-in-a-row and never starts
+   taller than 6 rows, and the rise interval never goes below its floor. */
+const VW = 420, VH = 720;
+const QA_MODE = /[?&]qa=1/.test(location.search);
+const canvas = document.getElementById("game"), ctx = canvas.getContext("2d");
+let W = 0, H = 0, DPR = 1, scale = 1, ox = 0, oy = 0;
+function resize() {
+  DPR = Math.min(window.devicePixelRatio || 1, 2);
+  W = window.innerWidth; H = window.innerHeight;
+  canvas.width = Math.round(W * DPR); canvas.height = Math.round(H * DPR);
+  canvas.style.width = W + "px"; canvas.style.height = H + "px";
+  scale = Math.min(W / VW, H / VH) * DPR; ox = (W * DPR - VW * scale) / 2; oy = (H * DPR - VH * scale) / 2;
+}
+window.addEventListener("resize", resize); resize();
+
+/* ---------------- audio ---------------- */
+let actx = null, muted = false, musicTimer = null, mStep = 0;
+function initAudio() {
+  iosPlaybackSession();
+  if (!actx) { try { const AC = window.AudioContext || window.webkitAudioContext; if (AC) actx = new AC(); } catch (e) {} }
+  if (actx && actx.state === "suspended") actx.resume();
+  if (actx && !musicTimer) musicTimer = setInterval(musicTick, 200);
+}
+function tone(freq, dur, type, vol, when, slide) {
+  if (!actx || muted) return;
+  const t = when || actx.currentTime, o = actx.createOscillator(), g = actx.createGain();
+  o.type = type || "triangle"; o.frequency.setValueAtTime(freq, t);
+  if (slide) o.frequency.exponentialRampToValueAtTime(Math.max(40, slide), t + dur);
+  g.gain.setValueAtTime(vol || 0.15, t);
+  g.gain.exponentialRampToValueAtTime(0.001, t + dur);
+  o.connect(g); g.connect(actx.destination); o.start(t); o.stop(t + dur + 0.02);
+}
+const BASS = [165, 0, 0, 0, 165, 0, 0, 0, 196, 0, 0, 0, 220, 0, 196, 0];
+const LEAD = [0, 659, 0, 784, 0, 659, 0, 587, 0, 523, 0, 587, 0, 659, 0, 0];
+function musicTick() {
+  if (!actx || muted || state !== "play") return;
+  const b = BASS[mStep % 16], l = LEAD[mStep % 16], t = actx.currentTime;
+  if (b) tone(b, 0.17, "triangle", 0.12, t);
+  if (l) tone(l, 0.12, "triangle", 0.06, t);
+  mStep++;
+}
+function sfx(name) {
+  if (!actx || muted) return; const t = actx.currentTime;
+  if (name === "move") tone(260, 0.04, "square", 0.05, t);
+  if (name === "swap") { tone(440, 0.05, "square", 0.06, t); tone(554, 0.05, "square", 0.06, t + 0.05); }
+  if (name === "clear") { [587, 740, 880].forEach((f, i) => tone(f, 0.1, "triangle", 0.11, t + i * 0.05)); }
+  if (name === "chain") { [587, 740, 880, 1109, 1319].forEach((f, i) => tone(f, 0.09, "square", 0.1, t + i * 0.045)); }
+  if (name === "warn") tone(196, 0.12, "square", 0.08, t);
+  if (name === "over") { [392, 330, 262, 196].forEach((f, i) => tone(f, 0.22, "triangle", 0.12, t + i * 0.18)); }
+}
+
+/* ---------------- game ---------------- */
+const COLS = 6, ROWS = 12, CELL = 47, TYPES = 5;
+const WX = 69, WY = 84; // well origin; well is 282 x 564
+const RISE_FLOOR_MS = 1050; // slowest allowed top speed: one row per 1.05 s
+const TILE = [
+  { c: "#ef5b7a", s: "circle" }, { c: "#3fa7e8", s: "square" },
+  { c: "#4fce72", s: "tri" }, { c: "#f7c948", s: "diamond" },
+  { c: "#b07fe8", s: "star" }
+];
+let state = "menu", grid, cursor, score, best, level, riseAcc, risePx, lastT, resolving, warnFlip;
+best = +(localStorage.getItem("panelpop_best") || 0);
+function emptyGrid() { return Array.from({ length: ROWS }, () => new Array(COLS).fill(-1)); }
+function riseInterval(lv) { const L = lv === undefined ? (level || 1) : lv; return Math.max(RISE_FLOOR_MS, 3000 - (L - 1) * 160); }
+function pickType(rng, banned) {
+  let t, guard = 0;
+  do { t = Math.floor(rng() * TYPES); guard++; } while (banned.has(t) && guard < 40);
+  if (banned.has(t)) { for (let i = 0; i < TYPES; i++) if (!banned.has(i)) { t = i; break; } }
+  return t;
+}
+/* Generate one bottom row for grid g (row index ROWS-1 is the bottom).
+   Banned: a type that would complete 3 vertically (two same directly
+   above the new cell) or 3 horizontally inside the new row. */
+function genRow(g, rng) {
+  const row = new Array(COLS).fill(-1);
+  for (let c = 0; c < COLS; c++) {
+    const banned = new Set();
+    if (g[ROWS - 2][c] >= 0 && g[ROWS - 2][c] === g[ROWS - 3][c]) banned.add(g[ROWS - 2][c]);
+    if (c >= 2 && row[c - 1] >= 0 && row[c - 1] === row[c - 2]) banned.add(row[c - 1]);
+    row[c] = pickType(rng, banned);
+  }
+  return row;
+}
+function genInitial(g, rng, rows) {
+  for (let i = 0; i < rows; i++) {
+    g.splice(0, 1); g.push(genRow(g, rng));
+  }
+  return g;
+}
+function stackHeight(g) { let h = 0; for (let c = 0; c < COLS; c++) { let ch = 0; for (let r = 0; r < ROWS; r++) if (g[r][c] >= 0) ch++; h = Math.max(h, ch); } return h; }
+function findMatches(g) {
+  const hit = new Set();
+  for (let r = 0; r < ROWS; r++) for (let c = 0; c < COLS; c++) {
+    const v = g[r][c]; if (v < 0) continue;
+    let n = 1; while (c + n < COLS && g[r][c + n] === v) n++;
+    if (n >= 3) for (let i = 0; i < n; i++) hit.add(r * COLS + c + i);
+    n = 1; while (r + n < ROWS && g[r + n][c] === v) n++;
+    if (n >= 3) for (let i = 0; i < n; i++) hit.add((r + i) * COLS + c);
+  }
+  return hit;
+}
+function applyGravity(g) {
+  for (let c = 0; c < COLS; c++) {
+    let write = ROWS - 1;
+    for (let r = ROWS - 1; r >= 0; r--) if (g[r][c] >= 0) { const v = g[r][c]; g[r][c] = -1; g[write][c] = v; write--; }
+  }
+}
+function resolveBoard(chain) {
+  const hit = findMatches(grid);
+  if (!hit.size) { resolving = false; return; }
+  resolving = true;
+  hit.forEach(k => { grid[Math.floor(k / COLS)][k % COLS] = -1; });
+  score += hit.size * 10 * chain;
+  level = Math.floor(score / 600) + 1;
+  sfx(chain > 1 ? "chain" : "clear");
+  applyGravity(grid);
+  setTimeout(() => resolveBoard(chain + 1), 160);
+}
+function pushRow() {
+  const topHad = grid[0].some(v => v >= 0);
+  grid.splice(0, 1); grid.push(genRow(grid, Math.random));
+  risePx = 0;
+  if (topHad) { gameOver(); return; }
+  if (!resolving) resolveBoard(1);
+}
+function doSwap() {
+  const { r, c } = cursor;
+  if (grid[r][c] === grid[r][c + 1]) return;
+  [grid[r][c], grid[r][c + 1]] = [grid[r][c + 1], grid[r][c]];
+  sfx("swap");
+  applyGravity(grid);
+  if (!resolving) resolveBoard(1);
+}
+function gameOver() {
+  state = "over"; sfx("over");
+  if (score > best) { best = score; localStorage.setItem("panelpop_best", best); }
+}
+function startGame() {
+  grid = genInitial(emptyGrid(), Math.random, 5);
+  cursor = { r: ROWS - 3, c: 2 };
+  score = 0; level = 1; riseAcc = 0; risePx = 0; resolving = false;
+  state = "play"; initAudio();
+}
+function step(dt) {
+  if (state !== "play" || resolving) return;
+  riseAcc += dt;
+  risePx = Math.floor(CELL * (riseAcc / riseInterval()));
+  if (riseAcc >= riseInterval()) { riseAcc = 0; pushRow(); }
+  if (stackHeight(grid) >= ROWS - 1 && Math.floor(performance.now() / 500) % 2 === 0) sfx("warn");
+}
+
+/* ---------------- fairness / QA self-check ---------------- */
+function mulberry32(a) { return function () { a |= 0; a = a + 0x6D2B79F5 | 0; let t = Math.imul(a ^ a >>> 15, 1 | a); t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t; return ((t ^ t >>> 14) >>> 0) / 4294967296; }; }
+function fairnessCheck() {
+  let allClean = true, maxStart = 0;
+  for (let s = 1; s <= 200; s++) {
+    const g = genInitial(emptyGrid(), mulberry32(s * 7919), 5);
+    if (findMatches(g).size) allClean = false;
+    maxStart = Math.max(maxStart, stackHeight(g));
+  }
+  // generated rise rows against a tall stack must also avoid instant matches
+  let riseClean = true;
+  for (let s = 1; s <= 200; s++) {
+    const rng = mulberry32(s * 104729);
+    const g = genInitial(emptyGrid(), rng, 8);
+    g.splice(0, 1); g.push(genRow(g, rng));
+    if (findMatches(g).size) riseClean = false;
+  }
+  const floorOk = riseInterval(99) >= RISE_FLOOR_MS && riseInterval(99) === RISE_FLOOR_MS;
+  const r = { game: "panel-pop", seedsChecked: 200, boardsClean: allClean, riseRowsClean: riseClean, maxStartHeight: maxStart,
+    riseFloorMs: RISE_FLOOR_MS, riseMaxLevelMs: riseInterval(99),
+    pass: allClean && riseClean && maxStart <= 6 && floorOk };
+  window.__qaFairness = r; return r;
+}
+
+/* ---------------- draw ---------------- */
+function drawTile(x, y, t) {
+  const s = CELL - 4, cx = x + CELL / 2, cy = y + CELL / 2, r = s * 0.33;
+  ctx.fillStyle = TILE[t].c; ctx.strokeStyle = "rgba(0,0,0,.35)"; ctx.lineWidth = 2;
+  const sh = TILE[t].s;
+  ctx.beginPath();
+  if (sh === "circle") ctx.arc(cx, cy, r, 0, 7);
+  else if (sh === "square") ctx.rect(cx - r, cy - r, r * 2, r * 2);
+  else if (sh === "tri") { ctx.moveTo(cx, cy - r * 1.1); ctx.lineTo(cx + r * 1.1, cy + r * 0.9); ctx.lineTo(cx - r * 1.1, cy + r * 0.9); ctx.closePath(); }
+  else if (sh === "diamond") { ctx.moveTo(cx, cy - r * 1.15); ctx.lineTo(cx + r * 1.05, cy); ctx.lineTo(cx, cy + r * 1.15); ctx.lineTo(cx - r * 1.05, cy); ctx.closePath(); }
+  else { for (let i = 0; i < 5; i++) { const a = -Math.PI / 2 + i * (Math.PI * 4 / 5); const px = cx + Math.cos(a) * r * 1.2, py = cy + Math.sin(a) * r * 1.2; i ? ctx.lineTo(px, py) : ctx.moveTo(px, py); } ctx.closePath(); }
+  ctx.fill(); ctx.stroke();
+  ctx.fillStyle = "rgba(255,255,255,.45)";
+  ctx.beginPath(); ctx.arc(cx - r * 0.3, cy - r * 0.35, r * 0.2, 0, 7); ctx.fill();
+}
+function draw() {
+  ctx.setTransform(1, 0, 0, 1, 0, 0);
+  ctx.fillStyle = "#190a26"; ctx.fillRect(0, 0, canvas.width, canvas.height);
+  ctx.setTransform(scale, 0, 0, scale, ox, oy);
+  ctx.fillStyle = "#f3e9ff"; ctx.font = "700 25px system-ui"; ctx.textAlign = "left";
+  ctx.fillText("PANEL POP", 69, 40);
+  ctx.font = "600 15px system-ui"; ctx.fillStyle = "#bb9ede"; ctx.textAlign = "right";
+  ctx.fillText("BEST " + best, VW - 50, 40);
+  ctx.font = "600 15px system-ui"; ctx.textAlign = "left";
+  ctx.fillText("SCORE " + score + "   LV " + level, 69, 66);
+  const danger = grid && stackHeight(grid) >= ROWS - 2;
+  ctx.fillStyle = "#2a1743"; ctx.fillRect(WX - 4, WY - 4, COLS * CELL + 8, ROWS * CELL + 8);
+  ctx.strokeStyle = danger ? "#ff5b6a" : "#54357e"; ctx.lineWidth = 3; ctx.strokeRect(WX - 4, WY - 4, COLS * CELL + 8, ROWS * CELL + 8);
+  ctx.save();
+  ctx.beginPath(); ctx.rect(WX, WY, COLS * CELL, ROWS * CELL); ctx.clip();
+  if (grid) {
+    const off = state === "play" && !resolving ? risePx : 0;
+    for (let r = 0; r < ROWS; r++) for (let c = 0; c < COLS; c++) if (grid[r][c] >= 0) drawTile(WX + c * CELL, WY + r * CELL - off, grid[r][c]);
+  }
+  ctx.restore();
+  if (state === "play" && cursor) {
+    const off = resolving ? 0 : risePx;
+    ctx.strokeStyle = "#fff"; ctx.lineWidth = 3;
+    ctx.strokeRect(WX + cursor.c * CELL - 2, WY + cursor.r * CELL - 2 - off, CELL * 2 + 4, CELL + 4);
+  }
+  if (state === "menu") {
+    ctx.fillStyle = "rgba(10,4,20,.8)"; ctx.fillRect(0, 230, VW, 220);
+    ctx.fillStyle = "#fff"; ctx.font = "700 33px system-ui"; ctx.textAlign = "center";
+    ctx.fillText("PANEL POP", VW / 2, 296);
+    ctx.font = "400 16px system-ui"; ctx.fillStyle = "#dccdf5";
+    ctx.fillText("Swap two side-by-side tiles. Match 3+ to clear.", VW / 2, 332);
+    ctx.fillText("The stack keeps rising — don't top out!", VW / 2, 358);
+    ctx.fillStyle = "#ffd94a"; ctx.font = "700 21px system-ui";
+    ctx.fillText("TAP TO START", VW / 2, 408);
+  }
+  if (state === "over") {
+    ctx.fillStyle = "rgba(10,4,20,.82)"; ctx.fillRect(0, 230, VW, 220);
+    ctx.fillStyle = "#fff"; ctx.font = "700 32px system-ui"; ctx.textAlign = "center";
+    ctx.fillText("TOPPED OUT", VW / 2, 300);
+    ctx.font = "400 18px system-ui"; ctx.fillStyle = "#dccdf5";
+    ctx.fillText("Score " + score, VW / 2, 338);
+    ctx.fillStyle = "#ffd94a"; ctx.font = "700 20px system-ui";
+    ctx.fillText("TAP TO PLAY AGAIN", VW / 2, 392);
+  }
+  if (QA_MODE) {
+    const f = fairnessCheck();
+    ctx.fillStyle = "rgba(0,0,0,.65)"; ctx.fillRect(0, VH - 30, VW, 30);
+    ctx.fillStyle = f.pass ? "#7dff8a" : "#ff7d7d"; ctx.font = "600 12px monospace"; ctx.textAlign = "left";
+    ctx.fillText("QA panel-pop pass=" + f.pass + " clean=" + f.boardsClean + " maxStart=" + f.maxStartHeight, 8, VH - 10);
+  }
+}
+function frame(t) {
+  const dt = Math.min(50, t - (lastT || t)); lastT = t;
+  if (state === "play") step(dt);
+  draw();
+  requestAnimationFrame(frame);
+}
+requestAnimationFrame(frame);
+
+/* ---------------- input ---------------- */
+function press(k) {
+  initAudio();
+  if (state !== "play") { startGame(); return; }
+  if (k === "left" && cursor.c > 0) { cursor.c--; sfx("move"); }
+  if (k === "right" && cursor.c < COLS - 2) { cursor.c++; sfx("move"); }
+  if (k === "up" && cursor.r > 0) { cursor.r--; sfx("move"); }
+  if (k === "down" && cursor.r < ROWS - 1) { cursor.r++; sfx("move"); }
+  if (k === "swap") doSwap();
+  if (k === "raise") { riseAcc = 0; pushRow(); }
+}
+document.querySelectorAll("#pad button").forEach(b => {
+  b.addEventListener("pointerdown", e => { e.preventDefault(); press(b.dataset.k); });
+});
+canvas.addEventListener("pointerdown", e => {
+  initAudio();
+  if (state !== "play") { startGame(); return; }
+  // tap two adjacent tiles to swap them
+  const rect = canvas.getBoundingClientRect();
+  const lx = (e.clientX - rect.left) * (VW / rect.width), ly = (e.clientY - rect.top) * (VH / rect.height);
+  const c = Math.floor((lx - WX) / CELL), r = Math.floor((ly - WY + risePx) / CELL);
+  if (c >= 0 && c < COLS && r >= 0 && r < ROWS) {
+    if (tapSel && tapSel.r === r && Math.abs(tapSel.c - c) === 1) {
+      cursor = { r, c: Math.min(tapSel.c, c) }; doSwap(); tapSel = null;
+    } else { tapSel = { r, c }; cursor = { r, c: Math.min(c, COLS - 2) }; }
+  }
+});
+let tapSel = null;
+window.addEventListener("keydown", e => {
+  if (e.code === "ArrowLeft") press("left");
+  else if (e.code === "ArrowRight") press("right");
+  else if (e.code === "ArrowUp") press("up");
+  else if (e.code === "ArrowDown") press("down");
+  else if (e.code === "KeyZ") press("swap");
+  else if (e.code === "KeyX") press("raise");
+  else if (e.code === "Space") { e.preventDefault(); if (state !== "play") startGame(); }
+});
+const muteBtn = document.getElementById("muteBtn");
+function syncMute() { muteBtn.textContent = muted ? "🔇" : "🔊"; }
+muteBtn.addEventListener("click", e => { e.stopPropagation(); muted = !muted; localStorage.setItem("panelpop_muted", muted ? 1 : 0); syncMute(); });
+muted = localStorage.getItem("panelpop_muted") === "1"; syncMute();
+grid = genInitial(emptyGrid(), Math.random, 5); cursor = { r: ROWS - 3, c: 2 };
+if (QA_MODE) fairnessCheck();
+</script>
+</body>
+</html>

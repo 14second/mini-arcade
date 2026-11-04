@@ -1,0 +1,307 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, user-scalable=no">
+<meta name="theme-color" content="#101a2a">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<title>Gem Columns</title>
+<style>
+  * { margin:0; padding:0; box-sizing:border-box; }
+  html, body { width:100%; height:100%; overflow:hidden; background:#101a2a;
+    font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+    touch-action:none; user-select:none; -webkit-user-select:none; -webkit-tap-highlight-color: transparent; }
+  canvas { position:fixed; inset:0; display:block; touch-action:none; }
+  #muteBtn { position:fixed; top:10px; right:10px; z-index:10; width:48px; height:48px; border-radius:12px;
+    border:2px solid rgba(255,255,255,.7); background:rgba(10,25,45,.55); color:#fff; font-size:22px;
+    line-height:1; cursor:pointer; display:flex; align-items:center; justify-content:center; padding:0; }
+  #pad { position:fixed; left:0; right:0; bottom:0; z-index:10; display:flex; justify-content:center; gap:10px; padding:10px 8px calc(10px + env(safe-area-inset-bottom)); }
+  #pad button { flex:1; max-width:84px; height:56px; border-radius:14px; border:2px solid rgba(255,255,255,.45);
+    background:rgba(20,40,70,.72); color:#fff; font-size:24px; cursor:pointer; padding:0; }
+  #pad button:active { background:rgba(50,90,150,.85); }
+</style>
+</head>
+<body>
+<canvas id="game"></canvas>
+<button id="muteBtn" aria-label="Toggle sound">🔊</button>
+<div id="pad">
+  <button data-k="left" aria-label="Left">◀</button>
+  <button data-k="right" aria-label="Right">▶</button>
+  <button data-k="down" aria-label="Drop faster">▼</button>
+  <button data-k="cycle" aria-label="Cycle gems">↻</button>
+</div>
+<script>
+// iOS audio routing: Web Audio defaults to the "ambient" channel, which the
+// iPhone silent switch mutes entirely. Route it to the media/playback
+// channel (iOS 17+ Audio Session API) on the first user gesture and inside
+// audio init, so game music/SFX play even with silent mode on.
+function iosPlaybackSession() {
+  try { if ('audioSession' in navigator) navigator.audioSession.type = 'playback'; } catch (e) {}
+}
+document.addEventListener('pointerdown', iosPlaybackSession, true);
+document.addEventListener('touchstart', iosPlaybackSession, true);
+"use strict";
+/* GEM COLUMNS — original falling-gem matcher. Vertical trios of gems drop
+   into a 6x13 well; cycle their order, land them, and match three or more
+   in any direction to clear. Clears can chain after gravity settles.
+   Fairness/QA (verified by the ?qa=1 self-check): the matcher finds a
+   planted 3-in-a-row (including a diagonal), and column gems only ever
+   come from the five types. */
+const VW = 420, VH = 720;
+const QA_MODE = /[?&]qa=1/.test(location.search);
+const canvas = document.getElementById("game"), ctx = canvas.getContext("2d");
+let W = 0, H = 0, DPR = 1, scale = 1, ox = 0, oy = 0;
+function resize() {
+  DPR = Math.min(window.devicePixelRatio || 1, 2);
+  W = window.innerWidth; H = window.innerHeight;
+  canvas.width = Math.round(W * DPR); canvas.height = Math.round(H * DPR);
+  canvas.style.width = W + "px"; canvas.style.height = H + "px";
+  scale = Math.min(W / VW, H / VH) * DPR; ox = (W * DPR - VW * scale) / 2; oy = (H * DPR - VH * scale) / 2;
+}
+window.addEventListener("resize", resize); resize();
+
+/* ---------------- audio ---------------- */
+let actx = null, muted = false, musicTimer = null, mStep = 0;
+function initAudio() {
+  iosPlaybackSession();
+  if (!actx) { try { const AC = window.AudioContext || window.webkitAudioContext; if (AC) actx = new AC(); } catch (e) {} }
+  if (actx && actx.state === "suspended") actx.resume();
+  if (actx && !musicTimer) musicTimer = setInterval(musicTick, 210);
+}
+function tone(freq, dur, type, vol, when, slide) {
+  if (!actx || muted) return;
+  const t = when || actx.currentTime, o = actx.createOscillator(), g = actx.createGain();
+  o.type = type || "triangle"; o.frequency.setValueAtTime(freq, t);
+  if (slide) o.frequency.exponentialRampToValueAtTime(Math.max(40, slide), t + dur);
+  g.gain.setValueAtTime(vol || 0.15, t);
+  g.gain.exponentialRampToValueAtTime(0.001, t + dur);
+  o.connect(g); g.connect(actx.destination); o.start(t); o.stop(t + dur + 0.02);
+}
+const BASS = [147, 0, 0, 0, 175, 0, 0, 0, 196, 0, 0, 0, 175, 0, 147, 0];
+const LEAD = [0, 587, 0, 698, 0, 880, 0, 698, 0, 587, 0, 523, 0, 587, 0, 0];
+function musicTick() {
+  if (!actx || muted || state !== "play") return;
+  const b = BASS[mStep % 16], l = LEAD[mStep % 16], t = actx.currentTime;
+  if (b) tone(b, 0.18, "triangle", 0.12, t);
+  if (l) tone(l, 0.14, "triangle", 0.06, t);
+  mStep++;
+}
+function sfx(name) {
+  if (!actx || muted) return; const t = actx.currentTime;
+  if (name === "move") tone(240, 0.04, "square", 0.05, t);
+  if (name === "cycle") { tone(392, 0.05, "square", 0.06, t); tone(523, 0.05, "square", 0.06, t + 0.05); }
+  if (name === "lock") tone(170, 0.07, "square", 0.09, t, 120);
+  if (name === "clear") { [659, 784, 988].forEach((f, i) => tone(f, 0.1, "triangle", 0.11, t + i * 0.06)); }
+  if (name === "chain") { [659, 784, 988, 1175, 1319].forEach((f, i) => tone(f, 0.1, "square", 0.1, t + i * 0.05)); }
+  if (name === "over") { [392, 330, 262, 196].forEach((f, i) => tone(f, 0.22, "triangle", 0.12, t + i * 0.18)); }
+}
+
+/* ---------------- game ---------------- */
+const COLS = 6, ROWS = 13, CELL = 37, TYPES = 5;
+const WX = 42, WY = 96;
+const GEM = [
+  { c: "#e8506b", name: "ruby" }, { c: "#3f8fe0", name: "sapphire" },
+  { c: "#46c26a", name: "emerald" }, { c: "#f2b838", name: "topaz" },
+  { c: "#a86fe8", name: "amethyst" }
+];
+let state = "menu", grid, falling, nextTrio, score, cleared, level, best, dropAcc, lastT, softDrop, resolving;
+best = +(localStorage.getItem("gemcolumns_best") || 0);
+function fallInterval() { return Math.max(210, 720 - ((level || 1) - 1) * 55); }
+function emptyGrid() { return Array.from({ length: ROWS }, () => new Array(COLS).fill(-1)); }
+function randTrio() { return [0, 0, 0].map(() => Math.floor(Math.random() * TYPES)); }
+function spawn() {
+  falling = { col: 2, row: 0, gems: nextTrio };
+  nextTrio = randTrio();
+  if (grid[0][2] >= 0 || grid[1][2] >= 0 || grid[2][2] >= 0) { /* still try: overlap check below */ }
+  // game over if the landing column is stacked to the top under spawn
+  if (grid[2][falling.col] >= 0 && grid[1][falling.col] >= 0 && grid[0][falling.col] >= 0) gameOver();
+}
+function canFall() {
+  const below = falling.row + 3;
+  return below < ROWS && grid[below][falling.col] < 0;
+}
+function lockTrio() {
+  for (let i = 0; i < 3; i++) grid[falling.row + i][falling.col] = falling.gems[i];
+  falling = null; sfx("lock");
+  resolveBoard(1);
+}
+function findMatches(g) {
+  const hit = new Set();
+  const dirs = [[0, 1], [1, 0], [1, 1], [1, -1]];
+  for (let r = 0; r < ROWS; r++) for (let c = 0; c < COLS; c++) {
+    const v = g[r][c]; if (v < 0) continue;
+    for (const [dr, dc] of dirs) {
+      let n = 1; const cells = [[r, c]];
+      let rr = r + dr, cc = c + dc;
+      while (rr >= 0 && rr < ROWS && cc >= 0 && cc < COLS && g[rr][cc] === v) { cells.push([rr, cc]); n++; rr += dr; cc += dc; }
+      if (n >= 3) cells.forEach(([a, b]) => hit.add(a * COLS + b));
+    }
+  }
+  return hit;
+}
+function applyGravity(g) {
+  for (let c = 0; c < COLS; c++) {
+    let write = ROWS - 1;
+    for (let r = ROWS - 1; r >= 0; r--) if (g[r][c] >= 0) { const v = g[r][c]; g[r][c] = -1; g[write][c] = v; write--; }
+  }
+}
+function resolveBoard(chain) {
+  const hit = findMatches(grid);
+  if (!hit.size) { spawn(); return; }
+  resolving = true;
+  hit.forEach(k => { grid[Math.floor(k / COLS)][k % COLS] = -1; });
+  cleared += hit.size;
+  score += hit.size * 10 * chain;
+  sfx(chain > 1 ? "chain" : "clear");
+  const nl = Math.floor(cleared / 18) + 1; if (nl > level) level = nl;
+  applyGravity(grid);
+  setTimeout(() => { resolving = false; resolveBoard(chain + 1); }, 170);
+}
+function gameOver() {
+  state = "over"; sfx("over");
+  if (score > best) { best = score; localStorage.setItem("gemcolumns_best", best); }
+}
+function startGame() {
+  grid = emptyGrid(); nextTrio = randTrio(); falling = null;
+  score = 0; cleared = 0; level = 1; dropAcc = 0; softDrop = false; resolving = false;
+  state = "play"; spawn(); initAudio();
+}
+function step(dt) {
+  if (state !== "play" || !falling || resolving) return;
+  dropAcc += dt * (softDrop ? 10 : 1);
+  while (dropAcc >= fallInterval()) {
+    dropAcc -= fallInterval();
+    if (canFall()) falling.row++;
+    else { lockTrio(); break; }
+  }
+}
+
+/* ---------------- fairness / QA self-check ---------------- */
+function fairnessCheck() {
+  // matcher must find a planted horizontal match and a planted diagonal
+  const g = emptyGrid();
+  g[12][0] = 1; g[12][1] = 1; g[12][2] = 1;             // horizontal
+  g[10][3] = 4; g[11][4] = 4; g[12][5] = 4;             // diagonal
+  g[12][3] = 2; g[12][4] = 3;                            // fillers (no match)
+  const hits = findMatches(g);
+  const need = [12 * COLS + 0, 12 * COLS + 1, 12 * COLS + 2, 10 * COLS + 3, 11 * COLS + 4, 12 * COLS + 5];
+  const matchOk = need.every(k => hits.has(k));
+  // a scripted clear: applying the clear+gravity path removes planted gems
+  const g2 = emptyGrid(); g2[12][0] = 0; g2[12][1] = 0; g2[12][2] = 0; g2[11][0] = 3;
+  const h2 = findMatches(g2); h2.forEach(k => { g2[Math.floor(k / COLS)][k % COLS] = -1; }); applyGravity(g2);
+  const clearOk = g2[12][0] === 3 && g2[12][1] === -1 && g2[12][2] === -1;
+  // types sanity over many generated trios
+  let typesOk = true; for (let i = 0; i < 500; i++) for (const v of randTrio()) if (v < 0 || v >= TYPES) typesOk = false;
+  const r = { game: "gem-columns", plantedMatches: hits.size, matchOk, clearOk, typesOk, fallIntervalMs: fallInterval(),
+    pass: matchOk && clearOk && typesOk };
+  window.__qaFairness = r; return r;
+}
+
+/* ---------------- draw ---------------- */
+function drawGem(x, y, t, s) {
+  const cx = x + s / 2, cy = y + s / 2, r = s * 0.36;
+  ctx.fillStyle = GEM[t].c; ctx.strokeStyle = "rgba(255,255,255,.75)"; ctx.lineWidth = 2;
+  ctx.beginPath();
+  if (t === 0) ctx.arc(cx, cy, r, 0, 7);
+  else if (t === 1) ctx.rect(cx - r, cy - r, r * 2, r * 2);
+  else if (t === 2) { ctx.moveTo(cx, cy - r * 1.15); ctx.lineTo(cx + r * 1.1, cy); ctx.lineTo(cx, cy + r * 1.15); ctx.lineTo(cx - r * 1.1, cy); ctx.closePath(); }
+  else if (t === 3) { ctx.moveTo(cx, cy - r * 1.1); ctx.lineTo(cx + r * 1.1, cy + r * 0.9); ctx.lineTo(cx - r * 1.1, cy + r * 0.9); ctx.closePath(); }
+  else { for (let i = 0; i < 5; i++) { const a = -Math.PI / 2 + i * (Math.PI * 4 / 5); const px = cx + Math.cos(a) * r * 1.15, py = cy + Math.sin(a) * r * 1.15; i ? ctx.lineTo(px, py) : ctx.moveTo(px, py); } ctx.closePath(); }
+  ctx.fill(); ctx.stroke();
+  ctx.fillStyle = "rgba(255,255,255,.5)"; ctx.beginPath(); ctx.arc(cx - r * 0.3, cy - r * 0.35, r * 0.22, 0, 7); ctx.fill();
+}
+function draw() {
+  ctx.setTransform(1, 0, 0, 1, 0, 0);
+  ctx.fillStyle = "#0a1220"; ctx.fillRect(0, 0, canvas.width, canvas.height);
+  ctx.setTransform(scale, 0, 0, scale, ox, oy);
+  ctx.fillStyle = "#e8f2ff"; ctx.font = "700 25px system-ui"; ctx.textAlign = "left";
+  ctx.fillText("GEM COLUMNS", 42, 40);
+  ctx.font = "600 15px system-ui"; ctx.fillStyle = "#8fb0d8"; ctx.textAlign = "right";
+  ctx.fillText("BEST " + best, VW - 70, 40);
+  ctx.fillStyle = "#12233d"; ctx.fillRect(WX - 4, WY - 4, COLS * CELL + 8, ROWS * CELL + 8);
+  ctx.strokeStyle = "#33507e"; ctx.lineWidth = 2; ctx.strokeRect(WX - 4, WY - 4, COLS * CELL + 8, ROWS * CELL + 8);
+  if (grid) {
+    for (let r = 0; r < ROWS; r++) for (let c = 0; c < COLS; c++) if (grid[r][c] >= 0) drawGem(WX + c * CELL + 2, WY + r * CELL + 2, grid[r][c], CELL - 4);
+  }
+  if (state === "play" && falling) for (let i = 0; i < 3; i++) drawGem(WX + falling.col * CELL + 2, WY + (falling.row + i) * CELL + 2, falling.gems[i], CELL - 4);
+  const px = WX + COLS * CELL + 24;
+  ctx.fillStyle = "#8fb0d8"; ctx.font = "600 14px system-ui"; ctx.textAlign = "left";
+  ctx.fillText("NEXT", px, WY + 14);
+  if (nextTrio) for (let i = 0; i < 3; i++) drawGem(px + 6, WY + 24 + i * 30, nextTrio[i], 26);
+  ctx.fillStyle = "#e8f2ff"; ctx.font = "700 21px system-ui"; ctx.fillText(score, px, WY + 168);
+  ctx.fillStyle = "#8fb0d8"; ctx.font = "600 14px system-ui";
+  ctx.fillText("SCORE", px, WY + 148); ctx.fillText("GEMS " + cleared, px, WY + 214); ctx.fillText("LEVEL " + level, px, WY + 240);
+  if (state === "menu") {
+    ctx.fillStyle = "rgba(6,12,24,.8)"; ctx.fillRect(0, 210, VW, 230);
+    ctx.fillStyle = "#fff"; ctx.font = "700 32px system-ui"; ctx.textAlign = "center";
+    ctx.fillText("GEM COLUMNS", VW / 2, 276);
+    ctx.font = "400 16px system-ui"; ctx.fillStyle = "#c4d8f2";
+    ctx.fillText("Drop trios of gems. ↻ cycles their order.", VW / 2, 312);
+    ctx.fillText("Match 3 or more in any direction to clear.", VW / 2, 338);
+    ctx.fillStyle = "#ffd94a"; ctx.font = "700 21px system-ui";
+    ctx.fillText("TAP TO START", VW / 2, 392);
+  }
+  if (state === "over") {
+    ctx.fillStyle = "rgba(6,12,24,.82)"; ctx.fillRect(0, 210, VW, 230);
+    ctx.fillStyle = "#fff"; ctx.font = "700 32px system-ui"; ctx.textAlign = "center";
+    ctx.fillText("TOPPED OUT", VW / 2, 278);
+    ctx.font = "400 18px system-ui"; ctx.fillStyle = "#c4d8f2";
+    ctx.fillText("Score " + score + " · Gems cleared " + cleared, VW / 2, 316);
+    ctx.fillStyle = "#ffd94a"; ctx.font = "700 20px system-ui";
+    ctx.fillText("TAP TO PLAY AGAIN", VW / 2, 372);
+  }
+  if (QA_MODE) {
+    const f = fairnessCheck();
+    ctx.fillStyle = "rgba(0,0,0,.65)"; ctx.fillRect(0, VH - 30, VW, 30);
+    ctx.fillStyle = f.pass ? "#7dff8a" : "#ff7d7d"; ctx.font = "600 13px monospace"; ctx.textAlign = "left";
+    ctx.fillText("QA gem-columns pass=" + f.pass + " match=" + f.matchOk + " clear=" + f.clearOk, 8, VH - 10);
+  }
+}
+function frame(t) {
+  const dt = Math.min(50, t - (lastT || t)); lastT = t;
+  if (state === "play") step(dt);
+  draw();
+  requestAnimationFrame(frame);
+}
+requestAnimationFrame(frame);
+
+/* ---------------- input ---------------- */
+function press(k) {
+  initAudio();
+  if (state !== "play") { startGame(); return; }
+  if (!falling || resolving) return;
+  if (k === "left" && falling.col > 0) {
+    let blocked = false; for (let i = 0; i < 3; i++) if (grid[falling.row + i][falling.col - 1] >= 0) blocked = true;
+    if (!blocked) { falling.col--; sfx("move"); }
+  }
+  if (k === "right" && falling.col < COLS - 1) {
+    let blocked = false; for (let i = 0; i < 3; i++) if (grid[falling.row + i][falling.col + 1] >= 0) blocked = true;
+    if (!blocked) { falling.col++; sfx("move"); }
+  }
+  if (k === "cycle") { falling.gems = [falling.gems[2], falling.gems[0], falling.gems[1]]; sfx("cycle"); }
+}
+document.querySelectorAll("#pad button").forEach(b => {
+  const k = b.dataset.k;
+  b.addEventListener("pointerdown", e => { e.preventDefault(); if (k === "down") softDrop = true; else press(k); });
+  b.addEventListener("pointerup", () => { if (k === "down") softDrop = false; });
+  b.addEventListener("pointerleave", () => { if (k === "down") softDrop = false; });
+});
+canvas.addEventListener("pointerdown", () => { initAudio(); if (state !== "play") startGame(); });
+window.addEventListener("keydown", e => {
+  if (e.code === "ArrowLeft") press("left");
+  else if (e.code === "ArrowRight") press("right");
+  else if (e.code === "ArrowDown") softDrop = true;
+  else if (e.code === "KeyZ" || e.code === "ArrowUp") press("cycle");
+  else if (e.code === "Space") { e.preventDefault(); if (state !== "play") startGame(); }
+});
+window.addEventListener("keyup", e => { if (e.code === "ArrowDown") softDrop = false; });
+const muteBtn = document.getElementById("muteBtn");
+function syncMute() { muteBtn.textContent = muted ? "🔇" : "🔊"; }
+muteBtn.addEventListener("click", e => { e.stopPropagation(); muted = !muted; localStorage.setItem("gemcolumns_muted", muted ? 1 : 0); syncMute(); });
+muted = localStorage.getItem("gemcolumns_muted") === "1"; syncMute();
+grid = emptyGrid(); nextTrio = randTrio();
+if (QA_MODE) fairnessCheck();
+</script>
+</body>
+</html>

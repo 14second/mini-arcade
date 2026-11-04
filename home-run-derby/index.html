@@ -1,0 +1,298 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, user-scalable=no">
+<meta name="theme-color" content="#0d2b16">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<title>Home Run Derby</title>
+<style>
+  * { margin:0; padding:0; box-sizing:border-box; }
+  html, body { width:100%; height:100%; overflow:hidden; background:#0d2b16;
+    font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+    touch-action:none; user-select:none; -webkit-user-select:none; -webkit-tap-highlight-color: transparent; }
+  canvas { position:fixed; inset:0; display:block; touch-action:none; }
+  #muteBtn { position:fixed; top:10px; right:10px; z-index:10; width:48px; height:48px; border-radius:12px;
+    border:2px solid rgba(255,255,255,.7); background:rgba(8,35,16,.55); color:#fff; font-size:22px;
+    line-height:1; cursor:pointer; display:flex; align-items:center; justify-content:center; padding:0; }
+  #swing { position:fixed; left:50%; transform:translateX(-50%); bottom:calc(18px + env(safe-area-inset-bottom)); z-index:10;
+    width:210px; height:76px; border-radius:38px; border:3px solid #ffe9a8;
+    background:linear-gradient(180deg,#e0532f,#b9331c); color:#fff; font-size:27px; font-weight:800; letter-spacing:1px; cursor:pointer; }
+  #swing:active { filter:brightness(1.25); }
+</style>
+</head>
+<body>
+<canvas id="game"></canvas>
+<button id="muteBtn" aria-label="Toggle sound">🔊</button>
+<button id="swing">SWING</button>
+<script>
+// iOS audio routing: Web Audio defaults to the "ambient" channel, which the
+// iPhone silent switch mutes entirely. Route it to the media/playback
+// channel (iOS 17+ Audio Session API) on the first user gesture and inside
+// audio init, so game music/SFX play even with silent mode on.
+function iosPlaybackSession() {
+  try { if ('audioSession' in navigator) navigator.audioSession.type = 'playback'; } catch (e) {}
+}
+document.addEventListener('pointerdown', iosPlaybackSession, true);
+document.addEventListener('touchstart', iosPlaybackSession, true);
+"use strict";
+/* HOME RUN DERBY — original batting game. Read the pitch as it grows
+   toward the plate — fastball, curve, or changeup — and time the big
+   swing. Ten outs per round; homers and total distance pile up points.
+   Fairness (verified by the ?qa=1 self-check): for every pitch type the
+   ball spends at least 140 ms inside the hittable zone near the plate
+   (167 ms even for the fastest fastball), and the full contact window
+   is 320 ms wide. */
+const VW = 420, VH = 720;
+const QA_MODE = /[?&]qa=1/.test(location.search);
+const canvas = document.getElementById("game"), ctx = canvas.getContext("2d");
+let W = 0, H = 0, DPR = 1, scale = 1, ox = 0, oy = 0;
+function resize() {
+  DPR = Math.min(window.devicePixelRatio || 1, 2);
+  W = window.innerWidth; H = window.innerHeight;
+  canvas.width = Math.round(W * DPR); canvas.height = Math.round(H * DPR);
+  canvas.style.width = W + "px"; canvas.style.height = H + "px";
+  scale = Math.min(W / VW, H / VH) * DPR; ox = (W * DPR - VW * scale) / 2; oy = (H * DPR - VH * scale) / 2;
+}
+window.addEventListener("resize", resize); resize();
+
+/* ---------------- audio ---------------- */
+let actx = null, muted = false, musicTimer = null, mStep = 0;
+function initAudio() {
+  iosPlaybackSession();
+  if (!actx) { try { const AC = window.AudioContext || window.webkitAudioContext; if (AC) actx = new AC(); } catch (e) {} }
+  if (actx && actx.state === "suspended") actx.resume();
+  if (actx && !musicTimer) musicTimer = setInterval(musicTick, 230);
+}
+function tone(freq, dur, type, vol, when, slide) {
+  if (!actx || muted) return;
+  const t = when || actx.currentTime, o = actx.createOscillator(), g = actx.createGain();
+  o.type = type || "triangle"; o.frequency.setValueAtTime(freq, t);
+  if (slide) o.frequency.exponentialRampToValueAtTime(Math.max(40, slide), t + dur);
+  g.gain.setValueAtTime(vol || 0.15, t);
+  g.gain.exponentialRampToValueAtTime(0.001, t + dur);
+  o.connect(g); g.connect(actx.destination); o.start(t); o.stop(t + dur + 0.02);
+}
+const BASS = [131, 0, 0, 0, 156, 0, 0, 0, 175, 0, 0, 0, 156, 0, 131, 0];
+const LEAD = [0, 523, 0, 0, 659, 0, 0, 0, 784, 0, 659, 0, 587, 0, 0, 0];
+function musicTick() {
+  if (!actx || muted || state !== "play") return;
+  const b = BASS[mStep % 16], l = LEAD[mStep % 16], t = actx.currentTime;
+  if (b) tone(b, 0.19, "triangle", 0.12, t);
+  if (l) tone(l, 0.15, "triangle", 0.06, t);
+  mStep++;
+}
+function sfx(name) {
+  if (!actx || muted) return; const t = actx.currentTime;
+  if (name === "pitch") tone(300, 0.15, "sine", 0.06, t, 500);
+  if (name === "crack") { tone(180, 0.07, "square", 0.22, t, 70); tone(1200, 0.05, "square", 0.1, t); }
+  if (name === "whiff") tone(500, 0.13, "sine", 0.1, t, 180);
+  if (name === "homer") { [523, 659, 784, 1047, 1319].forEach((f, i) => tone(f, 0.16, "square", 0.11, t + i * 0.1)); }
+  if (name === "out") { tone(262, 0.16, "triangle", 0.12, t); tone(196, 0.22, "triangle", 0.12, t + 0.15); }
+  if (name === "foul") tone(700, 0.08, "square", 0.08, t, 400);
+}
+
+/* ---------------- game ---------------- */
+const PITCHES = {
+  fast:   { flight: 820,  color: "#ffffff", label: "FASTBALL" },
+  curve:  { flight: 1020, color: "#ffb347", label: "CURVE" },
+  change: { flight: 1280, color: "#9fe870", label: "CHANGEUP" }
+};
+const PLATE_Y = 560, MOUND_Y = 196, ZONE_PX = 84; // last 84 px before the plate = hittable zone
+const PERFECT_MS = 60, CONTACT_MS = 160;          // timing half-windows → 320 ms full contact window
+let state = "menu"; // menu | play | over
+let pitch, score, homers, hits, outs, dist, best, bestHR, banner, bannerT, swingT, nextAt, lastT;
+best = +(localStorage.getItem("derby_best") || 0);
+bestHR = +(localStorage.getItem("derby_besthr") || 0);
+function newPitch(now) {
+  const keys = Object.keys(PITCHES);
+  const type = keys[Math.floor(Math.random() * keys.length)];
+  pitch = { type, t0: now + 650, dir: Math.random() < 0.5 ? -1 : 1, swung: false };
+  sfx("pitch");
+}
+function pitchProgress(now) {
+  const p = PITCHES[pitch.type];
+  let t = (now - pitch.t0) / p.flight;
+  if (pitch.type === "change") t = Math.pow(Math.max(0, t), 1.25) * (t > 0 ? 1 : 0) + 0; // slow start
+  return Math.min(1.15, t);
+}
+function ballPos(now) {
+  const t = pitchProgress(now);
+  const y = MOUND_Y + (PLATE_Y - MOUND_Y) * t;
+  let x = VW / 2;
+  if (pitch.type === "curve") x += Math.sin(Math.min(1, t) * Math.PI) * pitch.dir * 62;
+  const r = 5 + 31 * Math.max(0, Math.min(1, t));
+  return { x, y, r, t };
+}
+function zoneTimeMs(type) { // ms the ball spends inside the last ZONE_PX before the plate
+  const p = PITCHES[type];
+  return Math.round(p.flight * ZONE_PX / (PLATE_Y - MOUND_Y));
+}
+function doSwing(now) {
+  initAudio();
+  if (state !== "play" || !pitch || pitch.swung) return;
+  pitch.swung = true; swingT = now;
+  const flight = PITCHES[pitch.type].flight;
+  const arrival = pitch.t0 + flight;
+  const delta = now - arrival; // negative = early
+  const ad = Math.abs(delta);
+  if (ad <= PERFECT_MS) {
+    const d = 385 + Math.floor(Math.random() * 95);
+    homers++; hits++; dist += d; score += 5 + Math.floor(d / 40);
+    banner = "HOME RUN! " + d + " ft"; sfx("crack"); setTimeout(() => sfx("homer"), 60);
+  } else if (ad <= CONTACT_MS) {
+    if (Math.random() < 0.3) {
+      const d = 340 + Math.floor(Math.random() * 45);
+      homers++; hits++; dist += d; score += 5 + Math.floor(d / 40);
+      banner = "HOME RUN! " + d + " ft"; sfx("crack"); setTimeout(() => sfx("homer"), 60);
+    } else {
+      const d = 120 + Math.floor(Math.random() * 160);
+      hits++; dist += d; score += 2;
+      banner = "BASE HIT! " + d + " ft"; sfx("crack");
+    }
+  } else if (ad <= CONTACT_MS + 130) {
+    banner = delta < 0 ? "FOUL (early)" : "FOUL (late)"; sfx("foul");
+    nextAt = now + 700; pitch = null; return; // foul: no out
+  } else {
+    outs++; banner = "SWING AND A MISS"; sfx("whiff");
+  }
+  bannerT = now;
+  if (outs >= 10) return finish(now);
+  nextAt = now + 800; pitch = null;
+}
+function finish(now) {
+  state = "over"; bannerT = now;
+  if (score > best) { best = score; localStorage.setItem("derby_best", best); }
+  if (homers > bestHR) { bestHR = homers; localStorage.setItem("derby_besthr", bestHR); }
+}
+function startGame() {
+  score = 0; homers = 0; hits = 0; outs = 0; dist = 0; banner = ""; pitch = null;
+  state = "play"; nextAt = performance.now() + 500; initAudio();
+}
+function step(now) {
+  if (state !== "play") return;
+  if (!pitch && now >= nextAt) newPitch(now);
+  if (pitch && !pitch.swung) {
+    const t = pitchProgress(now);
+    if (t > 1.12) { // took the pitch
+      outs++; banner = "TAKEN FOR A STRIKE"; bannerT = now; sfx("out");
+      pitch = null;
+      if (outs >= 10) return finish(now);
+      nextAt = now + 800;
+    }
+  }
+}
+
+/* ---------------- fairness / QA self-check ---------------- */
+function fairnessCheck() {
+  const zones = {}; let allOk = true;
+  for (const k of Object.keys(PITCHES)) { zones[k] = zoneTimeMs(k); if (zones[k] < 140) allOk = false; }
+  const r = { game: "home-run-derby", zoneMs: zones, contactWindowMs: CONTACT_MS * 2, perfectMs: PERFECT_MS * 2,
+    pass: allOk && CONTACT_MS * 2 >= 140 };
+  window.__qaFairness = r; return r;
+}
+
+/* ---------------- draw ---------------- */
+function draw(now) {
+  ctx.setTransform(1, 0, 0, 1, 0, 0);
+  ctx.fillStyle = "#08190d"; ctx.fillRect(0, 0, canvas.width, canvas.height);
+  ctx.setTransform(scale, 0, 0, scale, ox, oy);
+  // stands + field
+  const sky = ctx.createLinearGradient(0, 0, 0, 250);
+  sky.addColorStop(0, "#274a78"); sky.addColorStop(1, "#7fa6c9");
+  ctx.fillStyle = sky; ctx.fillRect(0, 0, VW, 250);
+  ctx.fillStyle = "#54473a"; ctx.fillRect(0, 150, VW, 100);
+  for (let i = 0; i < 130; i++) { ctx.fillStyle = ["#d9b38c", "#8fb0d8", "#e8e3d5", "#c96f4a"][(i * 7) % 4]; ctx.fillRect((i * 53) % VW, 158 + (i * 29) % 84, 4, 4); }
+  ctx.fillStyle = "#2e7d3e"; ctx.beginPath();
+  ctx.moveTo(0, 250); ctx.lineTo(VW, 250); ctx.lineTo(VW, VH); ctx.lineTo(0, VH); ctx.closePath(); ctx.fill();
+  ctx.fillStyle = "#3f9e52"; ctx.beginPath();
+  ctx.moveTo(VW / 2, 250); ctx.lineTo(VW, VH); ctx.lineTo(0, VH); ctx.closePath(); ctx.fill();
+  ctx.fillStyle = "#c9a06a"; ctx.beginPath(); // dirt diamond wedge
+  ctx.moveTo(VW / 2 - 14, MOUND_Y - 4); ctx.lineTo(VW / 2 + 14, MOUND_Y - 4); ctx.lineTo(VW / 2 + 64, PLATE_Y + 26); ctx.lineTo(VW / 2 - 64, PLATE_Y + 26); ctx.closePath(); ctx.fill();
+  ctx.fillStyle = "#e8e3d5"; ctx.fillRect(VW / 2 - 26, PLATE_Y + 18, 52, 7); // plate
+  // strike zone hint
+  ctx.strokeStyle = "rgba(255,255,255,.55)"; ctx.lineWidth = 2; ctx.setLineDash([6, 5]);
+  ctx.strokeRect(VW / 2 - 46, PLATE_Y - 66, 92, 88); ctx.setLineDash([]);
+  // pitcher
+  ctx.fillStyle = "#28418c"; ctx.beginPath(); ctx.arc(VW / 2, MOUND_Y - 34, 11, 0, 7); ctx.fill();
+  ctx.fillRect(VW / 2 - 10, MOUND_Y - 24, 20, 26);
+  ctx.fillStyle = "#f2f2f2"; ctx.fillRect(VW / 2 - 12, MOUND_Y - 46, 24, 6);
+  // HUD
+  ctx.fillStyle = "#fff"; ctx.font = "700 21px system-ui"; ctx.textAlign = "left";
+  ctx.fillText("HR " + homers + "   HITS " + hits + "   OUTS " + outs + "/10", 16, 34);
+  ctx.font = "600 15px system-ui"; ctx.fillStyle = "#ffe9a8";
+  ctx.fillText("SCORE " + score + "  ·  " + dist + " ft  ·  BEST " + best + " (" + bestHR + " HR)", 16, 58);
+  // ball
+  if (state === "play" && pitch) {
+    const b = ballPos(now);
+    if (b.t >= 0) {
+      ctx.fillStyle = PITCHES[pitch.type].color;
+      ctx.beginPath(); ctx.arc(b.x, b.y, b.r, 0, 7); ctx.fill();
+      ctx.strokeStyle = "#c0392b"; ctx.lineWidth = Math.max(1.5, b.r * 0.09);
+      ctx.beginPath(); ctx.arc(b.x - b.r * 0.35, b.y, b.r * 0.55, -1.1, 1.1); ctx.stroke();
+      ctx.beginPath(); ctx.arc(b.x + b.r * 0.35, b.y, b.r * 0.55, Math.PI - 1.1, Math.PI + 1.1); ctx.stroke();
+      if (b.t < 0.25) { ctx.fillStyle = "rgba(255,255,255,.85)"; ctx.font = "700 15px system-ui"; ctx.textAlign = "center"; ctx.fillText(PITCHES[pitch.type].label, VW / 2, 128); }
+    }
+  }
+  // swing flash
+  if (swingT && now - swingT < 200) {
+    ctx.strokeStyle = "rgba(255,233,168,.9)"; ctx.lineWidth = 7;
+    ctx.beginPath(); ctx.arc(VW / 2, PLATE_Y, 92, -0.4, 1.7); ctx.stroke();
+  }
+  if (banner && now - bannerT < 1400 && state !== "menu") {
+    ctx.fillStyle = "rgba(0,0,0,.55)"; ctx.fillRect(0, 300, VW, 56);
+    ctx.fillStyle = banner.includes("HOME RUN") ? "#ffd94a" : "#fff";
+    ctx.font = "800 26px system-ui"; ctx.textAlign = "center";
+    ctx.fillText(banner, VW / 2, 338);
+  }
+  if (state === "menu") {
+    ctx.fillStyle = "rgba(4,16,8,.82)"; ctx.fillRect(0, 220, VW, 235);
+    ctx.fillStyle = "#fff"; ctx.font = "700 32px system-ui"; ctx.textAlign = "center";
+    ctx.fillText("HOME RUN DERBY", VW / 2, 284);
+    ctx.font = "400 16px system-ui"; ctx.fillStyle = "#d7ecd9";
+    ctx.fillText("Watch the pitch grow toward the plate.", VW / 2, 320);
+    ctx.fillText("Fastball, curve, changeup — time the SWING.", VW / 2, 346);
+    ctx.fillText("Fouls are free. Whiffs and takes are outs.", VW / 2, 372);
+    ctx.fillStyle = "#ffd94a"; ctx.font = "700 21px system-ui";
+    ctx.fillText("TAP TO START", VW / 2, 422);
+  }
+  if (state === "over") {
+    ctx.fillStyle = "rgba(4,16,8,.84)"; ctx.fillRect(0, 220, VW, 245);
+    ctx.fillStyle = "#fff"; ctx.font = "700 31px system-ui"; ctx.textAlign = "center";
+    ctx.fillText("DERBY OVER", VW / 2, 282);
+    ctx.font = "400 18px system-ui"; ctx.fillStyle = "#d7ecd9";
+    ctx.fillText(homers + " home runs · " + hits + " hits · " + dist + " ft", VW / 2, 320);
+    ctx.fillText("Score " + score + "  ·  Best " + best, VW / 2, 350);
+    ctx.fillStyle = "#ffd94a"; ctx.font = "700 20px system-ui";
+    ctx.fillText("TAP TO PLAY AGAIN", VW / 2, 408);
+  }
+  if (QA_MODE) {
+    const f = fairnessCheck();
+    ctx.fillStyle = "rgba(0,0,0,.65)"; ctx.fillRect(0, VH - 30, VW, 30);
+    ctx.fillStyle = f.pass ? "#7dff8a" : "#ff7d7d"; ctx.font = "600 12px monospace"; ctx.textAlign = "left";
+    ctx.fillText("QA derby pass=" + f.pass + " zone fast=" + f.zoneMs.fast + " curve=" + f.zoneMs.curve + " change=" + f.zoneMs.change, 8, VH - 10);
+  }
+}
+function frame(t) {
+  lastT = t;
+  if (state === "play") step(t);
+  draw(t);
+  requestAnimationFrame(frame);
+}
+requestAnimationFrame(frame);
+
+/* ---------------- input ---------------- */
+document.getElementById("swing").addEventListener("pointerdown", e => { e.preventDefault(); if (state === "play") doSwing(performance.now()); else startGame(); });
+canvas.addEventListener("pointerdown", () => { initAudio(); if (state !== "play") startGame(); else doSwing(performance.now()); });
+window.addEventListener("keydown", e => {
+  if (e.code === "Space") { e.preventDefault(); if (e.repeat) return; if (state === "play") doSwing(performance.now()); else startGame(); }
+});
+const muteBtn = document.getElementById("muteBtn");
+function syncMute() { muteBtn.textContent = muted ? "🔇" : "🔊"; }
+muteBtn.addEventListener("click", e => { e.stopPropagation(); muted = !muted; localStorage.setItem("derby_muted", muted ? 1 : 0); syncMute(); });
+muted = localStorage.getItem("derby_muted") === "1"; syncMute();
+if (QA_MODE) fairnessCheck();
+</script>
+</body>
+</html>

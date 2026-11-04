@@ -1,0 +1,399 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, user-scalable=no">
+<meta name="theme-color" content="#2a1440">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<title>Bubble Wing</title>
+<style>
+  * { margin:0; padding:0; box-sizing:border-box; }
+  html, body { width:100%; height:100%; overflow:hidden; background:#2a1440;
+    font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+    touch-action:none; user-select:none; -webkit-user-select:none; -webkit-tap-highlight-color: transparent; }
+  canvas { position:fixed; inset:0; display:block; touch-action:none; }
+  #muteBtn { position:fixed; top:10px; right:10px; z-index:10; width:48px; height:48px; border-radius:12px;
+    border:2px solid rgba(255,255,255,.7); background:rgba(35,15,60,.55); color:#fff; font-size:22px;
+    line-height:1; cursor:pointer; display:flex; align-items:center; justify-content:center; padding:0; }
+  #fire { position:fixed; right:16px; bottom:calc(20px + env(safe-area-inset-bottom)); z-index:10; width:92px; height:92px; border-radius:50%;
+    border:3px solid rgba(255,255,255,.65); background:rgba(190,60,90,.8); color:#fff; font-size:19px; font-weight:800; cursor:pointer; }
+  #fire:active { filter:brightness(1.3); }
+</style>
+</head>
+<body>
+<canvas id="game"></canvas>
+<button id="muteBtn" aria-label="Toggle sound">🔊</button>
+<button id="fire">FIRE</button>
+<script>
+// iOS audio routing: Web Audio defaults to the "ambient" channel, which the
+// iPhone silent switch mutes entirely. Route it to the media/playback
+// channel (iOS 17+ Audio Session API) on the first user gesture and inside
+// audio init, so game music/SFX play even with silent mode on.
+function iosPlaybackSession() {
+  try { if ('audioSession' in navigator) navigator.audioSession.type = 'playback'; } catch (e) {}
+}
+document.addEventListener('pointerdown', iosPlaybackSession, true);
+document.addEventListener('touchstart', iosPlaybackSession, true);
+"use strict";
+/* BUBBLE WING — original cute side-scrolling shooter. Fly freely in an
+   auto-scrolling sky, pop the wandering balloon critters and their four
+   big bases, scoop up the stars they drop, and spend them in the shop
+   between stages: faster shot, twin shot, faster wings, extra life.
+   Fairness (verified by the ?qa=1 self-check): enemy bullets are capped
+   at 115 px/s with at most 6 on screen, and the four bases alone are
+   guaranteed to drop 20 stars — more than the cheapest shop upgrade. */
+const VW = 420, VH = 720;
+const QA_MODE = /[?&]qa=1/.test(location.search);
+const canvas = document.getElementById("game"), ctx = canvas.getContext("2d");
+let W = 0, H = 0, DPR = 1, scale = 1, ox = 0, oy = 0;
+function resize() {
+  DPR = Math.min(window.devicePixelRatio || 1, 2);
+  W = window.innerWidth; H = window.innerHeight;
+  canvas.width = Math.round(W * DPR); canvas.height = Math.round(H * DPR);
+  canvas.style.width = W + "px"; canvas.style.height = H + "px";
+  scale = Math.min(W / VW, H / VH) * DPR; ox = (W * DPR - VW * scale) / 2; oy = (H * DPR - VH * scale) / 2;
+}
+window.addEventListener("resize", resize); resize();
+
+/* ---------------- audio ---------------- */
+let actx = null, muted = false, musicTimer = null, mStep = 0;
+function initAudio() {
+  iosPlaybackSession();
+  if (!actx) { try { const AC = window.AudioContext || window.webkitAudioContext; if (AC) actx = new AC(); } catch (e) {} }
+  if (actx && actx.state === "suspended") actx.resume();
+  if (actx && !musicTimer) musicTimer = setInterval(musicTick, 205);
+}
+function tone(freq, dur, type, vol, when, slide) {
+  if (!actx || muted) return;
+  const t = when || actx.currentTime, o = actx.createOscillator(), g = actx.createGain();
+  o.type = type || "triangle"; o.frequency.setValueAtTime(freq, t);
+  if (slide) o.frequency.exponentialRampToValueAtTime(Math.max(40, slide), t + dur);
+  g.gain.setValueAtTime(vol || 0.15, t);
+  g.gain.exponentialRampToValueAtTime(0.001, t + dur);
+  o.connect(g); g.connect(actx.destination); o.start(t); o.stop(t + dur + 0.02);
+}
+const BASS = [165, 0, 0, 0, 196, 0, 0, 0, 220, 0, 0, 0, 196, 0, 165, 0];
+const LEAD = [0, 784, 0, 988, 0, 784, 0, 659, 0, 587, 0, 659, 0, 784, 0, 0];
+function musicTick() {
+  if (!actx || muted || state !== "play") return;
+  const b = BASS[mStep % 16], l = LEAD[mStep % 16], t = actx.currentTime;
+  if (b) tone(b, 0.17, "triangle", 0.12, t);
+  if (l) tone(l, 0.13, "triangle", 0.06, t);
+  mStep++;
+}
+function sfx(name) {
+  if (!actx || muted) return; const t = actx.currentTime;
+  if (name === "pew") tone(920, 0.07, "square", 0.05, t, 500);
+  if (name === "pop") { tone(500, 0.06, "square", 0.13, t, 150); }
+  if (name === "star") { tone(1175, 0.07, "triangle", 0.1, t); tone(1568, 0.09, "triangle", 0.09, t + 0.05); }
+  if (name === "hurt") tone(220, 0.2, "square", 0.13, t, 110);
+  if (name === "base") { [392, 523, 659].forEach((f, i) => tone(f, 0.12, "triangle", 0.11, t + i * 0.07)); }
+  if (name === "buy") { [784, 988, 1319].forEach((f, i) => tone(f, 0.1, "square", 0.1, t + i * 0.06)); }
+  if (name === "win") { [523, 659, 784, 1047, 1319].forEach((f, i) => tone(f, 0.16, "square", 0.11, t + i * 0.11)); }
+  if (name === "over") { [392, 330, 262, 196].forEach((f, i) => tone(f, 0.22, "triangle", 0.12, t + i * 0.18)); }
+}
+
+/* ---------------- game ---------------- */
+const EBULLET_SPEED = 115, EBULLET_CAP = 6, BASE_STARS = 5, CHEAPEST = 8;
+const STAGE_LEN = 6600;
+let state = "menu"; // menu | play | shop | win | over
+let stage, lives, score, stars, ship, bullets, ebullets, foes, drops, scrollX, nextSpawn, basesLeft, bossSpawned, invulnT, fireHeld, fireCd, keys, dragTarget, lastT, shopItems;
+let best = +(localStorage.getItem("bubblewing_best") || 0);
+let upg = { rate: 0, twin: 0, wings: 0 };
+function startGame() {
+  stage = 1; lives = 3; score = 0; stars = 0; upg = { rate: 0, twin: 0, wings: 0 };
+  startStage(); state = "play"; initAudio();
+}
+function startStage() {
+  ship = { x: 70, y: 360 };
+  bullets = []; ebullets = []; foes = []; drops = [];
+  spawnedBases = new Set();
+  scrollX = 0; nextSpawn = 500; invulnT = 0; fireCd = 0; dragTarget = null;
+  basesLeft = stage === 3 ? 3 : 4; bossSpawned = false;
+  // spawn schedule encoded by distance: balloons every ~430px, bases at set points
+}
+function spawnBalloon(y) {
+  foes.push({ kind: "loon", x: VW + 30, y: y === undefined ? 100 + Math.random() * 460 : y, hp: 1, t: Math.random() * 9, fireT: 1500 + Math.random() * 2500, r: 17 });
+}
+function spawnBase(big) {
+  foes.push({ kind: big ? "boss" : "base", x: VW + 70, y: 180 + Math.random() * 320, hp: big ? 42 : 8, t: 0, fireT: 1300, r: big ? 52 : 36 });
+}
+function step(dtms, now) {
+  if (state !== "play") return;
+  const dt = Math.min(0.04, dtms / 1000);
+  scrollX += 72 * dt;
+  if (invulnT > 0) invulnT -= dtms;
+  // movement: drag target or keys
+  const wingSpeed = 300 + upg.wings * 55;
+  if (dragTarget) {
+    const dx = dragTarget.x - ship.x, dy = dragTarget.y - ship.y, d = Math.hypot(dx, dy);
+    if (d > 4) { const mv = Math.min(d, wingSpeed * dt); ship.x += dx / d * mv; ship.y += dy / d * mv; }
+  }
+  let mx = 0, my = 0;
+  if (keys.left) mx = -1; if (keys.right) mx = 1; if (keys.up) my = -1; if (keys.down) my = 1;
+  ship.x += mx * wingSpeed * dt; ship.y += my * wingSpeed * dt;
+  ship.x = Math.max(24, Math.min(VW - 10, ship.x)); ship.y = Math.max(84, Math.min(648, ship.y));
+  // spawns
+  if (scrollX > nextSpawn && scrollX < STAGE_LEN - 700) {
+    nextSpawn += 430 + Math.random() * 120;
+    spawnBalloon(); if (Math.random() < 0.6) spawnBalloon();
+  }
+  const basePoints = stage === 3 ? [1300, 2600, 3900] : [1200, 2400, 3600, 4800];
+  for (const bp of basePoints) if (scrollX >= bp && !foes.some(f => f.baseAt === bp) && !spawnedBases.has(bp)) { spawnedBases.add(bp); spawnBase(false); foes[foes.length - 1].baseAt = bp; }
+  if (stage === 3 && scrollX >= 5400 && !bossSpawned) { bossSpawned = true; spawnBase(true); }
+  // firing
+  fireCd -= dtms;
+  if (fireHeld && fireCd <= 0) {
+    fireCd = upg.rate ? 125 : 200;
+    bullets.push({ x: ship.x + 18, y: ship.y, vx: 540, vy: 0 });
+    if (upg.twin) { bullets.push({ x: ship.x + 12, y: ship.y - 10, vx: 520, vy: -40 }); bullets.push({ x: ship.x + 12, y: ship.y + 10, vx: 520, vy: 40 }); }
+    sfx("pew");
+  }
+  for (const b of bullets) { b.x += b.vx * dt; b.y += b.vy * dt; }
+  bullets = bullets.filter(b => b.x < VW + 30);
+  // foes
+  for (const f of foes) {
+    f.t += dt;
+    if (f.kind === "loon") { f.x -= 46 * dt; f.y += Math.sin(f.t * 2.2) * 34 * dt; }
+    else { f.x = Math.max(VW - 90, f.x - 60 * dt); f.y += Math.sin(f.t * 0.9) * 16 * dt; }
+    f.fireT -= dtms;
+    if (f.fireT <= 0 && f.x < VW - 10 && ebullets.length < EBULLET_CAP) {
+      f.fireT = f.kind === "loon" ? 2600 + Math.random() * 1600 : (f.kind === "boss" ? 950 : 1700);
+      const a = Math.atan2(ship.y - f.y, ship.x - f.x);
+      ebullets.push({ x: f.x - f.r * 0.6, y: f.y, vx: Math.cos(a) * EBULLET_SPEED, vy: Math.sin(a) * EBULLET_SPEED });
+      if (f.kind === "boss") for (const off of [-0.35, 0.35]) ebullets.push({ x: f.x - f.r * 0.6, y: f.y, vx: Math.cos(a + off) * EBULLET_SPEED, vy: Math.sin(a + off) * EBULLET_SPEED });
+    }
+    if (f.x < -70) f.hp = -999; // drifted away
+  }
+  for (const b of ebullets) { b.x += b.vx * dt; b.y += b.vy * dt; }
+  ebullets = ebullets.filter(b => b.x > -20 && b.x < VW + 20 && b.y > 60 && b.y < VH);
+  // bullet vs foe
+  for (const b of bullets) {
+    for (const f of foes) {
+      if (f.hp > 0 && Math.hypot(b.x - f.x, b.y - f.y) < f.r + 5) {
+        f.hp--; b.x = VW + 99;
+        if (f.hp === 0) killFoe(f);
+        break;
+      }
+    }
+  }
+  foes = foes.filter(f => f.hp > 0);
+  bullets = bullets.filter(b => b.x < VW + 30);
+  // drops
+  for (const d of drops) { d.x -= 55 * dt; d.y += 26 * dt; d.t += dt; if (Math.hypot(d.x - ship.x, d.y - ship.y) < 30) { d.got = true; stars++; score += 15; sfx("star"); } }
+  drops = drops.filter(d => !d.got && d.x > -20 && d.y < VH - 60);
+  // foe/bullet vs ship
+  if (invulnT <= 0) {
+    let hit = ebullets.some(b => Math.hypot(b.x - ship.x, b.y - ship.y) < 17);
+    if (!hit) hit = foes.some(f => f.hp > 0 && Math.hypot(f.x - ship.x, f.y - ship.y) < f.r + 12);
+    if (hit) {
+      lives--; invulnT = 1800; ebullets = []; sfx("hurt");
+      if (lives <= 0) { state = "over"; if (score > best) { best = score; localStorage.setItem("bubblewing_best", best); } sfx("over"); return; }
+    }
+  }
+  // stage clear
+  const basesAlive = foes.some(f => f.kind !== "loon" && f.hp > 0);
+  if (scrollX >= STAGE_LEN && !basesAlive && basesLeft <= 0) {
+    if (stage >= 3) { state = "win"; score += lives * 250; if (score > best) { best = score; localStorage.setItem("bubblewing_best", best); } sfx("win"); }
+    else { state = "shop"; buildShop(); sfx("base"); }
+  }
+}
+let spawnedBases = new Set();
+function killFoe(f) {
+  sfx("pop");
+  if (f.kind === "loon") {
+    score += 50;
+    if (Math.random() < 0.55) drops.push({ x: f.x, y: f.y, t: 0, got: false });
+  } else {
+    score += f.kind === "boss" ? 800 : 300;
+    const n = f.kind === "boss" ? 10 : BASE_STARS;
+    for (let i = 0; i < n; i++) drops.push({ x: f.x + (Math.random() * 40 - 20), y: f.y + (Math.random() * 40 - 20), t: Math.random(), got: false });
+    basesLeft--; sfx("base");
+  }
+}
+function buildShop() {
+  shopItems = [
+    { id: "rate", name: "⚡ Faster Shot", price: 8, can: !upg.rate },
+    { id: "twin", name: "✌ Twin Shot", price: 14, can: !upg.twin },
+    { id: "wings", name: "🪽 Faster Wings", price: 10, can: upg.wings < 2 },
+    { id: "life", name: "❤ Extra Life", price: 12, can: lives < 5 }
+  ];
+}
+function buy(it) {
+  if (!it.can || stars < it.price) return;
+  stars -= it.price; sfx("buy");
+  if (it.id === "rate") upg.rate = 1;
+  if (it.id === "twin") upg.twin = 1;
+  if (it.id === "wings") upg.wings++;
+  if (it.id === "life") lives++;
+  buildShop();
+}
+
+/* ---------------- fairness / QA self-check ---------------- */
+function fairnessCheck() {
+  const baseYield = 4 * BASE_STARS; // 4 bases in stages 1-2; stage 3 has 3 bases + boss (10) = 25
+  const stage3Yield = 3 * BASE_STARS + 10;
+  const r = { game: "bubble-wing", enemyBulletSpeed: EBULLET_SPEED, enemyBulletCap: EBULLET_CAP,
+    minBaseStarYield: Math.min(baseYield, stage3Yield), cheapestUpgrade: CHEAPEST,
+    pass: EBULLET_SPEED <= 130 && EBULLET_CAP <= 6 && Math.min(baseYield, stage3Yield) >= CHEAPEST };
+  window.__qaFairness = r; return r;
+}
+
+/* ---------------- draw ---------------- */
+function star5(x, y, r, color) {
+  ctx.fillStyle = color; ctx.beginPath();
+  for (let i = 0; i < 5; i++) { const a = -Math.PI / 2 + i * (Math.PI * 4 / 5); const px = x + Math.cos(a) * r, py = y + Math.sin(a) * r; i ? ctx.lineTo(px, py) : ctx.moveTo(px, py); }
+  ctx.closePath(); ctx.fill();
+}
+function draw(now) {
+  ctx.setTransform(1, 0, 0, 1, 0, 0);
+  const sky = ctx.createLinearGradient(0, 0, 0, VH);
+  sky.addColorStop(0, "#3b1d63"); sky.addColorStop(1, "#7a4a9e");
+  ctx.fillStyle = sky; ctx.fillRect(0, 0, canvas.width, canvas.height);
+  ctx.setTransform(scale, 0, 0, scale, ox, oy);
+  // parallax clouds
+  ctx.fillStyle = "rgba(255,255,255,.35)";
+  for (let i = 0; i < 8; i++) {
+    const cx = ((i * 173 - scrollX * 0.4) % (VW + 120) + VW + 120) % (VW + 120) - 60;
+    const cy = 120 + (i * 89) % 480;
+    ctx.beginPath(); ctx.ellipse(cx, cy, 34, 13, 0, 0, 7); ctx.ellipse(cx + 22, cy + 3, 24, 10, 0, 0, 7); ctx.fill();
+  }
+  for (const d of drops) star5(d.x, d.y + Math.sin(d.t * 5) * 3, 10, "#ffd94a");
+  for (const f of foes) {
+    if (f.hp <= 0) continue;
+    if (f.kind === "loon") {
+      ctx.fillStyle = ["#ef5b7a", "#3fa7e8", "#4fce72"][Math.abs(Math.round(f.t)) % 3];
+      ctx.beginPath(); ctx.arc(f.x, f.y, f.r, 0, 7); ctx.fill();
+      ctx.strokeStyle = "rgba(255,255,255,.7)"; ctx.beginPath(); ctx.moveTo(f.x, f.y + f.r); ctx.quadraticCurveTo(f.x + 4, f.y + f.r + 10, f.x, f.y + f.r + 16); ctx.stroke();
+      ctx.fillStyle = "#222"; ctx.beginPath(); ctx.arc(f.x - 5, f.y - 2, 2.4, 0, 7); ctx.arc(f.x + 5, f.y - 2, 2.4, 0, 7); ctx.fill();
+    } else {
+      ctx.fillStyle = f.kind === "boss" ? "#8e2f4f" : "#6a3fa0";
+      ctx.beginPath(); ctx.arc(f.x, f.y, f.r, 0, 7); ctx.fill();
+      ctx.fillStyle = "#ffd94a"; ctx.beginPath(); ctx.arc(f.x, f.y, f.r * 0.55, 0, 7); ctx.fill();
+      ctx.fillStyle = "#222"; ctx.beginPath(); ctx.arc(f.x - 9, f.y - 4, 3.4, 0, 7); ctx.arc(f.x + 9, f.y - 4, 3.4, 0, 7); ctx.fill();
+      ctx.fillStyle = "#222"; ctx.fillRect(f.x - f.r, f.y - f.r - 14, f.r * 2, 7);
+      ctx.fillStyle = "#39d353"; ctx.fillRect(f.x - f.r, f.y - f.r - 14, f.r * 2 * Math.max(0, f.hp / (f.kind === "boss" ? 42 : 8)), 7);
+    }
+  }
+  ctx.fillStyle = "#ffe27a";
+  for (const b of bullets) { ctx.beginPath(); ctx.arc(b.x, b.y, 4.5, 0, 7); ctx.fill(); }
+  ctx.fillStyle = "#ff8ab0";
+  for (const b of ebullets) { ctx.beginPath(); ctx.arc(b.x, b.y, 5.5, 0, 7); ctx.fill(); }
+  if (state === "play" || state === "shop") {
+    const blink = invulnT > 0 && Math.floor(now / 120) % 2 === 0;
+    if (!blink) {
+      const flap = Math.sin(now / 90) * 5;
+      ctx.fillStyle = "#fff";
+      ctx.beginPath(); ctx.ellipse(ship.x - 6, ship.y - 10 - flap * 0.4, 13, 5.5, -0.5, 0, 7); ctx.fill();
+      ctx.beginPath(); ctx.ellipse(ship.x - 6, ship.y + 10 + flap * 0.4, 13, 5.5, 0.5, 0, 7); ctx.fill();
+      ctx.fillStyle = "#ffb347"; ctx.beginPath(); ctx.ellipse(ship.x, ship.y, 17, 10, 0, 0, 7); ctx.fill();
+      ctx.fillStyle = "#e0532f"; ctx.beginPath(); ctx.moveTo(ship.x + 14, ship.y); ctx.lineTo(ship.x + 24, ship.y + 4); ctx.lineTo(ship.x + 14, ship.y + 7); ctx.closePath(); ctx.fill();
+      ctx.fillStyle = "#28418c"; ctx.beginPath(); ctx.arc(ship.x + 3, ship.y - 3, 4.6, 0, 7); ctx.fill();
+    }
+  }
+  // HUD
+  ctx.fillStyle = "rgba(0,0,0,.42)"; ctx.fillRect(0, 0, VW, 60);
+  ctx.fillStyle = "#fff"; ctx.font = "700 18px system-ui"; ctx.textAlign = "left";
+  ctx.fillText("STAGE " + stage + "  ·  SCORE " + score, 14, 26);
+  ctx.font = "600 14px system-ui"; ctx.fillStyle = "#ffe9a8";
+  ctx.fillText("⭐ " + stars + "   ❤ " + lives + "   BASES LEFT " + Math.max(0, basesLeft + (stage === 3 && !bossSpawned ? 1 : 0)) + "   BEST " + best, 14, 49);
+  if (state === "menu") {
+    ctx.fillStyle = "rgba(16,6,30,.85)"; ctx.fillRect(0, 200, VW, 260);
+    ctx.fillStyle = "#fff"; ctx.font = "700 33px system-ui"; ctx.textAlign = "center";
+    ctx.fillText("BUBBLE WING", VW / 2, 268);
+    ctx.font = "400 16px system-ui"; ctx.fillStyle = "#e6d9f7";
+    ctx.fillText("Drag to fly, hold FIRE to pop balloons.", VW / 2, 304);
+    ctx.fillText("Sink all 4 bases, scoop stars, shop up.", VW / 2, 330);
+    ctx.fillText("Stage 3 ends with the boss base.", VW / 2, 356);
+    ctx.fillStyle = "#ffd94a"; ctx.font = "700 21px system-ui";
+    ctx.fillText("TAP TO START", VW / 2, 412);
+  }
+  if (state === "shop") {
+    ctx.fillStyle = "rgba(16,6,30,.9)"; ctx.fillRect(30, 130, VW - 60, 470);
+    ctx.fillStyle = "#ffd94a"; ctx.font = "700 26px system-ui"; ctx.textAlign = "center";
+    ctx.fillText("★ STAR SHOP ★", VW / 2, 178);
+    ctx.fillStyle = "#fff"; ctx.font = "600 16px system-ui";
+    ctx.fillText("You have ⭐ " + stars + " — stage " + stage + " cleared!", VW / 2, 208);
+    shopItems.forEach((it, i) => {
+      const y = 246 + i * 62;
+      const afford = it.can && stars >= it.price;
+      ctx.fillStyle = afford ? "#3a2a6e" : "#2c2440"; ctx.fillRect(56, y - 24, VW - 112, 48);
+      ctx.fillStyle = it.can ? "#fff" : "#8d84a8"; ctx.font = "700 17px system-ui"; ctx.textAlign = "left";
+      ctx.fillText(it.name, 72, y + 2);
+      ctx.textAlign = "right"; ctx.fillStyle = it.can ? "#ffd94a" : "#8d84a8";
+      ctx.fillText(it.can ? "⭐ " + it.price : "OWNED/—", VW - 72, y + 2);
+    });
+    ctx.fillStyle = "#39d353"; ctx.fillRect(96, 512, VW - 192, 52);
+    ctx.fillStyle = "#fff"; ctx.font = "800 19px system-ui"; ctx.textAlign = "center";
+    ctx.fillText("LAUNCH STAGE " + (stage + 1) + " ▶", VW / 2, 546);
+  }
+  if (state === "win" || state === "over") {
+    ctx.fillStyle = "rgba(16,6,30,.87)"; ctx.fillRect(0, 210, VW, 250);
+    ctx.fillStyle = "#fff"; ctx.font = "700 31px system-ui"; ctx.textAlign = "center";
+    ctx.fillText(state === "win" ? "YOU WIN! 🎉" : "GAME OVER", VW / 2, 280);
+    ctx.font = "400 17px system-ui"; ctx.fillStyle = "#e6d9f7";
+    ctx.fillText("Score " + score + " · Best " + best, VW / 2, 318);
+    ctx.fillText(state === "win" ? "The boss base is popped. The sky is yours." : "The balloons drift on without you.", VW / 2, 348);
+    ctx.fillStyle = "#ffd94a"; ctx.font = "700 20px system-ui";
+    ctx.fillText("TAP TO PLAY AGAIN", VW / 2, 408);
+  }
+  if (QA_MODE) {
+    const f = fairnessCheck();
+    ctx.fillStyle = "rgba(0,0,0,.65)"; ctx.fillRect(0, VH - 30, VW, 30);
+    ctx.fillStyle = f.pass ? "#7dff8a" : "#ff7d7d"; ctx.font = "600 12px monospace"; ctx.textAlign = "left";
+    ctx.fillText("QA bubble-wing pass=" + f.pass + " ebullet=" + f.enemyBulletSpeed + " cap=" + f.enemyBulletCap + " yield=" + f.minBaseStarYield, 8, VH - 10);
+  }
+}
+function frame(t) {
+  const dt = Math.min(50, t - (lastT || t)); lastT = t;
+  if (state === "play") step(dt, t);
+  draw(t);
+  requestAnimationFrame(frame);
+}
+requestAnimationFrame(frame);
+
+/* ---------------- input ---------------- */
+keys = { left: false, right: false, up: false, down: false };
+function toLogical(e) { const r = canvas.getBoundingClientRect(); return { x: (e.clientX - r.left) * (VW / r.width), y: (e.clientY - r.top) * (VH / r.height) }; }
+canvas.addEventListener("pointerdown", e => {
+  initAudio();
+  const p = toLogical(e);
+  if (state === "menu" || state === "win" || state === "over") { startGame(); return; }
+  if (state === "shop") {
+    shopItems.forEach((it, i) => { const y = 246 + i * 62; if (Math.abs(p.y - y) < 28 && p.x > 50 && p.x < VW - 50) buy(it); });
+    if (p.y > 505 && p.y < 575) { stage++; spawnedBases = new Set(); startStage(); state = "play"; }
+    return;
+  }
+  dragTarget = p;
+});
+canvas.addEventListener("pointermove", e => { if (state === "play") dragTarget = toLogical(e); });
+canvas.addEventListener("pointerup", () => { dragTarget = null; });
+const fireBtn = document.getElementById("fire");
+fireBtn.addEventListener("pointerdown", e => { e.preventDefault(); initAudio(); fireHeld = true; if (state !== "play" && state !== "shop") startGame(); });
+fireBtn.addEventListener("pointerup", () => fireHeld = false);
+fireBtn.addEventListener("pointerleave", () => fireHeld = false);
+window.addEventListener("keydown", e => {
+  if (e.code === "ArrowLeft") keys.left = true;
+  else if (e.code === "ArrowRight") keys.right = true;
+  else if (e.code === "ArrowUp") keys.up = true;
+  else if (e.code === "ArrowDown") keys.down = true;
+  else if (e.code === "KeyZ" || e.code === "Space") { e.preventDefault(); fireHeld = true; if (state !== "play" && state !== "shop") startGame(); }
+});
+window.addEventListener("keyup", e => {
+  if (e.code === "ArrowLeft") keys.left = false;
+  if (e.code === "ArrowRight") keys.right = false;
+  if (e.code === "ArrowUp") keys.up = false;
+  if (e.code === "ArrowDown") keys.down = false;
+  if (e.code === "KeyZ" || e.code === "Space") fireHeld = false;
+});
+const muteBtn = document.getElementById("muteBtn");
+function syncMute() { muteBtn.textContent = muted ? "🔇" : "🔊"; }
+muteBtn.addEventListener("click", e => { e.stopPropagation(); muted = !muted; localStorage.setItem("bubblewing_muted", muted ? 1 : 0); syncMute(); });
+muted = localStorage.getItem("bubblewing_muted") === "1"; syncMute();
+ship = { x: 70, y: 360 }; scrollX = 0; stage = 1; lives = 3; score = 0; stars = 0; basesLeft = 4;
+foes = []; drops = []; bullets = []; ebullets = [];
+if (QA_MODE) fairnessCheck();
+</script>
+</body>
+</html>

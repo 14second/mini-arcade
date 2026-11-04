@@ -1,0 +1,437 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, user-scalable=no">
+<meta name="theme-color" content="#14261c">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<title>Critter Clash</title>
+<style>
+  * { margin:0; padding:0; box-sizing:border-box; }
+  html, body { width:100%; height:100%; overflow:hidden; background:#14261c;
+    font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+    touch-action:none; user-select:none; -webkit-user-select:none; -webkit-tap-highlight-color: transparent; }
+  canvas { position:fixed; inset:0; display:block; touch-action:none; }
+  #muteBtn { position:fixed; top:10px; right:10px; z-index:10; width:48px; height:48px; border-radius:12px;
+    border:2px solid rgba(255,255,255,.7); background:rgba(12,35,20,.55); color:#fff; font-size:22px;
+    line-height:1; cursor:pointer; display:flex; align-items:center; justify-content:center; padding:0; }
+  #menu { position:fixed; left:0; right:0; bottom:0; z-index:10; display:grid; grid-template-columns:1fr 1fr; gap:9px;
+    padding:10px 12px calc(10px + env(safe-area-inset-bottom)); }
+  #menu button { height:58px; border-radius:15px; border:2px solid rgba(255,255,255,.5);
+    background:rgba(24,60,36,.88); color:#fff; font-size:17px; font-weight:700; cursor:pointer; padding:0 6px; }
+  #menu button:active { background:rgba(50,110,66,.95); }
+  #menu button:disabled { opacity:.45; }
+  #menu button small { display:block; font-size:11px; font-weight:400; color:#bfe3c8; }
+</style>
+</head>
+<body>
+<canvas id="game"></canvas>
+<button id="muteBtn" aria-label="Toggle sound">🔊</button>
+<div id="menu"></div>
+<script>
+// iOS audio routing: Web Audio defaults to the "ambient" channel, which the
+// iPhone silent switch mutes entirely. Route it to the media/playback
+// channel (iOS 17+ Audio Session API) on the first user gesture and inside
+// audio init, so game music/SFX play even with silent mode on.
+function iosPlaybackSession() {
+  try { if ('audioSession' in navigator) navigator.audioSession.type = 'playback'; } catch (e) {}
+}
+document.addEventListener('pointerdown', iosPlaybackSession, true);
+document.addEventListener('touchstart', iosPlaybackSession, true);
+"use strict";
+/* CRITTER CLASH — original turn-based critter battler. Eight critters
+   in a Leaf / Wave / Ember triangle (strong x1.5, weak x0.75), three
+   moves each: a steady attack, a heavy attack that can miss, and a
+   heal-or-buff. Weaken wild critters and catch them with orbs, rest to
+   heal, and climb the six-trainer ladder.
+   Fairness (verified by the ?qa=1 self-check): across 400 simulated
+   equal-level battles the first mover wins 35-65% of the time, and no
+   single hit at equal level deals more than 45% of max HP. */
+const VW = 420, VH = 720;
+const QA_MODE = /[?&]qa=1/.test(location.search);
+const canvas = document.getElementById("game"), ctx = canvas.getContext("2d");
+let W = 0, H = 0, DPR = 1, scale = 1, ox = 0, oy = 0;
+function resize() {
+  DPR = Math.min(window.devicePixelRatio || 1, 2);
+  W = window.innerWidth; H = window.innerHeight;
+  canvas.width = Math.round(W * DPR); canvas.height = Math.round(H * DPR);
+  canvas.style.width = W + "px"; canvas.style.height = H + "px";
+  scale = Math.min(W / VW, H / VH) * DPR; ox = (W * DPR - VW * scale) / 2; oy = (H * DPR - VH * scale) / 2;
+}
+window.addEventListener("resize", resize); resize();
+
+/* ---------------- audio ---------------- */
+let actx = null, muted = false, musicTimer = null, mStep = 0;
+function initAudio() {
+  iosPlaybackSession();
+  if (!actx) { try { const AC = window.AudioContext || window.webkitAudioContext; if (AC) actx = new AC(); } catch (e) {} }
+  if (actx && actx.state === "suspended") actx.resume();
+  if (actx && !musicTimer) musicTimer = setInterval(musicTick, 220);
+}
+function tone(freq, dur, type, vol, when, slide) {
+  if (!actx || muted) return;
+  const t = when || actx.currentTime, o = actx.createOscillator(), g = actx.createGain();
+  o.type = type || "triangle"; o.frequency.setValueAtTime(freq, t);
+  if (slide) o.frequency.exponentialRampToValueAtTime(Math.max(40, slide), t + dur);
+  g.gain.setValueAtTime(vol || 0.15, t);
+  g.gain.exponentialRampToValueAtTime(0.001, t + dur);
+  o.connect(g); g.connect(actx.destination); o.start(t); o.stop(t + dur + 0.02);
+}
+const BASS = [131, 0, 0, 0, 147, 0, 0, 0, 165, 0, 0, 0, 147, 0, 131, 0];
+const LEAD = [0, 392, 0, 494, 0, 587, 0, 494, 0, 440, 0, 392, 0, 330, 0, 0];
+function musicTick() {
+  if (!actx || muted || state !== "battle") return;
+  const b = BASS[mStep % 16], l = LEAD[mStep % 16], t = actx.currentTime;
+  if (b) tone(b, 0.18, "triangle", 0.11, t);
+  if (l) tone(l, 0.14, "triangle", 0.05, t);
+  mStep++;
+}
+function sfx(name) {
+  if (!actx || muted) return; const t = actx.currentTime;
+  if (name === "hit") tone(200, 0.1, "square", 0.13, t, 90);
+  if (name === "heavy") tone(140, 0.16, "square", 0.16, t, 60);
+  if (name === "miss") tone(500, 0.1, "sine", 0.08, t, 240);
+  if (name === "heal") { [523, 659, 784].forEach((f, i) => tone(f, 0.1, "triangle", 0.1, t + i * 0.06)); }
+  if (name === "catch") { [659, 784, 988, 1319].forEach((f, i) => tone(f, 0.11, "square", 0.1, t + i * 0.07)); }
+  if (name === "faint") { [440, 349, 262, 175].forEach((f, i) => tone(f, 0.15, "triangle", 0.11, t + i * 0.11)); }
+  if (name === "win") { [523, 659, 784, 1047].forEach((f, i) => tone(f, 0.14, "square", 0.11, t + i * 0.1)); }
+}
+
+/* ---------------- critters (all original) ---------------- */
+const TYPES = { leaf: { strong: "ember", color: "#4fce72" }, wave: { strong: "leaf", color: "#3fa7e8" }, ember: { strong: "wave", color: "#ef7d3c" } };
+function mult(atk, def) { if (TYPES[atk].strong === def) return 1.5; if (TYPES[def].strong === atk) return 0.75; return 1; }
+const SPECIES = [
+  { name: "Sproutle", type: "leaf", hp: 34, atk: 9, color: "#4fce72", shape: "turtle" },
+  { name: "Fernix", type: "leaf", hp: 30, atk: 11, color: "#38b2a0", shape: "fox" },
+  { name: "Puddlepup", type: "wave", hp: 33, atk: 9, color: "#3fa7e8", shape: "pup" },
+  { name: "Coralisk", type: "wave", hp: 29, atk: 11, color: "#7a6fe8", shape: "snake" },
+  { name: "Embercub", type: "ember", hp: 32, atk: 10, color: "#ef7d3c", shape: "cub" },
+  { name: "Magmole", type: "ember", hp: 36, atk: 8, color: "#c9563c", shape: "mole" },
+  { name: "Mosshorn", type: "leaf", hp: 38, atk: 8, color: "#6aa84f", shape: "horn" },
+  { name: "Tidewing", type: "wave", hp: 28, atk: 12, color: "#39c2c9", shape: "bird" }
+];
+const MOVES = [
+  { name: "Tackle", kind: "atk", power: 0, acc: 1 },
+  { name: "Slam", kind: "heavy", power: 2, acc: 0.78 },
+  { name: "Mend / Focus", kind: "util", power: 0, acc: 1 }
+];
+function makeCritter(si, level) {
+  const s = SPECIES[si];
+  const maxHp = Math.round(s.hp + (level - 1) * 4.5);
+  return { si, name: s.name, type: s.type, level, maxHp, hp: maxHp, atk: s.atk + (level - 1) * 1.6, buff: 0, xp: 0 };
+}
+function damage(attacker, defender, move) {
+  const base = attacker.atk * 0.48 + move.power + attacker.buff;
+  const dmg = Math.max(2, Math.round(base * mult(attacker.type, defender.type) * (0.9 + Math.random() * 0.2)));
+  return dmg;
+}
+const TRAINERS = [
+  { name: "Trainer Pip", team: [[0, 3]] },
+  { name: "Trainer Rosa", team: [[4, 4], [1, 4]] },
+  { name: "Trainer Brook", team: [[2, 5], [3, 5]] },
+  { name: "Trainer Ash", team: [[5, 6], [7, 6], [0, 6]] },
+  { name: "Trainer Fern", team: [[6, 7], [1, 7], [4, 7]] },
+  { name: "Champion Vale", team: [[7, 9], [3, 9], [6, 9]] }
+];
+let state = "menu"; // menu | map | battle | over(win)
+let team, orbs, ladder, battle, log, busy, xpPop;
+function saveGame() {
+  localStorage.setItem("critterclash_save", JSON.stringify({ team, orbs, ladder }));
+}
+function loadGame() {
+  try { const s = JSON.parse(localStorage.getItem("critterclash_save") || "null"); if (s && s.team && s.team.length) { team = s.team; orbs = s.orbs; ladder = s.ladder; return true; } } catch (e) {}
+  return false;
+}
+function startGame() {
+  if (!loadGame()) {
+    team = [makeCritter(0, 3), makeCritter(2, 2)];
+    orbs = 3; ladder = 0; saveGame();
+  }
+  state = "map"; log = "Rest, explore the wilds, or challenge the ladder."; initAudio();
+}
+function activeOf(side) { const b = side === "me" ? battle.me : battle.foe; return b.list[b.idx]; }
+function startBattle(kind) {
+  const me = team.map(c => ({ ...c }));
+  let foeList;
+  if (kind === "wild") {
+    const lv = 2 + Math.floor(Math.random() * 3) + Math.floor(ladder / 2);
+    foeList = [makeCritter(Math.floor(Math.random() * SPECIES.length), lv)];
+  } else {
+    const tr = TRAINERS[ladder];
+    foeList = tr.team.map(([si, lv]) => makeCritter(si, lv));
+  }
+  battle = { kind, me: { list: me, idx: 0 }, foe: { list: foeList, idx: 0 }, turn: "me", trainerName: kind === "trainer" ? TRAINERS[ladder].name : null };
+  state = "battle"; busy = false;
+  log = kind === "wild" ? "A wild " + foeList[0].name + " (Lv " + foeList[0].level + ") appears!" : TRAINERS[ladder].name + " sends out " + foeList[0].name + "!";
+  renderMenu();
+}
+function endTurnFoe() {
+  setTimeout(() => {
+    if (state !== "battle") return;
+    const foe = activeOf("foe"), me = activeOf("me");
+    if (foe.hp <= 0 || me.hp <= 0) return;
+    // simple AI: heal if low & not healed recently, heavy sometimes
+    let mi = 0; const roll = Math.random();
+    if (foe.hp < foe.maxHp * 0.35 && roll < 0.4) mi = 2;
+    else if (roll < 0.45) mi = 1;
+    doMove("foe", mi);
+    busy = false; renderMenu();
+  }, 750);
+}
+function doMove(side, mi) {
+  const atkSide = side, defSide = side === "me" ? "foe" : "me";
+  const A = activeOf(atkSide), D = activeOf(defSide);
+  const mv = MOVES[mi];
+  if (mv.kind === "util") {
+    if (side === "me" || A.hp < A.maxHp) { const h = Math.round(A.maxHp * 0.28); A.hp = Math.min(A.maxHp, A.hp + h); log = A.name + " mends " + h + " HP."; sfx("heal"); }
+    else { A.buff += 2; log = A.name + " focuses (+attack)."; sfx("heal"); }
+    if (A.hp >= A.maxHp && mv.kind === "util" && side === "foe") { A.buff += 2; }
+  } else {
+    if (Math.random() > mv.acc) { log = A.name + "'s " + mv.name + " missed!"; sfx("miss"); }
+    else {
+      const dmg = damage(A, D, mv);
+      D.hp = Math.max(0, D.hp - dmg);
+      const eff = mult(A.type, D.type);
+      log = A.name + " uses " + mv.name + " — " + dmg + " dmg" + (eff > 1 ? " (strong!)" : eff < 1 ? " (weak)" : "") + ".";
+      sfx(mv.kind === "heavy" ? "heavy" : "hit");
+    }
+  }
+  checkFaint(defSide);
+  syncTeamBack();
+}
+function checkFaint(defSide) {
+  const B = defSide === "me" ? battle.me : battle.foe;
+  if (B.list[B.idx].hp > 0) return;
+  sfx("faint");
+  if (B.idx + 1 < B.list.length) { B.idx++; log += " " + (defSide === "me" ? "Go, " : "Foe sends ") + B.list[B.idx].name + "!"; return; }
+  // side wiped
+  if (defSide === "foe") {
+    const xpGain = battle.kind === "trainer" ? 26 : 14;
+    battle.me.list.forEach(c => { if (c.hp > 0) gainXp(c, xpGain); });
+    if (battle.kind === "trainer") {
+      ladder++; log = "You beat " + battle.trainerName + "! Ladder: " + ladder + "/6.";
+      if (ladder >= TRAINERS.length) { state = "over"; }
+      sfx("win");
+    } else { log = "You won the wild battle! +" + xpGain + " XP."; sfx("win"); }
+    persistTeam();
+    if (state === "battle") { state = "map"; }
+    renderMenu();
+  } else {
+    log = "Your team is spent! Back to the rest point…";
+    team.forEach(c => c.hp = c.maxHp);
+    persistTeam();
+    state = "map"; renderMenu();
+  }
+}
+function gainXp(c, n) {
+  c.xp += n;
+  while (c.xp >= 30) { c.xp -= 30; c.level++; c.maxHp += 5; c.hp += 5; c.atk += 1.6; log += " " + c.name + " → Lv " + c.level + "!"; }
+}
+function syncTeamBack() { /* battle.me is a copy; persist on battle end */ }
+function persistTeam() {
+  if (!battle) return;
+  battle.me.list.forEach((bc, i) => { if (team[i]) { team[i].hp = bc.hp; team[i].level = bc.level; team[i].maxHp = bc.maxHp; team[i].atk = bc.atk; team[i].xp = bc.xp; } });
+  saveGame();
+}
+function tryCatch() {
+  if (battle.kind !== "wild" || orbs <= 0 || busy) return;
+  busy = true;
+  const foe = activeOf("foe");
+  const chance = 0.25 + 0.65 * (1 - foe.hp / foe.maxHp);
+  orbs--;
+  if (Math.random() < chance) {
+    if (team.length < 3) { team.push({ ...foe, hp: Math.max(1, foe.hp) }); log = "Caught " + foe.name + "! It joins your team."; }
+    else { team[team.length - 1] = { ...foe, hp: Math.max(1, foe.hp) }; log = "Caught " + foe.name + "! (Team full — it takes the last slot.)"; }
+    sfx("catch"); persistTeam(); state = "map"; busy = false; renderMenu();
+  } else {
+    log = foe.name + " broke free! (" + orbs + " orbs left)"; sfx("miss");
+    busy = false; endTurnFoe();
+  }
+  renderMenu();
+}
+function playerMove(mi) {
+  if (state !== "battle" || busy) return;
+  busy = true;
+  doMove("me", mi);
+  if (state === "battle") endTurnFoe(); else { busy = false; }
+}
+/* ---------------- menu buttons ---------------- */
+const menuEl = document.getElementById("menu");
+function renderMenu() {
+  menuEl.innerHTML = "";
+  const add = (label, sub, fn, dis) => {
+    const b = document.createElement("button");
+    b.innerHTML = label + (sub ? "<small>" + sub + "</small>" : "");
+    b.disabled = !!dis;
+    b.addEventListener("click", () => { initAudio(); fn(); });
+    menuEl.appendChild(b);
+  };
+  if (state === "map") {
+    add("🌿 Wild Battle", "weaken & catch critters", () => startBattle("wild"));
+    add("🏆 Trainer Ladder", ladder < TRAINERS.length ? "next: " + TRAINERS[ladder].name : "complete!", () => { if (ladder < TRAINERS.length) startBattle("trainer"); }, ladder >= TRAINERS.length);
+    add("🛌 Rest Point", "heal team · +1 orb", () => { team.forEach(c => c.hp = c.maxHp); orbs = Math.min(6, orbs + 1); saveGame(); log = "Team healed. Orbs: " + orbs + "."; renderMenu(); });
+    add("👥 Team (" + team.length + "/3)", team.map(c => c.name.split(" ")[0]).join(", "), () => { log = team.map(c => c.name + " Lv" + c.level + " " + c.hp + "/" + Math.round(c.maxHp) + "HP").join(" · "); renderMenu(); });
+  } else if (state === "battle") {
+    const me = activeOf("me");
+    add("🥊 Tackle", "steady hit", () => playerMove(0), busy);
+    add("💥 Slam", "heavy · 78% acc", () => playerMove(1), busy);
+    add("🌿 Mend/Focus", "heal 28% or +attack", () => playerMove(2), busy);
+    if (battle.kind === "wild") add("🔮 Catch Orb (" + orbs + ")", "better when foe is weak", tryCatch, busy || orbs <= 0);
+    else add("🏃 Flee", "back to map", () => { persistTeam(); state = "map"; log = "You backed away."; renderMenu(); }, busy);
+  } else {
+    add("▶ Start", "a fresh adventure", () => { localStorage.removeItem("critterclash_save"); startGame(); renderMenu(); });
+    add("↩ Continue", "if a save exists", () => { startGame(); renderMenu(); });
+    menuEl.children[1].style.display = (state === "menu" && !localStorage.getItem("critterclash_save")) ? "none" : "";
+  }
+}
+
+/* ---------------- fairness / QA self-check ---------------- */
+function fairnessCheck() {
+  // damage ceiling at equal level for every species matchup & move
+  let maxFrac = 0;
+  for (const a of SPECIES) for (const d of SPECIES) {
+    const A = { type: a.type, atk: a.atk + 4 * 1.6, buff: 0 }, D = { type: d.type, maxHp: d.hp + 4 * 4.5 };
+    for (const mv of MOVES) if (mv.kind !== "util") {
+      const hi = Math.max(2, Math.round((A.atk * 0.48 + mv.power + 2) * mult(A.type, D.type) * 1.1)); // +2 = one Focus buff, worst case
+      maxFrac = Math.max(maxFrac, hi / D.maxHp);
+    }
+  }
+  // battle sim: scripted AI both sides, 400 battles, first-mover win rate
+  let firstWins = 0; const N = 400;
+  for (let i = 0; i < N; i++) {
+    const A = makeCritter(i % SPECIES.length, 5), B = makeCritter((i * 3 + 2) % SPECIES.length, 5);
+    let turn = 0;
+    const simMove = (X, Y) => {
+      const roll = Math.random();
+      const mi = X.hp < X.maxHp * 0.35 && roll < 0.4 ? 2 : (roll < 0.5 ? 1 : 0);
+      const mv = MOVES[mi];
+      if (mv.kind === "util") { X.hp = Math.min(X.maxHp, X.hp + Math.round(X.maxHp * 0.28)); return; }
+      if (Math.random() <= mv.acc) Y.hp -= Math.max(2, Math.round((X.atk * 0.48 + mv.power + X.buff) * mult(X.type, Y.type) * (0.9 + Math.random() * 0.2)));
+    };
+    while (A.hp > 0 && B.hp > 0 && turn++ < 300) { simMove(A, B); if (B.hp > 0) simMove(B, A); }
+    if (B.hp <= 0) firstWins++;
+  }
+  const rate = firstWins / N;
+  const r = { game: "critter-clash", simBattles: N, firstMoverWinRate: Math.round(rate * 100) / 100,
+    maxSingleHitFrac: Math.round(maxFrac * 100) / 100,
+    pass: rate >= 0.35 && rate <= 0.65 && maxFrac <= 0.45 };
+  window.__qaFairness = r; return r;
+}
+
+/* ---------------- draw ---------------- */
+function drawCritter(x, y, s, sp, flip) {
+  ctx.save(); ctx.translate(x, y); if (flip) ctx.scale(-1, 1);
+  ctx.fillStyle = sp.color;
+  const sh = sp.shape;
+  if (sh === "turtle") { ctx.beginPath(); ctx.ellipse(0, 6, s * 0.52, s * 0.36, 0, 0, 7); ctx.fill(); ctx.beginPath(); ctx.arc(s * 0.5, -2, s * 0.2, 0, 7); ctx.fill(); }
+  else if (sh === "fox") { ctx.beginPath(); ctx.ellipse(0, 4, s * 0.44, s * 0.34, 0, 0, 7); ctx.fill(); ctx.beginPath(); ctx.moveTo(-s * 0.2, -s * 0.28); ctx.lineTo(-s * 0.05, -s * 0.55); ctx.lineTo(s * 0.12, -s * 0.3); ctx.closePath(); ctx.fill(); ctx.beginPath(); ctx.moveTo(s * 0.1, -s * 0.3); ctx.lineTo(s * 0.28, -s * 0.55); ctx.lineTo(s * 0.36, -s * 0.26); ctx.closePath(); ctx.fill(); }
+  else if (sh === "pup") { ctx.beginPath(); ctx.ellipse(0, 4, s * 0.46, s * 0.36, 0, 0, 7); ctx.fill(); ctx.fillStyle = sp.color; ctx.beginPath(); ctx.ellipse(-s * 0.36, -s * 0.18, s * 0.1, s * 0.24, 0.4, 0, 7); ctx.ellipse(s * 0.36, -s * 0.18, s * 0.1, s * 0.24, -0.4, 0, 7); ctx.fill(); }
+  else if (sh === "snake") { ctx.lineWidth = s * 0.22; ctx.strokeStyle = sp.color; ctx.beginPath(); ctx.moveTo(-s * 0.5, s * 0.3); ctx.quadraticCurveTo(-s * 0.1, -s * 0.35, s * 0.3, s * 0.1); ctx.quadraticCurveTo(s * 0.5, -s * 0.3, s * 0.52, -s * 0.34); ctx.stroke(); ctx.beginPath(); ctx.arc(s * 0.52, -s * 0.36, s * 0.13, 0, 7); ctx.fill(); }
+  else if (sh === "cub") { ctx.beginPath(); ctx.ellipse(0, 4, s * 0.47, s * 0.37, 0, 0, 7); ctx.fill(); ctx.beginPath(); ctx.arc(-s * 0.3, -s * 0.3, s * 0.13, 0, 7); ctx.arc(s * 0.3, -s * 0.3, s * 0.13, 0, 7); ctx.fill(); ctx.fillStyle = "#ffd94a"; ctx.beginPath(); ctx.moveTo(0, -s * 0.62); ctx.lineTo(s * 0.1, -s * 0.38); ctx.lineTo(-s * 0.1, -s * 0.38); ctx.closePath(); ctx.fill(); }
+  else if (sh === "mole") { ctx.beginPath(); ctx.ellipse(0, 8, s * 0.5, s * 0.32, 0, 0, 7); ctx.fill(); ctx.fillStyle = "#f2c9a0"; ctx.beginPath(); ctx.arc(s * 0.18, s * 0.02, s * 0.13, 0, 7); ctx.fill(); }
+  else if (sh === "horn") { ctx.beginPath(); ctx.ellipse(0, 5, s * 0.48, s * 0.35, 0, 0, 7); ctx.fill(); ctx.strokeStyle = "#e8e3d5"; ctx.lineWidth = 4; ctx.beginPath(); ctx.arc(-s * 0.2, -s * 0.3, s * 0.16, Math.PI, Math.PI * 1.7); ctx.stroke(); ctx.beginPath(); ctx.arc(s * 0.24, -s * 0.3, s * 0.16, Math.PI * 1.3, Math.PI * 2); ctx.stroke(); }
+  else { ctx.beginPath(); ctx.ellipse(0, 2, s * 0.4, s * 0.3, 0, 0, 7); ctx.fill(); ctx.beginPath(); ctx.moveTo(-s * 0.1, -s * 0.1); ctx.lineTo(-s * 0.55, -s * 0.45); ctx.lineTo(-s * 0.32, s * 0.05); ctx.closePath(); ctx.fill(); ctx.beginPath(); ctx.moveTo(s * 0.05, -s * 0.12); ctx.lineTo(s * 0.42, -s * 0.5); ctx.lineTo(s * 0.4, -s * 0.02); ctx.closePath(); ctx.fill(); }
+  ctx.fillStyle = "#14261c"; ctx.beginPath(); ctx.arc(s * 0.16, -s * 0.05, s * 0.055, 0, 7); ctx.fill();
+  ctx.restore();
+}
+function hpBar(x, y, w, c) {
+  ctx.fillStyle = "#222"; ctx.fillRect(x, y, w, 11);
+  const f = Math.max(0, c.hp / c.maxHp);
+  ctx.fillStyle = f > 0.5 ? "#39d353" : f > 0.25 ? "#ffd94a" : "#e84a4a";
+  ctx.fillRect(x + 1.5, y + 1.5, (w - 3) * f, 8);
+}
+function drawCard(x, y, c, foeSide) {
+  ctx.fillStyle = "rgba(0,0,0,.45)"; ctx.fillRect(x, y, 176, 62);
+  ctx.fillStyle = TYPES[c.type].color; ctx.font = "700 15px system-ui"; ctx.textAlign = "left";
+  ctx.fillText(c.name + " Lv" + c.level, x + 9, y + 21);
+  ctx.fillStyle = "#eaf5ec"; ctx.font = "600 12px system-ui";
+  ctx.fillText((c.type === "leaf" ? "🌿 Leaf" : c.type === "wave" ? "🌊 Wave" : "🔥 Ember") + "  " + Math.max(0, Math.round(c.hp)) + "/" + Math.round(c.maxHp), x + 9, y + 39);
+  hpBar(x + 9, y + 46, 158, c);
+}
+function draw() {
+  ctx.setTransform(1, 0, 0, 1, 0, 0);
+  const g = ctx.createLinearGradient(0, 0, 0, VH);
+  g.addColorStop(0, "#8ecae6"); g.addColorStop(0.55, "#cdeac0"); g.addColorStop(1, "#7fb069");
+  ctx.fillStyle = g; ctx.fillRect(0, 0, canvas.width, canvas.height);
+  ctx.setTransform(scale, 0, 0, scale, ox, oy);
+  ctx.fillStyle = "#17351f"; ctx.font = "700 23px system-ui"; ctx.textAlign = "left";
+  ctx.fillText("CRITTER CLASH", 14, 36);
+  ctx.font = "600 14px system-ui"; ctx.fillStyle = "#2c5a38";
+  ctx.fillText("Ladder " + (ladder || 0) + "/6 · Orbs " + (orbs || 0), 14, 60);
+  if (state === "battle" && battle) {
+    const foe = activeOf("foe"), me = activeOf("me");
+    ctx.fillStyle = "#5da85f"; ctx.beginPath(); ctx.ellipse(300, 218, 105, 30, 0, 0, 7); ctx.fill();
+    ctx.beginPath(); ctx.ellipse(118, 408, 118, 34, 0, 0, 7); ctx.fill();
+    drawCritter(300, 182, 96, SPECIES[foe.si], false);
+    drawCritter(118, 366, 104, SPECIES[me.si], true);
+    drawCard(14, 84, foe, true);
+    drawCard(230, 428, me, false);
+    ctx.fillStyle = "rgba(10,25,14,.88)"; ctx.fillRect(14, 506, VW - 28, 62);
+    ctx.fillStyle = "#eaf5ec"; ctx.font = "400 15px system-ui";
+    wrapText(log || "", 26, 530, VW - 52, 20);
+  } else if (state === "map") {
+    ctx.fillStyle = "rgba(10,25,14,.85)"; ctx.fillRect(14, 110, VW - 28, 200);
+    ctx.fillStyle = "#fff"; ctx.font = "700 20px system-ui"; ctx.textAlign = "left";
+    ctx.fillText("🏕 Base Camp", 30, 146);
+    ctx.font = "400 15px system-ui"; ctx.fillStyle = "#d7ecd9";
+    wrapText(log || "", 30, 178, VW - 60, 22);
+    ctx.fillText("Team:", 30, 268);
+    team.forEach((c, i) => { ctx.fillStyle = TYPES[c.type].color; ctx.fillText("Lv" + c.level, 96 + i * 100, 268); drawCritter(70 + i * 100, 246, 44, SPECIES[c.si], false); ctx.fillStyle = "#d7ecd9"; ctx.font = "600 12px system-ui"; ctx.fillText(c.name, 44 + i * 100, 292); ctx.font = "400 15px system-ui"; });
+    ctx.fillStyle = "#17351f"; ctx.font = "600 14px system-ui";
+    ctx.fillText("Leaf ▸ Ember ▸ Wave ▸ Leaf (strong hits ×1.5)", 30, 348);
+  } else if (state === "over") {
+    ctx.fillStyle = "rgba(10,25,14,.88)"; ctx.fillRect(0, 220, VW, 240);
+    ctx.fillStyle = "#ffd94a"; ctx.font = "700 30px system-ui"; ctx.textAlign = "center";
+    ctx.fillText("🏆 CHAMPION! 🏆", VW / 2, 292);
+    ctx.font = "400 16px system-ui"; ctx.fillStyle = "#eaf5ec";
+    ctx.fillText("You climbed the whole ladder with", VW / 2, 330);
+    ctx.fillText(team.map(c => c.name).join(", ") + ".", VW / 2, 356);
+  } else {
+    ctx.fillStyle = "rgba(10,25,14,.86)"; ctx.fillRect(0, 200, VW, 262);
+    ctx.fillStyle = "#fff"; ctx.font = "700 32px system-ui"; ctx.textAlign = "center";
+    ctx.fillText("CRITTER CLASH", VW / 2, 268);
+    ctx.font = "400 16px system-ui"; ctx.fillStyle = "#d7ecd9";
+    ctx.fillText("Catch wild critters, build a team of three,", VW / 2, 304);
+    ctx.fillText("and climb the six-trainer ladder.", VW / 2, 330);
+    ctx.fillText("🌿 beats 🔥 · 🔥 beats 🌊 · 🌊 beats 🌿", VW / 2, 362);
+    ctx.fillStyle = "#ffd94a"; ctx.font = "700 19px system-ui";
+    ctx.fillText("Use the buttons below to begin", VW / 2, 414);
+  }
+  if (QA_MODE) {
+    const f = fairnessCheck();
+    ctx.fillStyle = "rgba(0,0,0,.7)"; ctx.fillRect(0, VH - 168, VW, 26);
+    ctx.fillStyle = f.pass ? "#7dff8a" : "#ff7d7d"; ctx.font = "600 12px monospace"; ctx.textAlign = "left";
+    ctx.fillText("QA critter pass=" + f.pass + " firstWin=" + f.firstMoverWinRate + " maxHit=" + f.maxSingleHitFrac, 8, VH - 150);
+  }
+}
+function wrapText(text, x, y, maxW, lh) {
+  const words = text.split(" "); let line = "", yy = y;
+  for (const w of words) {
+    if (ctx.measureText(line + w).width > maxW && line) { ctx.fillText(line, x, yy); line = ""; yy += lh; }
+    line += w + " ";
+  }
+  ctx.fillText(line, x, yy);
+}
+function frame() { draw(); requestAnimationFrame(frame); }
+requestAnimationFrame(frame);
+
+/* ---------------- input ---------------- */
+canvas.addEventListener("pointerdown", () => { initAudio(); });
+window.addEventListener("keydown", e => {
+  if (state === "battle" && ["Digit1", "Digit2", "Digit3", "Digit4"].includes(e.code)) {
+    const n = +e.code.slice(-1) - 1;
+    const btns = menuEl.querySelectorAll("button");
+    if (btns[n]) btns[n].click();
+  }
+});
+const muteBtn = document.getElementById("muteBtn");
+function syncMute() { muteBtn.textContent = muted ? "🔇" : "🔊"; }
+muteBtn.addEventListener("click", e => { e.stopPropagation(); muted = !muted; localStorage.setItem("critterclash_muted", muted ? 1 : 0); syncMute(); });
+muted = localStorage.getItem("critterclash_muted") === "1"; syncMute();
+team = []; orbs = 0; ladder = 0; log = "";
+renderMenu();
+if (QA_MODE) fairnessCheck();
+</script>
+</body>
+</html>
