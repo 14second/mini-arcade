@@ -1,0 +1,288 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, user-scalable=no">
+<meta name="theme-color" content="#3a2a12">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<title>Barrel Climb</title>
+<style>
+  * { margin:0; padding:0; box-sizing:border-box; }
+  html, body { width:100%; height:100%; overflow:hidden; background:#3a2a12;
+    font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+    touch-action:none; user-select:none; -webkit-user-select:none; -webkit-tap-highlight-color: transparent; }
+  canvas { position:fixed; inset:0; display:block; touch-action:none; }
+  #muteBtn { position:fixed; top:10px; right:10px; z-index:10; width:48px; height:48px; border-radius:12px;
+    border:2px solid rgba(255,255,255,.55); background:rgba(30,20,5,.55); color:#fff; font-size:22px;
+    line-height:1; cursor:pointer; display:flex; align-items:center; justify-content:center; padding:0; }
+  .ctl { position:fixed; z-index:10; width:58px; height:58px; border-radius:50%;
+    border:2px solid rgba(255,255,255,.6); background:rgba(30,20,5,.5); color:#fff; font-size:24px;
+    display:flex; align-items:center; justify-content:center; }
+  #btnU { left:74px; bottom:150px; } #btnD { left:74px; bottom:34px; }
+  #btnL { left:16px; bottom:92px; } #btnR { left:132px; bottom:92px; }
+  #btnJ { right:20px; bottom:92px; width:72px; height:72px; background:rgba(200,120,30,.55); }
+  .ctl:active { background:rgba(255,255,255,.35); }
+</style>
+</head>
+<body>
+<canvas id="game"></canvas>
+<button id="muteBtn" aria-label="Toggle sound">🔊</button>
+<button class="ctl" id="btnU">▲</button>
+<button class="ctl" id="btnD">▼</button>
+<button class="ctl" id="btnL">◀</button>
+<button class="ctl" id="btnR">▶</button>
+<button class="ctl" id="btnJ">⤒</button>
+<script>
+// iOS audio routing: Web Audio defaults to the "ambient" channel, which the
+// iPhone silent switch mutes entirely. Route it to the media/playback
+// channel (iOS 17+ Audio Session API) on the first user gesture and inside
+// audio init, so game music/SFX play even with silent mode on.
+function iosPlaybackSession() {
+  try { if ('audioSession' in navigator) navigator.audioSession.type = 'playback'; } catch (e) {}
+}
+document.addEventListener('pointerdown', iosPlaybackSession, true);
+document.addEventListener('touchstart', iosPlaybackSession, true);
+"use strict";
+/* BARREL CLIMB — original construction-climb arcade. Climb the girders,
+   dodge rolling barrels, reach the star at the top. Each round is faster.
+   Fairness: barrel spawn interval has a hard floor (MIN_SPAWN = 0.9s) so a
+   survivable gap always exists; barrels roll at capped speeds and the player
+   can always jump over a barrel on a girder. */
+const VW = 420, VH = 720;
+const canvas = document.getElementById("game"), ctx = canvas.getContext("2d");
+let W = 0, H = 0, DPR = 1, scale = 1, ox = 0, oy = 0;
+function resize() {
+  DPR = Math.min(window.devicePixelRatio || 1, 2);
+  W = window.innerWidth; H = window.innerHeight;
+  canvas.width = Math.round(W * DPR); canvas.height = Math.round(H * DPR);
+  canvas.style.width = W + "px"; canvas.style.height = H + "px";
+  scale = Math.min(W / VW, H / VH) * DPR; ox = (W * DPR - VW * scale) / 2; oy = (H * DPR - VH * scale) / 2;
+}
+window.addEventListener("resize", resize); resize();
+function clamp(v, a, b) { return v < a ? a : (v > b ? b : v); }
+
+let actx = null, muted = localStorage.getItem("bcMuted") === "1", musicTimer = null, musicStep = 0;
+const muteBtn = document.getElementById("muteBtn");
+muteBtn.textContent = muted ? "🔇" : "🔊";
+muteBtn.addEventListener("click", () => { muted = !muted; localStorage.setItem("bcMuted", muted ? "1" : "0"); muteBtn.textContent = muted ? "🔇" : "🔊"; });
+function initAudio() {
+  iosPlaybackSession();
+  if (!actx) { try { const AC = window.AudioContext || window.webkitAudioContext; if (AC) actx = new AC(); } catch (e) {} }
+  if (actx && actx.state === "suspended") actx.resume();
+}
+function tone(freq, dur, type, vol, when) {
+  if (!actx || muted) return;
+  const t = when || actx.currentTime, o = actx.createOscillator(), g = actx.createGain();
+  o.type = type || "triangle"; o.frequency.value = freq;
+  g.gain.setValueAtTime(vol || 0.14, t); g.gain.exponentialRampToValueAtTime(0.001, t + dur);
+  o.connect(g); g.connect(actx.destination); o.start(t); o.stop(t + dur + 0.02);
+}
+function sfx(n) {
+  if (!actx || muted) return;
+  if (n === "jump") tone(392, 0.16, "square", 0.11);
+  else if (n === "hop") { tone(659, 0.08, "triangle", 0.12); tone(880, 0.1, "triangle", 0.1, actx.currentTime + 0.06); }
+  else if (n === "hurt") tone(196, 0.3, "square", 0.15);
+  else if (n === "win") { [523, 659, 784, 1046].forEach((f, i) => tone(f, 0.2, "triangle", 0.13, actx.currentTime + i * 0.11)); }
+}
+const MELODY = [330, 392, 494, 392, 330, 294, 330, 392, 494, 587, 494, 392];
+function startMusic() {
+  if (musicTimer) return;
+  musicTimer = setInterval(() => {
+    if (!actx || muted) return;
+    tone(MELODY[musicStep % MELODY.length], 0.22, "triangle", 0.06);
+    if (musicStep % 4 === 0) tone(165, 0.3, "triangle", 0.05);
+    musicStep++;
+  }, 250);
+}
+
+// Girders: 6 levels, y positions, with ladders between them.
+// Girder i spans the full width; ladders connect girder i to i+1 at given x.
+const GIRDERS = [640, 545, 450, 355, 260, 165];
+const LADDERS = [
+  [{ x: 60 }, { x: 320 }],
+  [{ x: 130 }, { x: 360 }],
+  [{ x: 40 }, { x: 280 }],
+  [{ x: 200 }, { x: 350 }],
+  [{ x: 90 }, { x: 300 }]
+]; // LADDERS[i] connects girder i to girder i+1
+const MIN_SPAWN = 0.9; // seconds — hard floor, never faster
+let state = "menu", round = 1, lives = 3, score = 0, best = 0;
+let px = 0, py = 0, girder = 0, vy = 0, grounded = true, face = 1, invuln = 0;
+let barrels = [], spawnTimer = 0, jumpedBarrels = new Set();
+best = parseInt(localStorage.getItem("bcBest") || "0", 10);
+
+function resetGame() {
+  round = 1; lives = 3; score = 0; startRound();
+}
+function startRound() {
+  barrels = []; jumpedBarrels = new Set(); spawnTimer = 1.2;
+  girder = 0; px = 40; py = GIRDERS[0] - 36; vy = 0; grounded = true; invuln = 1;
+}
+function barrelSpeed() { return Math.min(190, 90 + round * 14); }
+function spawnInterval() { return Math.max(MIN_SPAWN, 2.2 - round * 0.16); }
+function update(dt) {
+  if (state !== "play") return;
+  let mx = 0;
+  if (keys.left || touch.left) { mx -= 1; face = -1; }
+  if (keys.right || touch.right) { mx += 1; face = 1; }
+  px = clamp(px + mx * 170 * dt, 8, VW - 44);
+  // ladders
+  const onLadder = LADDERS[girder] && LADDERS[girder].some(l => Math.abs(px + 18 - l.x) < 22);
+  const belowLadder = girder > 0 && LADDERS[girder - 1].some(l => Math.abs(px + 18 - l.x) < 22);
+  if ((keys.up || touch.up) && onLadder && grounded) {
+    girder++; py = GIRDERS[girder] - 36; sfx("hop");
+    if (girder === GIRDERS.length - 1) { // top platform: round clear
+      score += 500 + lives * 100; sfx("win"); round++; startRound(); return;
+    }
+  }
+  if ((keys.down || touch.down) && belowLadder && grounded) {
+    girder--; py = GIRDERS[girder] - 36; sfx("hop");
+  }
+  // jump
+  if ((keys.jump || touch.jump) && grounded && !jumpHeld) {
+    vy = -560; grounded = false; jumpHeld = true; sfx("jump");
+  }
+  if (!(keys.jump || touch.jump)) jumpHeld = false;
+  if (!grounded) {
+    vy += 1900 * dt; py += vy * dt;
+    if (py >= GIRDERS[girder] - 36) { py = GIRDERS[girder] - 36; vy = 0; grounded = true; }
+  }
+  // barrels
+  spawnTimer -= dt;
+  if (spawnTimer <= 0) {
+    spawnTimer = spawnInterval();
+    const g = Math.floor(Math.random() * (GIRDERS.length - 1));
+    barrels.push({ x: -20, y: GIRDERS[g] - 26, g, dir: 1, rot: 0, id: Math.random() });
+  }
+  for (const b of barrels) {
+    b.x += b.dir * barrelSpeed() * dt; b.rot += dt * 6;
+    // drop down a ladder sometimes
+    if (Math.random() < dt * 0.25 && b.g < GIRDERS.length - 1) {
+      const ls = LADDERS[b.g];
+      for (const l of ls) {
+        if (Math.abs(b.x + 13 - l.x) < 8) { b.g++; b.y = GIRDERS[b.g] - 26; break; }
+      }
+    }
+    // jump-over score
+    if (b.g === girder && !grounded && !jumpedBarrels.has(b.id) &&
+        Math.abs(b.x + 13 - (px + 18)) < 30 && py + 36 < b.y) {
+      jumpedBarrels.add(b.id); score += 100; sfx("hop");
+    }
+    if (invuln <= 0 && b.g === girder &&
+        px < b.x + 26 && px + 36 > b.x && py < b.y + 26 && py + 36 > b.y) {
+      lives--; sfx("hurt");
+      if (lives <= 0) {
+        state = "over";
+        if (score > best) { best = score; localStorage.setItem("bcBest", String(best)); }
+      } else { startRound(); }
+      return;
+    }
+  }
+  barrels = barrels.filter(b => b.x < VW + 30);
+  if (invuln > 0) invuln -= dt;
+}
+
+let jumpHeld = false;
+const keys = { left: false, right: false, up: false, down: false, jump: false };
+const touch = { left: false, right: false, up: false, down: false, jump: false };
+window.addEventListener("keydown", e => {
+  if (e.key === "ArrowLeft" || e.key === "a") keys.left = true;
+  if (e.key === "ArrowRight" || e.key === "d") keys.right = true;
+  if (e.key === "ArrowUp" || e.key === "w") keys.up = true;
+  if (e.key === "ArrowDown" || e.key === "s") keys.down = true;
+  if (e.key === " ") { keys.jump = true; e.preventDefault(); }
+  if (e.key === "Enter" && state !== "play") { initAudio(); startMusic(); resetGame(); state = "play"; }
+});
+window.addEventListener("keyup", e => {
+  if (e.key === "ArrowLeft" || e.key === "a") keys.left = false;
+  if (e.key === "ArrowRight" || e.key === "d") keys.right = false;
+  if (e.key === "ArrowUp" || e.key === "w") keys.up = false;
+  if (e.key === "ArrowDown" || e.key === "s") keys.down = false;
+  if (e.key === " ") keys.jump = false;
+});
+function bindBtn(id, prop) {
+  const el = document.getElementById(id);
+  const on = e => { e.preventDefault(); touch[prop] = true; initAudio(); };
+  const off = e => { e.preventDefault(); touch[prop] = false; };
+  el.addEventListener("pointerdown", on); el.addEventListener("pointerup", off);
+  el.addEventListener("pointercancel", off); el.addEventListener("pointerleave", off);
+}
+bindBtn("btnU", "up"); bindBtn("btnD", "down"); bindBtn("btnL", "left"); bindBtn("btnR", "right"); bindBtn("btnJ", "jump");
+canvas.addEventListener("pointerdown", () => {
+  initAudio();
+  if (state === "menu") { startMusic(); resetGame(); state = "play"; }
+  else if (state === "over") state = "menu";
+});
+
+function draw() {
+  ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+  ctx.fillStyle = "#3a2a12"; ctx.fillRect(0, 0, W, H);
+  ctx.setTransform(scale, 0, 0, scale, ox, oy);
+  ctx.fillStyle = "#241a0a"; ctx.fillRect(0, 0, VW, VH);
+  if (state === "menu") {
+    ctx.fillStyle = "#fff"; ctx.textAlign = "center";
+    ctx.font = "bold 42px system-ui"; ctx.fillText("🛢️ Barrel Climb", VW / 2, 130);
+    ctx.font = "20px system-ui"; ctx.fillText("Climb the girders, dodge the barrels,", VW / 2, 190);
+    ctx.fillText("reach the star at the top!", VW / 2, 220);
+    ctx.font = "18px system-ui"; ctx.fillText("Best: " + best, VW / 2, 270);
+    ctx.fillText("◀ ▶ move • ▲ ▼ ladders • ⤒ jump", VW / 2, 320);
+    ctx.font = "bold 22px system-ui"; ctx.fillText("Tap to start", VW / 2, 420);
+    return;
+  }
+  // girders + ladders
+  for (let i = 0; i < GIRDERS.length; i++) {
+    ctx.fillStyle = "#8a6a2a"; ctx.fillRect(0, GIRDERS[i], VW, 14);
+    ctx.fillStyle = "#5d4517";
+    for (let x = 0; x < VW; x += 28) ctx.fillRect(x, GIRDERS[i] + 4, 14, 6);
+  }
+  for (let i = 0; i < LADDERS.length; i++) {
+    for (const l of LADDERS[i]) {
+      ctx.fillStyle = "#c9a227";
+      ctx.fillRect(l.x - 3, GIRDERS[i + 1] + 4, 4, GIRDERS[i] - GIRDERS[i + 1] - 4);
+      ctx.fillRect(l.x + 9, GIRDERS[i + 1] + 4, 4, GIRDERS[i] - GIRDERS[i + 1] - 4);
+      for (let y = GIRDERS[i + 1] + 12; y < GIRDERS[i]; y += 14) ctx.fillRect(l.x - 3, y, 16, 3);
+    }
+  }
+  // star at top
+  ctx.fillStyle = "#ffd93b"; ctx.font = "34px system-ui"; ctx.textAlign = "center";
+  ctx.fillText("⭐", VW / 2, GIRDERS[GIRDERS.length - 1] - 8);
+  // barrels
+  for (const b of barrels) {
+    ctx.save(); ctx.translate(b.x + 13, b.y + 13); ctx.rotate(b.rot);
+    ctx.fillStyle = "#a0522d"; ctx.fillRect(-13, -13, 26, 26);
+    ctx.fillStyle = "#7a3a1e"; ctx.fillRect(-13, -4, 26, 8);
+    ctx.restore();
+  }
+  // player
+  if (!(invuln > 0 && Math.floor(invuln * 10) % 2 === 0)) {
+    ctx.fillStyle = "#e8722a"; ctx.fillRect(px, py, 36, 36);
+    ctx.fillStyle = "#fff"; ctx.fillRect(px + (face > 0 ? 20 : 8), py + 8, 8, 8);
+    ctx.fillStyle = "#000"; ctx.fillRect(px + (face > 0 ? 23 : 11), py + 11, 4, 4);
+    ctx.fillStyle = "#1d4a22"; ctx.fillRect(px + 4, py + 28, 28, 8);
+  }
+  ctx.fillStyle = "rgba(30,20,5,.7)"; ctx.fillRect(0, 0, VW, 44);
+  ctx.fillStyle = "#fff"; ctx.font = "bold 18px system-ui"; ctx.textAlign = "left";
+  ctx.fillText("Round " + round, 12, 28);
+  ctx.textAlign = "center"; ctx.fillText("❤️".repeat(lives), VW / 2, 28);
+  ctx.textAlign = "right"; ctx.fillText(score + " pts", VW - 12, 28);
+  if (state === "over") {
+    ctx.fillStyle = "rgba(0,0,0,.6)"; ctx.fillRect(0, 0, VW, VH);
+    ctx.fillStyle = "#fff"; ctx.textAlign = "center";
+    ctx.font = "bold 38px system-ui"; ctx.fillText("Squashed!", VW / 2, VH / 2 - 20);
+    ctx.font = "20px system-ui";
+    ctx.fillText("Score: " + score + "  •  Best: " + best, VW / 2, VH / 2 + 20);
+    ctx.fillText("Tap to return to menu", VW / 2, VH / 2 + 60);
+  }
+}
+let last = performance.now();
+function loop(now) {
+  const dt = Math.min(0.05, (now - last) / 1000); last = now;
+  update(dt); draw();
+  requestAnimationFrame(loop);
+}
+startRound();
+requestAnimationFrame(loop);
+</script>
+</body>
+</html>

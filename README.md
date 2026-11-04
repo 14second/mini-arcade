@@ -23,4 +23,11 @@ Tiny browser games, each a single dependency-free HTML file. Play them in any br
 - **Balloon Pop** — pop for points; the spiky red ones are traps.
 - **Asteroid Blaster** — blast the rocks, thread the gaps.
 
+- **Pip's Adventure** — run, jump, stomp beetles across 8 levels.
+- **Tiny Quest** — find the key, open the gate, survive the gauntlet.
+- **Barrel Climb** — climb the girders, dodge the barrels, reach the star.
+- **Pill Panic** — drop capsules, match four, clear every bug.
+- **Duck Season** — tap the ducks before they escape.
+- **Ice Peak** — climb the ice, bonk the blocks, reach the summit.
+
 Every game has synthesized music and sound effects generated in code — no audio files.

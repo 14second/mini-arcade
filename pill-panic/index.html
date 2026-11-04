@@ -1,0 +1,289 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, user-scalable=no">
+<meta name="theme-color" content="#123a4a">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<title>Pill Panic</title>
+<style>
+  * { margin:0; padding:0; box-sizing:border-box; }
+  html, body { width:100%; height:100%; overflow:hidden; background:#123a4a;
+    font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+    touch-action:none; user-select:none; -webkit-user-select:none; -webkit-tap-highlight-color: transparent; }
+  canvas { position:fixed; inset:0; display:block; touch-action:none; }
+  #muteBtn { position:fixed; top:10px; right:10px; z-index:10; width:48px; height:48px; border-radius:12px;
+    border:2px solid rgba(255,255,255,.55); background:rgba(8,30,40,.55); color:#fff; font-size:22px;
+    line-height:1; cursor:pointer; display:flex; align-items:center; justify-content:center; padding:0; }
+  .ctl { position:fixed; z-index:10; width:58px; height:58px; border-radius:50%;
+    border:2px solid rgba(255,255,255,.6); background:rgba(8,30,40,.5); color:#fff; font-size:24px;
+    display:flex; align-items:center; justify-content:center; }
+  #btnL { left:16px; bottom:92px; } #btnR { left:86px; bottom:92px; } #btnD { left:156px; bottom:92px; }
+  #btnT { right:20px; bottom:92px; width:72px; height:72px; background:rgba(60,160,200,.55); }
+  .ctl:active { background:rgba(255,255,255,.35); }
+</style>
+</head>
+<body>
+<canvas id="game"></canvas>
+<button id="muteBtn" aria-label="Toggle sound">🔊</button>
+<button class="ctl" id="btnL">◀</button>
+<button class="ctl" id="btnR">▶</button>
+<button class="ctl" id="btnD">▼</button>
+<button class="ctl" id="btnT">⟳</button>
+<script>
+// iOS audio routing: Web Audio defaults to the "ambient" channel, which the
+// iPhone silent switch mutes entirely. Route it to the media/playback
+// channel (iOS 17+ Audio Session API) on the first user gesture and inside
+// audio init, so game music/SFX play even with silent mode on.
+function iosPlaybackSession() {
+  try { if ('audioSession' in navigator) navigator.audioSession.type = 'playback'; } catch (e) {}
+}
+document.addEventListener('pointerdown', iosPlaybackSession, true);
+document.addEventListener('touchstart', iosPlaybackSession, true);
+"use strict";
+/* PILL PANIC — original falling-capsule color matcher. Clear every bug by
+   matching 4+ of a color in a row or column. Bottle 8 wide x 16 tall.
+   Fairness: bugs only ever spawn in the bottom 8 rows; rotation is wall-
+   kicked (tries offsets 0, -1, +1) so a capsule can never clip out of
+   bounds; a capsule that cannot spawn ends the game only when the stack
+   genuinely reaches the top. */
+const VW = 420, VH = 720, COLS = 8, ROWS = 16, CELL = 40, OX = 50, OY = 56;
+const canvas = document.getElementById("game"), ctx = canvas.getContext("2d");
+let W = 0, H = 0, DPR = 1, scale = 1, ox = 0, oy = 0;
+function resize() {
+  DPR = Math.min(window.devicePixelRatio || 1, 2);
+  W = window.innerWidth; H = window.innerHeight;
+  canvas.width = Math.round(W * DPR); canvas.height = Math.round(H * DPR);
+  canvas.style.width = W + "px"; canvas.style.height = H + "px";
+  scale = Math.min(W / VW, H / VH) * DPR; ox = (W * DPR - VW * scale) / 2; oy = (H * DPR - VH * scale) / 2;
+}
+window.addEventListener("resize", resize); resize();
+
+let actx = null, muted = localStorage.getItem("ppMuted") === "1", musicTimer = null, musicStep = 0;
+const muteBtn = document.getElementById("muteBtn");
+muteBtn.textContent = muted ? "🔇" : "🔊";
+muteBtn.addEventListener("click", () => { muted = !muted; localStorage.setItem("ppMuted", muted ? "1" : "0"); muteBtn.textContent = muted ? "🔇" : "🔊"; });
+function initAudio() {
+  iosPlaybackSession();
+  if (!actx) { try { const AC = window.AudioContext || window.webkitAudioContext; if (AC) actx = new AC(); } catch (e) {} }
+  if (actx && actx.state === "suspended") actx.resume();
+}
+function tone(freq, dur, type, vol, when) {
+  if (!actx || muted) return;
+  const t = when || actx.currentTime, o = actx.createOscillator(), g = actx.createGain();
+  o.type = type || "triangle"; o.frequency.value = freq;
+  g.gain.setValueAtTime(vol || 0.14, t); g.gain.exponentialRampToValueAtTime(0.001, t + dur);
+  o.connect(g); g.connect(actx.destination); o.start(t); o.stop(t + dur + 0.02);
+}
+function sfx(n) {
+  if (!actx || muted) return;
+  if (n === "move") tone(494, 0.06, "square", 0.07);
+  else if (n === "rot") tone(587, 0.08, "square", 0.09);
+  else if (n === "land") tone(262, 0.08, "triangle", 0.11);
+  else if (n === "clear") { [523, 659, 784].forEach((f, i) => tone(f, 0.12, "triangle", 0.12, actx.currentTime + i * 0.07)); }
+  else if (n === "win") { [523, 659, 784, 1046].forEach((f, i) => tone(f, 0.2, "triangle", 0.13, actx.currentTime + i * 0.11)); }
+  else if (n === "lose") tone(196, 0.4, "square", 0.14);
+}
+const MELODY = [440, 554, 659, 554, 440, 494, 554, 659, 784, 659, 554, 494];
+function startMusic() {
+  if (musicTimer) return;
+  musicTimer = setInterval(() => {
+    if (!actx || muted) return;
+    tone(MELODY[musicStep % MELODY.length], 0.22, "triangle", 0.06);
+    if (musicStep % 4 === 0) tone(175, 0.3, "triangle", 0.05);
+    musicStep++;
+  }, 250);
+}
+
+const COLORS = ["#e23b3b", "#2f7de1", "#f2c200"];
+let state = "menu", grid = [], bugs = 0, level = 1, score = 0, best = 0;
+let cap = null, fallTimer = 0, flash = null, flashTimer = 0;
+best = parseInt(localStorage.getItem("ppBest") || "0", 10);
+function emptyGrid() { return Array.from({ length: ROWS }, () => Array(COLS).fill(null)); }
+function startLevel() {
+  grid = emptyGrid(); bugs = 0;
+  const count = Math.min(24, 4 + level * 2);
+  const cells = [];
+  for (let r = 8; r < ROWS; r++) for (let c = 0; c < COLS; c++) cells.push([c, r]);
+  for (let i = 0; i < count && cells.length; i++) {
+    const s = cells.splice(Math.floor(Math.random() * cells.length), 1)[0];
+    grid[s[1]][s[0]] = { color: Math.floor(Math.random() * 3), bug: true };
+    bugs++;
+  }
+  spawnCapsule(); flash = null;
+}
+function spawnCapsule() {
+  cap = { x: 3, y: 0, dx: 1, dy: 0, c1: Math.floor(Math.random() * 3), c2: Math.floor(Math.random() * 3) };
+  if (grid[0][3] || grid[0][4]) { // stack reached the top: genuine game over
+    state = "over"; sfx("lose");
+    if (score > best) { best = score; localStorage.setItem("ppBest", String(best)); }
+    cap = null;
+  }
+  fallTimer = 0;
+}
+function capCells(c) {
+  return [{ x: c.x, y: c.y, color: c.c1 }, { x: c.x + c.dx, y: c.y + c.dy, color: c.c2 }];
+}
+function fits(c) {
+  return capCells(c).every(p => p.x >= 0 && p.x < COLS && p.y >= 0 && p.y < ROWS && !grid[p.y][p.x]);
+}
+function rotateCap() {
+  // (dx,dy) cycles: (1,0) -> (0,1) -> (-1,0) -> (0,-1); wall-kick offsets 0,-1,+1
+  const rot = { "1,0": [0, 1], "0,1": [-1, 0], "-1,0": [0, -1], "0,-1": [1, 0] };
+  const nd = rot[cap.dx + "," + cap.dy];
+  for (const kick of [0, -1, 1]) {
+    const t = { x: cap.x + kick, y: cap.y, dx: nd[0], dy: nd[1], c1: cap.c1, c2: cap.c2 };
+    if (fits(t)) { cap = t; sfx("rot"); return; }
+  }
+}
+function moveCap(dx, dy) {
+  const t = { x: cap.x + dx, y: cap.y + dy, dx: cap.dx, dy: cap.dy, c1: cap.c1, c2: cap.c2 };
+  if (fits(t)) { cap = t; return true; }
+  return false;
+}
+function lockCapsule() {
+  for (const p of capCells(cap)) grid[p.y][p.x] = { color: p.color, bug: false };
+  sfx("land"); cap = null;
+  clearMatches();
+}
+function findMatches() {
+  const mark = Array.from({ length: ROWS }, () => Array(COLS).fill(false));
+  for (let r = 0; r < ROWS; r++) for (let c = 0; c < COLS; c++) {
+    const cell = grid[r][c]; if (!cell) continue;
+    for (const [dr, dc] of [[0, 1], [1, 0]]) {
+      let run = [[c, r]], cc = c + dc, rr = r + dr;
+      while (cc < COLS && rr < ROWS && grid[rr][cc] && grid[rr][cc].color === cell.color) { run.push([cc, rr]); cc += dc; rr += dr; }
+      if (run.length >= 4) for (const [x, y] of run) mark[y][x] = true;
+    }
+  }
+  return mark;
+}
+function clearMatches() {
+  const mark = findMatches();
+  let cleared = 0, bugsCleared = 0;
+  for (let r = 0; r < ROWS; r++) for (let c = 0; c < COLS; c++) {
+    if (mark[r][c]) {
+      if (grid[r][c].bug) { bugs--; bugsCleared++; }
+      grid[r][c] = null; cleared++;
+    }
+  }
+  if (cleared > 0) {
+    score += cleared * 10 + bugsCleared * 50; sfx("clear");
+    flash = mark; flashTimer = 0.25;
+    // gravity: drop floating cells
+    for (let c = 0; c < COLS; c++) {
+      let write = ROWS - 1;
+      for (let r = ROWS - 1; r >= 0; r--) {
+        if (grid[r][c]) { if (write !== r) { grid[write][c] = grid[r][c]; grid[r][c] = null; } write--; }
+      }
+    }
+    setTimeout(() => { flash = null; if (bugs <= 0) { score += 1000; sfx("win"); level++; startLevel(); } else clearMatches(); }, 260);
+  } else {
+    if (bugs <= 0) { score += 1000; sfx("win"); level++; startLevel(); }
+    else spawnCapsule();
+  }
+}
+function fallSpeed() { return Math.max(0.28, 0.85 - level * 0.07); }
+function update(dt) {
+  if (state !== "play" || !cap) return;
+  fallTimer += dt;
+  const fast = keys.down || touch.down;
+  if (fallTimer >= (fast ? 0.05 : fallSpeed())) {
+    fallTimer = 0;
+    if (!moveCap(0, 1)) lockCapsule();
+  }
+  if (flashTimer > 0) flashTimer -= dt;
+}
+
+const keys = { left: false, right: false, down: false, rot: false };
+const touch = { left: false, right: false, down: false, rot: false };
+let moveCooldown = 0;
+function tryMove(dx) { if (cap && moveCap(dx, 0)) sfx("move"); }
+window.addEventListener("keydown", e => {
+  if (state !== "play" || !cap) return;
+  if (e.key === "ArrowLeft" || e.key === "a") { tryMove(-1); keys.left = true; }
+  if (e.key === "ArrowRight" || e.key === "d") { tryMove(1); keys.right = true; }
+  if (e.key === "ArrowDown" || e.key === "s") keys.down = true;
+  if (e.key === "z" || e.key === " " || e.key === "ArrowUp") { rotateCap(); e.preventDefault(); }
+});
+window.addEventListener("keyup", e => {
+  if (e.key === "ArrowLeft" || e.key === "a") keys.left = false;
+  if (e.key === "ArrowRight" || e.key === "d") keys.right = false;
+  if (e.key === "ArrowDown" || e.key === "s") keys.down = false;
+});
+function bindBtn(id, prop, action) {
+  const el = document.getElementById(id);
+  const on = e => { e.preventDefault(); initAudio(); if (action) action(); else touch[prop] = true; };
+  const off = e => { e.preventDefault(); touch[prop] = false; };
+  el.addEventListener("pointerdown", on); el.addEventListener("pointerup", off);
+  el.addEventListener("pointercancel", off); el.addEventListener("pointerleave", off);
+}
+bindBtn("btnL", "left", () => tryMove(-1));
+bindBtn("btnR", "right", () => tryMove(1));
+bindBtn("btnD", "down");
+bindBtn("btnT", "rot", () => { if (state === "play" && cap) rotateCap(); });
+canvas.addEventListener("pointerdown", () => {
+  initAudio();
+  if (state === "menu") { startMusic(); level = 1; score = 0; startLevel(); state = "play"; }
+  else if (state === "over") state = "menu";
+});
+
+function draw() {
+  ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+  ctx.fillStyle = "#123a4a"; ctx.fillRect(0, 0, W, H);
+  ctx.setTransform(scale, 0, 0, scale, ox, oy);
+  if (state === "menu") {
+    ctx.fillStyle = "#fff"; ctx.textAlign = "center";
+    ctx.font = "bold 42px system-ui"; ctx.fillText("💊 Pill Panic", VW / 2, 130);
+    ctx.font = "20px system-ui"; ctx.fillText("Drop the capsules, match four,", VW / 2, 190);
+    ctx.fillText("clear every bug in the bottle!", VW / 2, 220);
+    ctx.font = "18px system-ui"; ctx.fillText("Best: " + best, VW / 2, 270);
+    ctx.fillText("◀ ▶ move • ▼ fast drop • ⟳ rotate", VW / 2, 320);
+    ctx.font = "bold 22px system-ui"; ctx.fillText("Tap to start", VW / 2, 420);
+    return;
+  }
+  ctx.fillStyle = "#0a2530"; ctx.fillRect(OX - 6, OY - 6, COLS * CELL + 12, ROWS * CELL + 12);
+  for (let r = 0; r < ROWS; r++) for (let c = 0; c < COLS; c++) {
+    const cell = grid[r][c], x = OX + c * CELL, y = OY + r * CELL;
+    ctx.fillStyle = "#0e3542"; ctx.fillRect(x, y, CELL - 2, CELL - 2);
+    if (cell) {
+      ctx.fillStyle = COLORS[cell.color];
+      if (cell.bug) {
+        ctx.beginPath(); ctx.arc(x + 19, y + 19, 15, 0, Math.PI * 2); ctx.fill();
+        ctx.fillStyle = "#fff"; ctx.fillRect(x + 12, y + 13, 5, 5); ctx.fillRect(x + 22, y + 13, 5, 5);
+        ctx.fillStyle = "#000"; ctx.fillRect(x + 14, y + 15, 2, 2); ctx.fillRect(x + 24, y + 15, 2, 2);
+      } else { ctx.fillRect(x + 2, y + 2, CELL - 6, CELL - 6); ctx.fillStyle = "rgba(255,255,255,.35)"; ctx.fillRect(x + 6, y + 6, CELL - 14, 8); }
+    }
+  }
+  if (cap) {
+    for (const p of capCells(cap)) {
+      const x = OX + p.x * CELL, y = OY + p.y * CELL;
+      ctx.fillStyle = COLORS[p.color]; ctx.fillRect(x + 2, y + 2, CELL - 6, CELL - 6);
+      ctx.fillStyle = "rgba(255,255,255,.35)"; ctx.fillRect(x + 6, y + 6, CELL - 14, 8);
+    }
+  }
+  ctx.fillStyle = "rgba(8,30,40,.75)"; ctx.fillRect(0, 0, VW, 44);
+  ctx.fillStyle = "#fff"; ctx.font = "bold 18px system-ui"; ctx.textAlign = "left";
+  ctx.fillText("Level " + level, 12, 28);
+  ctx.textAlign = "center"; ctx.fillText("🦠 " + bugs + " left", VW / 2, 28);
+  ctx.textAlign = "right"; ctx.fillText(score + " pts", VW - 12, 28);
+  if (state === "over") {
+    ctx.fillStyle = "rgba(0,0,0,.6)"; ctx.fillRect(0, 0, VW, VH);
+    ctx.fillStyle = "#fff"; ctx.textAlign = "center";
+    ctx.font = "bold 38px system-ui"; ctx.fillText("Bottle full!", VW / 2, VH / 2 - 20);
+    ctx.font = "20px system-ui";
+    ctx.fillText("Score: " + score + "  •  Best: " + best, VW / 2, VH / 2 + 20);
+    ctx.fillText("Tap to return to menu", VW / 2, VH / 2 + 60);
+  }
+}
+let last = performance.now();
+function loop(now) {
+  const dt = Math.min(0.05, (now - last) / 1000); last = now;
+  update(dt); draw();
+  requestAnimationFrame(loop);
+}
+requestAnimationFrame(loop);
+</script>
+</body>
+</html>

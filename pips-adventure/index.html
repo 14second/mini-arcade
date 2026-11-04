@@ -1,0 +1,512 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, user-scalable=no">
+<meta name="theme-color" content="#79b5e0">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<title>Pip's Adventure</title>
+<style>
+  * { margin:0; padding:0; box-sizing:border-box; }
+  html, body { width:100%; height:100%; overflow:hidden; background:#79b5e0;
+    font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+    touch-action:none; user-select:none; -webkit-user-select:none; -webkit-tap-highlight-color: transparent; }
+  canvas { position:fixed; inset:0; display:block; touch-action:none; }
+  #muteBtn { position:fixed; top:10px; right:10px; z-index:10; width:48px; height:48px; border-radius:12px;
+    border:2px solid rgba(255,255,255,.55); background:rgba(20,40,70,.45); color:#fff; font-size:22px;
+    line-height:1; cursor:pointer; display:flex; align-items:center; justify-content:center; padding:0; }
+  .ctl { position:fixed; bottom:18px; z-index:10; width:64px; height:64px; border-radius:50%;
+    border:2px solid rgba(255,255,255,.6); background:rgba(20,40,70,.4); color:#fff; font-size:26px;
+    display:flex; align-items:center; justify-content:center; }
+  #btnL { left:16px; } #btnR { left:92px; } #btnJ { right:20px; width:76px; height:76px; background:rgba(200,80,30,.55); }
+  .ctl:active { background:rgba(255,255,255,.35); }
+</style>
+</head>
+<body>
+<canvas id="game"></canvas>
+<button id="muteBtn" aria-label="Toggle sound">🔊</button>
+<button class="ctl" id="btnL">◀</button>
+<button class="ctl" id="btnR">▶</button>
+<button class="ctl" id="btnJ">⤒</button>
+<script>
+// iOS audio routing: Web Audio defaults to the "ambient" channel, which the
+// iPhone silent switch mutes entirely. Route it to the media/playback
+// channel (iOS 17+ Audio Session API) on the first user gesture and inside
+// audio init, so game music/SFX play even with silent mode on.
+function iosPlaybackSession() {
+  try { if ('audioSession' in navigator) navigator.audioSession.type = 'playback'; } catch (e) {}
+}
+document.addEventListener('pointerdown', iosPlaybackSession, true);
+document.addEventListener('touchstart', iosPlaybackSession, true);
+"use strict";
+/* PIP'S ADVENTURE — original side-scrolling platformer. Pip the fox runs,
+   jumps, stomps beetles, bumps crates and gathers stars across 8 levels.
+   Physics (px/s): gravity 2600, jump -980, run 260 (no accel ramp, so jump
+   distance is deterministic). Max jump height = 980^2/(2*2600) = 184px =
+   4.6 tiles; max jump distance = 260 * (2*980/2600) = 196px = 4.9 tiles.
+   Levels are verified to keep pits <=3 tiles and rises <=3 tiles. */
+const VW = 420, VH = 720, TILE = 40;
+const canvas = document.getElementById("game"), ctx = canvas.getContext("2d");
+let W = 0, H = 0, DPR = 1, scale = 1, ox = 0, oy = 0;
+function resize() {
+  DPR = Math.min(window.devicePixelRatio || 1, 2);
+  W = window.innerWidth; H = window.innerHeight;
+  canvas.width = Math.round(W * DPR); canvas.height = Math.round(H * DPR);
+  canvas.style.width = W + "px"; canvas.style.height = H + "px";
+  scale = Math.min(W / VW, H / VH) * DPR; ox = (W * DPR - VW * scale) / 2; oy = (H * DPR - VH * scale) / 2;
+}
+window.addEventListener("resize", resize); resize();
+function clamp(v, a, b) { return v < a ? a : (v > b ? b : v); }
+
+// ---------- Audio (synthesized, >=130 Hz fundamentals, triangle/square) ----------
+let actx = null, muted = localStorage.getItem("pipsMuted") === "1", musicTimer = null, musicStep = 0;
+const muteBtn = document.getElementById("muteBtn");
+function setMute(m) { muted = m; localStorage.setItem("pipsMuted", m ? "1" : "0"); muteBtn.textContent = m ? "🔇" : "🔊"; }
+muteBtn.textContent = muted ? "🔇" : "🔊";
+muteBtn.addEventListener("click", () => setMute(!muted));
+function initAudio() {
+  iosPlaybackSession();
+  if (!actx) { try { const AC = window.AudioContext || window.webkitAudioContext; if (AC) actx = new AC(); } catch (e) {} }
+  if (actx && actx.state === "suspended") actx.resume();
+}
+function tone(freq, dur, type, vol, when) {
+  if (!actx || muted) return;
+  const t = when || actx.currentTime, o = actx.createOscillator(), g = actx.createGain();
+  o.type = type || "triangle"; o.frequency.value = freq;
+  g.gain.setValueAtTime(vol || 0.15, t); g.gain.exponentialRampToValueAtTime(0.001, t + dur);
+  o.connect(g); g.connect(actx.destination); o.start(t); o.stop(t + dur + 0.02);
+}
+function sfx(name) {
+  if (!actx || muted) return;
+  if (name === "jump") tone(392, 0.18, "square", 0.12);
+  else if (name === "stomp") { tone(220, 0.12, "square", 0.16); tone(165, 0.14, "triangle", 0.14); }
+  else if (name === "star") { tone(880, 0.1, "triangle", 0.14); tone(1318, 0.18, "triangle", 0.12, actx.currentTime + 0.08); }
+  else if (name === "bump") tone(196, 0.1, "square", 0.14);
+  else if (name === "hurt") tone(233, 0.3, "square", 0.15);
+  else if (name === "win") { [523, 659, 784, 1046].forEach((f, i) => tone(f, 0.22, "triangle", 0.14, actx.currentTime + i * 0.12)); }
+}
+const MELODY = [523, 659, 784, 659, 523, 587, 659, 784, 880, 784, 659, 587];
+function startMusic() {
+  if (musicTimer) return;
+  musicTimer = setInterval(() => {
+    if (!actx || muted) return;
+    tone(MELODY[musicStep % MELODY.length], 0.22, "triangle", 0.07);
+    if (musicStep % 4 === 0) tone(196, 0.3, "triangle", 0.06);
+    musicStep++;
+  }, 240);
+}
+
+// ---------- Levels: '#'=solid, 'B'=crate, 'S'=star, 'E'=beetle, 'X'=spiky, 'F'=finish, '.'=empty ----------
+// Row 0 is the top. Ground is row 17. Pits <=3 wide, rises <=3 tall (verified).
+const LEVELS = [
+ [
+  "....................",
+  "....................",
+  "....................",
+  "....................",
+  "....................",
+  "....................",
+  "....................",
+  "....................",
+  "....................",
+  "....................",
+  ".........S..........",
+  "........###.........",
+  "....................",
+  "......S......S......",
+  ".....###....###.....",
+  "....................",
+  "..S.....E....E......",
+  "####################"
+ ],
+ [
+  "...............................",
+  "...............................",
+  "...............................",
+  "...............................",
+  "...............................",
+  "...............................",
+  "...............................",
+  "...............................",
+  "...............................",
+  "...............................",
+  "................S..............",
+  "...............###.............",
+  "...............................",
+  "..........S........S...........",
+  ".........###......###..........",
+  "...............................",
+  "..S....E.......E......X....S...",
+  "##########...#########...######"
+ ],
+ [
+  "......................................",
+  "......................................",
+  "......................................",
+  "......................................",
+  "......................................",
+  "......................................",
+  "......................................",
+  "......................................",
+  "......................................",
+  "......................S...............",
+  ".....................###..............",
+  "......................................",
+  "............S.........................",
+  "...........###........B...............",
+  "..............................S.......",
+  ".....................###.....###......",
+  "..S....E.......B.......E......X.......",
+  "########...########...########...#####"
+ ],
+ [
+  "..............................................",
+  "..............................................",
+  "..............................................",
+  "..............................................",
+  "..............................................",
+  "..............................................",
+  "..............................................",
+  "..............................................",
+  "..............................................",
+  "..........S...................................",
+  ".........###..................................",
+  "..............................................",
+  "..........S........................S..........",
+  ".........###......................###.........",
+  "..............................................",
+  "..............................................",
+  "..S....E.......X.......E.......B.......E......",
+  "######...########...########...#####...#######"
+ ],
+ [
+  "..............................................",
+  "..............................................",
+  "..............................................",
+  "..............................................",
+  "..............................................",
+  "..............................................",
+  "..............................................",
+  "..............................................",
+  "..............................................",
+  "..............................................",
+  "..........S...................................",
+  ".........###..................................",
+  "..............................................",
+  "..........S........................S..........",
+  ".........###......................###.........",
+  "..............................................",
+  "..S....E.......X.......E.......B.......E......",
+  "######...########...########...#####...#######"
+ ],
+ [
+  ".......................................................",
+  ".......................................................",
+  ".......................................................",
+  ".......................................................",
+  ".......................................................",
+  ".......................................................",
+  ".......................................................",
+  ".......................................................",
+  ".......................................................",
+  "............S..........................................",
+  "...........###.........................................",
+  ".......................................................",
+  "............S...........................S..............",
+  "...........###.........................###.............",
+  "..............................................B........",
+  ".......................................................",
+  "..S....E.......X.......B.......E.......X.......E.......",
+  "########...########...########...######...#####...#####"
+ ],
+ [
+  "................................................................",
+  "................................................................",
+  "................................................................",
+  "................................................................",
+  "................................................................",
+  "................................................................",
+  "................................................................",
+  "................................................................",
+  "................................................................",
+  "..............S.................................................",
+  ".............###................................................",
+  "................................................................",
+  "..............S.............................S...................",
+  ".............###...........................###..................",
+  "..............................................B.................",
+  "................................................................",
+  "..S....E.......X.......B.......E.......X.......B.......E........",
+  "########...########...########...######...#####...######...#####"
+ ],
+ [
+  "........................................................................",
+  "........................................................................",
+  "........................................................................",
+  "........................................................................",
+  "........................................................................",
+  "........................................................................",
+  "........................................................................",
+  "........................................................................",
+  "........................................................................",
+  "................S.......................................................",
+  "...............###......................................................",
+  "........................................................................",
+  "................S...............................S.......................",
+  "...............###.............................###......................",
+  "..................................................B.....................",
+  "........................................................................",
+  "..S....E.......X.......B.......E.......X.......B.......E.......X........",
+  "########...########...########...######...#####...######...#####...#####"
+ ]
+];
+const FINISH = [17, 26, 35, 43, 43, 51, 59, 67];
+
+// ---------- Game state ----------
+let state = "menu";
+let levelIdx = 0, lives = 3, score = 0, stars = 0, timeLeft = 120, levelTime = 0;
+let unlocked = parseInt(localStorage.getItem("pipsUnlocked") || "1", 10);
+let best = parseInt(localStorage.getItem("pipsBest") || "0", 10);
+let player, enemies, camX, levelW, solids, starTiles, finishX;
+
+function buildLevel(idx) {
+  const rows = LEVELS[idx];
+  levelW = rows[0].length * TILE;
+  solids = []; starTiles = []; enemies = [];
+  for (let r = 0; r < rows.length; r++) {
+    for (let c = 0; c < rows[r].length; c++) {
+      const ch = rows[r][c], x = c * TILE, y = r * TILE;
+      if (ch === "#" || ch === "B") solids.push({ x, y, crate: ch === "B" });
+      else if (ch === "S") starTiles.push({ x: x + 8, y: y + 8, taken: false });
+      else if (ch === "E" || ch === "X") enemies.push({ x: x + 4, y: y + 4, w: 32, h: 32, spiky: ch === "X", dir: -1, alive: true });
+    }
+  }
+  finishX = FINISH[idx] * TILE;
+  player = { x: 2 * TILE, y: 15 * TILE, w: 26, h: 36, vx: 0, vy: 0, grounded: false, face: 1, invuln: 0 };
+  camX = 0; timeLeft = 120; levelTime = 0;
+}
+function tileSolidAt(px, py) {
+  const c = Math.floor(px / TILE), r = Math.floor(py / TILE);
+  if (c < 0 || r < 0 || r >= 18) return false;
+  for (const s of solids) if (s.x === c * TILE && s.y === r * TILE) return s;
+  return null;
+}
+function solidAtRect(x, y, w, h) {
+  const c0 = Math.floor(x / TILE), c1 = Math.floor((x + w - 1) / TILE);
+  const r0 = Math.floor(y / TILE), r1 = Math.floor((y + h - 1) / TILE);
+  for (let r = r0; r <= r1; r++) for (let c = c0; c <= c1; c++) {
+    if (tileSolidAt(c * TILE + 1, r * TILE + 1)) return true;
+  }
+  return false;
+}
+function bumpCrate(px, py) {
+  const s = tileSolidAt(px, py);
+  if (s && s.crate) {
+    solids.splice(solids.indexOf(s), 1);
+    score += 50; stars++; sfx("bump"); sfx("star");
+    return true;
+  }
+  return false;
+}
+function loseLife() {
+  lives--; sfx("hurt");
+  if (lives <= 0) { state = "over"; if (score > best) { best = score; localStorage.setItem("pipsBest", String(best)); } }
+  else { const keep = score; buildLevel(levelIdx); score = keep; player.invuln = 2; }
+}
+function update(dt) {
+  if (state !== "play") return;
+  levelTime += dt; timeLeft -= dt;
+  if (timeLeft <= 0) { loseLife(); return; }
+  const p = player;
+  let move = 0;
+  if (keys.left || touch.left) move -= 1;
+  if (keys.right || touch.right) move += 1;
+  p.vx = move * 260;
+  if (move !== 0) p.face = move;
+  if ((keys.jump || touch.jump) && p.grounded && !p.jumpHeld) { p.vy = -980; p.grounded = false; p.jumpHeld = true; sfx("jump"); }
+  if (!(keys.jump || touch.jump)) p.jumpHeld = false;
+  if (!keys.jump && !touch.jump && p.vy < -300) p.vy = -300;
+  p.vy += 2600 * dt;
+  p.x += p.vx * dt;
+  if (p.vx > 0 && solidAtRect(p.x + p.w, p.y + 4, 1, p.h - 8)) { p.x = Math.floor((p.x + p.w) / TILE) * TILE - p.w - 0.1; }
+  if (p.vx < 0 && solidAtRect(p.x - 1, p.y + 4, 1, p.h - 8)) { p.x = (Math.floor(p.x / TILE) + 1) * TILE + 0.1; }
+  p.x = clamp(p.x, 0, levelW - p.w);
+  const oldBottom = p.y + p.h;
+  p.y += p.vy * dt;
+  p.grounded = false;
+  if (p.vy >= 0 && solidAtRect(p.x + 3, p.y + p.h, p.w - 6, 1)) {
+    p.y = Math.floor((p.y + p.h) / TILE) * TILE - p.h - 0.1; p.vy = 0; p.grounded = true;
+  } else if (p.vy < 0 && solidAtRect(p.x + 3, p.y - 1, p.w - 6, 1)) {
+    const cy = Math.floor(p.y / TILE);
+    bumpCrate(p.x + p.w / 2, p.y - 2);
+    p.y = (cy + 1) * TILE + 0.1; p.vy = 0;
+  }
+  if (p.y > VH + 200) { loseLife(); return; }
+  for (const s of starTiles) {
+    if (!s.taken && p.x < s.x + 24 && p.x + p.w > s.x && p.y < s.y + 24 && p.y + p.h > s.y) {
+      s.taken = true; score += 50; stars++; sfx("star");
+    }
+  }
+  for (const e of enemies) {
+    if (!e.alive) continue;
+    e.x += e.dir * 40 * dt;
+    const aheadX = e.dir < 0 ? e.x - 1 : e.x + e.w + 1;
+    // turn at a wall, or at a ledge (no solid 4px below the front foot)
+    if (solidAtRect(aheadX, e.y + 4, 1, e.h - 8) || !solidAtRect(e.x + (e.dir < 0 ? 2 : e.w - 2), e.y + e.h + 4, 1, 1)) e.dir *= -1;
+    e.x = clamp(e.x, 0, levelW - e.w);
+    if (p.invuln <= 0 && p.x < e.x + e.w && p.x + p.w > e.x && p.y < e.y + e.h && p.y + p.h > e.y) {
+      if (p.vy > 0 && oldBottom <= e.y + 14 && !e.spiky) {
+        e.alive = false; score += 100; p.vy = -520; sfx("stomp");
+      } else { loseLife(); return; }
+    }
+  }
+  if (p.invuln > 0) p.invuln -= dt;
+  if (p.x + p.w >= finishX) {
+    score += 500 + Math.max(0, Math.floor(timeLeft)) * 10;
+    sfx("win");
+    if (levelIdx >= 7) {
+      state = "win";
+      if (score > best) { best = score; localStorage.setItem("pipsBest", String(best)); }
+    } else {
+      levelIdx++;
+      if (levelIdx + 1 > unlocked) { unlocked = levelIdx + 1; localStorage.setItem("pipsUnlocked", String(unlocked)); }
+      buildLevel(levelIdx);
+    }
+  }
+  camX = clamp(p.x + p.w / 2 - VW / 2, 0, Math.max(0, levelW - VW));
+}
+
+// ---------- Input ----------
+const keys = { left: false, right: false, jump: false };
+const touch = { left: false, right: false, jump: false };
+window.addEventListener("keydown", e => {
+  if (e.key === "ArrowLeft" || e.key === "a") keys.left = true;
+  if (e.key === "ArrowRight" || e.key === "d") keys.right = true;
+  if (e.key === " " || e.key === "ArrowUp" || e.key === "w") { keys.jump = true; e.preventDefault(); }
+  if (e.key === "Enter" && state !== "play") startFromMenu();
+});
+window.addEventListener("keyup", e => {
+  if (e.key === "ArrowLeft" || e.key === "a") keys.left = false;
+  if (e.key === "ArrowRight" || e.key === "d") keys.right = false;
+  if (e.key === " " || e.key === "ArrowUp" || e.key === "w") keys.jump = false;
+});
+function bindBtn(id, prop) {
+  const el = document.getElementById(id);
+  const on = e => { e.preventDefault(); touch[prop] = true; initAudio(); };
+  const off = e => { e.preventDefault(); touch[prop] = false; };
+  el.addEventListener("pointerdown", on); el.addEventListener("pointerup", off);
+  el.addEventListener("pointercancel", off); el.addEventListener("pointerleave", off);
+}
+bindBtn("btnL", "left"); bindBtn("btnR", "right"); bindBtn("btnJ", "jump");
+
+function startFromMenu() {
+  initAudio(); startMusic();
+  levelIdx = 0; lives = 3; score = 0; stars = 0;
+  buildLevel(0); state = "play";
+}
+canvas.addEventListener("pointerdown", e => {
+  initAudio();
+  if (state === "menu") {
+    const mx = (e.clientX * DPR - ox) / scale, my = (e.clientY * DPR - oy) / scale;
+    for (let i = 0; i < 8; i++) {
+      const bx = 40 + (i % 4) * 95, by = 330 + Math.floor(i / 4) * 90;
+      if (mx >= bx && mx <= bx + 80 && my >= by && my <= by + 70 && i + 1 <= unlocked) {
+        startMusic(); levelIdx = i; lives = 3; score = 0; stars = 0; buildLevel(i); state = "play"; return;
+      }
+    }
+    startFromMenu();
+  } else if (state === "over" || state === "win") { state = "menu"; }
+});
+
+// ---------- Draw ----------
+function draw() {
+  ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+  ctx.fillStyle = "#79b5e0"; ctx.fillRect(0, 0, W, H);
+  ctx.setTransform(scale, 0, 0, scale, ox, oy);
+  const cave = levelIdx >= 4;
+  ctx.fillStyle = cave ? "#1c2438" : "#79b5e0"; ctx.fillRect(0, 0, VW, VH);
+  if (state === "menu") {
+    ctx.fillStyle = "#fff"; ctx.textAlign = "center";
+    ctx.font = "bold 44px system-ui"; ctx.fillText("🦊 Pip's Adventure", VW / 2, 110);
+    ctx.font = "20px system-ui"; ctx.fillText("Run, jump, stomp beetles,", VW / 2, 160);
+    ctx.fillText("bump crates, grab stars!", VW / 2, 188);
+    ctx.font = "18px system-ui"; ctx.fillText("Best: " + best + "  •  Tap a level to play", VW / 2, 240);
+    ctx.font = "16px system-ui"; ctx.fillText("◀ ▶ move  •  ⤒ jump  •  Arrows / Space", VW / 2, 280);
+    for (let i = 0; i < 8; i++) {
+      const bx = 40 + (i % 4) * 95, by = 330 + Math.floor(i / 4) * 90;
+      const locked = i + 1 > unlocked;
+      ctx.fillStyle = locked ? "#5a6b84" : (i < 4 ? "#3d9b4f" : "#7a5fd0");
+      ctx.fillRect(bx, by, 80, 70);
+      ctx.fillStyle = "#fff"; ctx.font = "bold 20px system-ui";
+      ctx.fillText(locked ? "🔒" : (i < 4 ? "🌿" : "🕳️"), bx + 40, by + 30);
+      ctx.font = "bold 18px system-ui"; ctx.fillText((i < 4 ? "M" : "C") + (i % 4 + 1), bx + 40, by + 56);
+    }
+    ctx.font = "16px system-ui"; ctx.fillStyle = "#eaf4ff";
+    ctx.fillText("Tap anywhere else to start at Level 1", VW / 2, 560);
+    return;
+  }
+  ctx.save(); ctx.translate(-camX, 0);
+  ctx.fillStyle = cave ? "#2a3550" : "#a8d8f0";
+  for (let i = 0; i < 40; i++) { const x = i * 160; ctx.fillRect(x, 60 + (i % 3) * 30, 60, 18); }
+  for (const s of solids) {
+    ctx.fillStyle = s.crate ? "#c98f2e" : (cave ? "#4a4038" : "#7a5230");
+    ctx.fillRect(s.x, s.y, TILE, TILE);
+    ctx.fillStyle = s.crate ? "#e8b84a" : (cave ? "#6b5f52" : "#9c6b3f");
+    ctx.fillRect(s.x + 4, s.y + 4, TILE - 8, 10);
+    if (s.crate) { ctx.fillStyle = "#7a5510"; ctx.font = "bold 22px system-ui"; ctx.textAlign = "center"; ctx.fillText("?", s.x + 20, s.y + 28); }
+  }
+  for (const s of starTiles) if (!s.taken) {
+    ctx.fillStyle = "#ffd93b"; ctx.beginPath();
+    ctx.arc(s.x + 12, s.y + 12, 11, 0, Math.PI * 2); ctx.fill();
+    ctx.fillStyle = "#fff"; ctx.font = "bold 16px system-ui"; ctx.textAlign = "center"; ctx.fillText("★", s.x + 12, s.y + 18);
+  }
+  ctx.fillStyle = "#e23b3b"; ctx.fillRect(finishX, 13 * TILE, 6, 4 * TILE);
+  ctx.fillStyle = "#fff"; ctx.fillRect(finishX + 6, 13 * TILE, 46, 34);
+  ctx.fillStyle = "#e23b3b"; ctx.font = "bold 20px system-ui"; ctx.textAlign = "center"; ctx.fillText("GOAL", finishX + 29, 13 * TILE + 24);
+  for (const e of enemies) if (e.alive) {
+    ctx.fillStyle = e.spiky ? "#8b1fa2" : "#2e7d32";
+    ctx.fillRect(e.x, e.y, e.w, e.h);
+    ctx.fillStyle = "#fff"; ctx.fillRect(e.x + 6, e.y + 6, 6, 6); ctx.fillRect(e.x + 20, e.y + 6, 6, 6);
+    if (e.spiky) { ctx.fillStyle = "#e1bee7"; for (let k = 0; k < 3; k++) ctx.fillRect(e.x + 5 + k * 10, e.y - 6, 5, 8); }
+  }
+  const p = player;
+  if (!(p.invuln > 0 && Math.floor(p.invuln * 10) % 2 === 0)) {
+    ctx.fillStyle = "#e8722a"; ctx.fillRect(p.x, p.y, p.w, p.h);
+    ctx.fillStyle = "#fff"; ctx.fillRect(p.x + (p.face > 0 ? 16 : 4), p.y + 8, 8, 8);
+    ctx.fillStyle = "#000"; ctx.fillRect(p.x + (p.face > 0 ? 20 : 6), p.y + 11, 4, 4);
+    ctx.fillStyle = "#fff"; ctx.beginPath();
+    ctx.moveTo(p.x + 4, p.y); ctx.lineTo(p.x + 12, p.y - 8); ctx.lineTo(p.x + 14, p.y + 2); ctx.fill();
+    ctx.beginPath();
+    ctx.moveTo(p.x + p.w - 4, p.y); ctx.lineTo(p.x + p.w - 12, p.y - 8); ctx.lineTo(p.x + p.w - 14, p.y + 2); ctx.fill();
+    ctx.fillStyle = "#f4a261"; ctx.fillRect(p.x + p.w / 2 - 5, p.y + p.h - 8, 10, 8);
+  }
+  ctx.restore();
+  ctx.fillStyle = "rgba(20,40,70,.55)"; ctx.fillRect(0, 0, VW, 44);
+  ctx.fillStyle = "#fff"; ctx.font = "bold 18px system-ui"; ctx.textAlign = "left";
+  ctx.fillText((levelIdx < 4 ? "Meadow " : "Cave ") + (levelIdx % 4 + 1), 12, 28);
+  ctx.textAlign = "center";
+  ctx.fillText("⭐ " + stars + "   ❤️ " + lives + "   ⏱ " + Math.max(0, Math.ceil(timeLeft)), VW / 2, 28);
+  ctx.textAlign = "right"; ctx.fillText(score + " pts", VW - 12, 28);
+  if (state === "over" || state === "win") {
+    ctx.fillStyle = "rgba(0,0,0,.6)"; ctx.fillRect(0, 0, VW, VH);
+    ctx.fillStyle = "#fff"; ctx.textAlign = "center";
+    ctx.font = "bold 40px system-ui";
+    ctx.fillText(state === "win" ? "🏆 You did it, Pip!" : "Game Over", VW / 2, VH / 2 - 20);
+    ctx.font = "20px system-ui";
+    ctx.fillText("Score: " + score + "  •  Best: " + best, VW / 2, VH / 2 + 20);
+    ctx.fillText("Tap to return to menu", VW / 2, VH / 2 + 60);
+  }
+}
+
+let last = performance.now();
+function loop(now) {
+  const dt = Math.min(0.05, (now - last) / 1000); last = now;
+  update(dt); draw();
+  requestAnimationFrame(loop);
+}
+buildLevel(0);
+requestAnimationFrame(loop);
+</script>
+</body>
+</html>

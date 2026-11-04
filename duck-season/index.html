@@ -1,0 +1,231 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, user-scalable=no">
+<meta name="theme-color" content="#7ec8e3">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<title>Duck Season</title>
+<style>
+  * { margin:0; padding:0; box-sizing:border-box; }
+  html, body { width:100%; height:100%; overflow:hidden; background:#7ec8e3;
+    font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+    touch-action:none; user-select:none; -webkit-user-select:none; -webkit-tap-highlight-color: transparent; }
+  canvas { position:fixed; inset:0; display:block; touch-action:none; cursor:crosshair; }
+  #muteBtn { position:fixed; top:10px; right:10px; z-index:10; width:48px; height:48px; border-radius:12px;
+    border:2px solid rgba(255,255,255,.55); background:rgba(20,60,90,.45); color:#fff; font-size:22px;
+    line-height:1; cursor:pointer; display:flex; align-items:center; justify-content:center; padding:0; }
+</style>
+</head>
+<body>
+<canvas id="game"></canvas>
+<button id="muteBtn" aria-label="Toggle sound">🔊</button>
+<script>
+// iOS audio routing: Web Audio defaults to the "ambient" channel, which the
+// iPhone silent switch mutes entirely. Route it to the media/playback
+// channel (iOS 17+ Audio Session API) on the first user gesture and inside
+// audio init, so game music/SFX play even with silent mode on.
+function iosPlaybackSession() {
+  try { if ('audioSession' in navigator) navigator.audioSession.type = 'playback'; } catch (e) {}
+}
+document.addEventListener('pointerdown', iosPlaybackSession, true);
+document.addEventListener('touchstart', iosPlaybackSession, true);
+"use strict";
+/* DUCK SEASON — original tap shooter. Ducks dart across the sky; tap to
+   shoot. 10 ducks per round, a hit quota to advance.
+   Fairness: duck speed is capped (MAX_SPEED = 260 px/s) and every duck's
+   path guarantees a minimum on-screen time of ~1.6s (420px view / 260px/s),
+   so every duck is humanly hittable. Shots per duck: 3. */
+const VW = 420, VH = 720;
+const MAX_SPEED = 260, MIN_AIR_TIME = 1.6;
+const canvas = document.getElementById("game"), ctx = canvas.getContext("2d");
+let W = 0, H = 0, DPR = 1, scale = 1, ox = 0, oy = 0;
+function resize() {
+  DPR = Math.min(window.devicePixelRatio || 1, 2);
+  W = window.innerWidth; H = window.innerHeight;
+  canvas.width = Math.round(W * DPR); canvas.height = Math.round(H * DPR);
+  canvas.style.width = W + "px"; canvas.style.height = H + "px";
+  scale = Math.min(W / VW, H / VH) * DPR; ox = (W * DPR - VW * scale) / 2; oy = (H * DPR - VH * scale) / 2;
+}
+window.addEventListener("resize", resize); resize();
+
+let actx = null, muted = localStorage.getItem("dsMuted") === "1", musicTimer = null, musicStep = 0;
+const muteBtn = document.getElementById("muteBtn");
+muteBtn.textContent = muted ? "🔇" : "🔊";
+muteBtn.addEventListener("click", () => { muted = !muted; localStorage.setItem("dsMuted", muted ? "1" : "0"); muteBtn.textContent = muted ? "🔇" : "🔊"; });
+function initAudio() {
+  iosPlaybackSession();
+  if (!actx) { try { const AC = window.AudioContext || window.webkitAudioContext; if (AC) actx = new AC(); } catch (e) {} }
+  if (actx && actx.state === "suspended") actx.resume();
+}
+function tone(freq, dur, type, vol, when) {
+  if (!actx || muted) return;
+  const t = when || actx.currentTime, o = actx.createOscillator(), g = actx.createGain();
+  o.type = type || "triangle"; o.frequency.value = freq;
+  g.gain.setValueAtTime(vol || 0.14, t); g.gain.exponentialRampToValueAtTime(0.001, t + dur);
+  o.connect(g); g.connect(actx.destination); o.start(t); o.stop(t + dur + 0.02);
+}
+function sfx(n) {
+  if (!actx || muted) return;
+  if (n === "shot") { tone(156, 0.14, "square", 0.2); tone(98, 0.1, "square", 0.12, actx.currentTime + 0.05); }
+  else if (n === "hit") { tone(880, 0.1, "triangle", 0.14); tone(1318, 0.14, "triangle", 0.12, actx.currentTime + 0.07); }
+  else if (n === "miss") tone(330, 0.2, "square", 0.1);
+  else if (n === "win") { [523, 659, 784, 1046].forEach((f, i) => tone(f, 0.2, "triangle", 0.13, actx.currentTime + i * 0.11)); }
+  else if (n === "lose") tone(196, 0.4, "square", 0.14);
+}
+const MELODY = [523, 587, 659, 784, 659, 587, 523, 494, 523, 659, 587, 523];
+function startMusic() {
+  if (musicTimer) return;
+  musicTimer = setInterval(() => {
+    if (!actx || muted) return;
+    tone(MELODY[musicStep % MELODY.length], 0.22, "triangle", 0.05);
+    musicStep++;
+  }, 280);
+}
+
+let state = "menu", round = 1, score = 0, best = 0, hits = 0, ducksSeen = 0;
+let ducks = [], spawnTimer = 0, shotsLeft = 3, roundMsg = "", roundMsgT = 0;
+let crossX = VW / 2, crossY = VH / 2;
+best = parseInt(localStorage.getItem("dsBest") || "0", 10);
+function quota() { return Math.min(10, 5 + round); }
+function duckSpeed() { return Math.min(MAX_SPEED, 95 + round * 16); }
+function resetGame() {
+  round = 1; score = 0; hits = 0; ducksSeen = 0; ducks = []; spawnTimer = 0.6; shotsLeft = 3;
+  roundMsg = "Round 1 — hit 6 of 10!"; roundMsgT = 2.2;
+}
+function spawnDuck() {
+  const dir = Math.random() < 0.5 ? 1 : -1;
+  const y0 = 90 + Math.random() * 380, amp = 20 + Math.random() * 50, ph = Math.random() * 6;
+  const fast = Math.random() < 0.2;
+  ducks.push({
+    x: dir > 0 ? -40 : VW + 40, y0, amp, ph, dir,
+    speed: duckSpeed() * (fast ? 1.25 : 1), t: 0, hit: false, fall: 0,
+    color: ["#6b4a2a", "#3a5a3a", "#4a3a6b"][Math.floor(Math.random() * 3)]
+  });
+  ducksSeen++;
+}
+function update(dt) {
+  if (state !== "play") return;
+  if (roundMsgT > 0) roundMsgT -= dt;
+  if (ducksSeen < 10 && ducks.length < 2) {
+    spawnTimer -= dt;
+    if (spawnTimer <= 0) { spawnDuck(); spawnTimer = 0.5 + Math.random() * 0.7; }
+  }
+  for (const d of ducks) {
+    if (d.hit) { d.fall += dt; d.y0 += 500 * d.fall * dt; continue; }
+    d.t += dt;
+    d.x += d.dir * d.speed * dt;
+  }
+  ducks = ducks.filter(d => d.x > -70 && d.x < VW + 70 && !(d.hit && d.fall > 1.2));
+  if (ducks.length === 0 && state === "play") shotsLeft = 3; // fresh flight, fresh shots
+  if (ducksSeen >= 10 && ducks.length === 0) {
+    if (hits >= quota()) {
+      score += hits * 20 + 200; sfx("win"); round++;
+      hits = 0; ducksSeen = 0; spawnTimer = 0.8; shotsLeft = 3;
+      roundMsg = "Round " + round + " — hit " + quota() + " of 10!"; roundMsgT = 2.2;
+    } else {
+      state = "over"; sfx("lose");
+      if (score > best) { best = score; localStorage.setItem("dsBest", String(best)); }
+    }
+  }
+}
+function duckY(d) { return d.y0 + Math.sin(d.t * 2.2 + d.ph) * d.amp; }
+canvas.addEventListener("pointermove", e => {
+  crossX = (e.clientX * DPR - ox) / scale; crossY = (e.clientY * DPR - oy) / scale;
+});
+canvas.addEventListener("pointerdown", e => {
+  initAudio();
+  if (state === "menu") { startMusic(); resetGame(); state = "play"; return; }
+  if (state === "over") { state = "menu"; return; }
+  const mx = (e.clientX * DPR - ox) / scale, my = (e.clientY * DPR - oy) / scale;
+  crossX = mx; crossY = my;
+  if (shotsLeft <= 0) return;
+  shotsLeft--; sfx("shot");
+  let got = null;
+  for (const d of ducks) {
+    if (d.hit) continue;
+    const dy = duckY(d);
+    if (Math.abs(d.x - mx) < 30 && Math.abs(dy - my) < 30) { got = d; break; }
+  }
+  if (got) {
+    got.hit = true; got.fall = 0; hits++;
+    score += 50 + Math.round(got.speed / 10); sfx("hit");
+  } else if (shotsLeft === 0) {
+    // out of shots for this flight: the current ducks escape
+    for (const d of ducks) if (!d.hit) d.x = d.dir > 0 ? VW + 60 : -60;
+    shotsLeft = 3;
+    sfx("miss");
+  }
+});
+window.addEventListener("keydown", e => {
+  if (e.key === "Enter" && state !== "play") { initAudio(); startMusic(); resetGame(); state = "play"; }
+});
+
+function draw() {
+  ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+  ctx.fillStyle = "#7ec8e3"; ctx.fillRect(0, 0, W, H);
+  ctx.setTransform(scale, 0, 0, scale, ox, oy);
+  // sky + clouds + grass
+  ctx.fillStyle = "#a5dcf0"; ctx.fillRect(0, 0, VW, VH);
+  ctx.fillStyle = "rgba(255,255,255,.85)";
+  for (let i = 0; i < 5; i++) { const x = (i * 130 + 30) % VW, y = 70 + i * 55; ctx.fillRect(x, y, 56, 16); ctx.fillRect(x + 12, y - 10, 32, 12); }
+  ctx.fillStyle = "#57a85c"; ctx.fillRect(0, VH - 90, VW, 90);
+  ctx.fillStyle = "#3d8a44"; ctx.fillRect(0, VH - 90, VW, 10);
+  if (state === "menu") {
+    ctx.fillStyle = "#1d3a4a"; ctx.textAlign = "center";
+    ctx.font = "bold 42px system-ui"; ctx.fillText("🦆 Duck Season", VW / 2, 150);
+    ctx.font = "20px system-ui"; ctx.fillText("Tap the ducks before they escape!", VW / 2, 210);
+    ctx.fillText("3 shots per flight • 10 ducks a round", VW / 2, 240);
+    ctx.font = "18px system-ui"; ctx.fillText("Best: " + best, VW / 2, 290);
+    ctx.font = "bold 22px system-ui"; ctx.fillText("Tap to start", VW / 2, 400);
+    return;
+  }
+  for (const d of ducks) {
+    const y = duckY(d), flip = d.dir < 0;
+    ctx.save(); ctx.translate(d.x, y); if (flip) ctx.scale(-1, 1);
+    ctx.fillStyle = d.color;
+    ctx.beginPath(); ctx.ellipse(0, 0, 22, 12, 0, 0, Math.PI * 2); ctx.fill();
+    ctx.fillRect(18, -4, 16, 7);
+    ctx.fillStyle = "#f2c200"; ctx.fillRect(30, -2, 8, 4);
+    ctx.fillStyle = "#fff"; ctx.fillRect(22, -6, 6, 6); ctx.fillStyle = "#000"; ctx.fillRect(24, -4, 3, 3);
+    ctx.fillStyle = d.color; ctx.beginPath();
+    ctx.moveTo(-8, -8); ctx.lineTo(-2, -22 + Math.sin(d.t * 10) * 4); ctx.lineTo(6, -8); ctx.fill();
+    ctx.restore();
+    if (d.hit) { ctx.fillStyle = "#e23b3b"; ctx.font = "bold 18px system-ui"; ctx.textAlign = "center"; ctx.fillText("💥", d.x, y - 20); }
+  }
+  // crosshair
+  ctx.strokeStyle = "rgba(226,59,59,.9)"; ctx.lineWidth = 2;
+  ctx.beginPath(); ctx.arc(crossX, crossY, 16, 0, Math.PI * 2); ctx.stroke();
+  ctx.beginPath(); ctx.moveTo(crossX - 22, crossY); ctx.lineTo(crossX - 10, crossY);
+  ctx.moveTo(crossX + 10, crossY); ctx.lineTo(crossX + 22, crossY);
+  ctx.moveTo(crossX, crossY - 22); ctx.lineTo(crossX, crossY - 10);
+  ctx.moveTo(crossX, crossY + 10); ctx.lineTo(crossX, crossY + 22); ctx.stroke();
+  ctx.fillStyle = "rgba(20,60,90,.7)"; ctx.fillRect(0, 0, VW, 44);
+  ctx.fillStyle = "#fff"; ctx.font = "bold 18px system-ui"; ctx.textAlign = "left";
+  ctx.fillText("Round " + round, 12, 28);
+  ctx.textAlign = "center"; ctx.fillText("🦆 " + hits + "/" + quota() + "  •  Shots: " + shotsLeft, VW / 2, 28);
+  ctx.textAlign = "right"; ctx.fillText(score + " pts", VW - 12, 28);
+  if (roundMsgT > 0) {
+    ctx.fillStyle = "#fff"; ctx.font = "bold 20px system-ui"; ctx.textAlign = "center";
+    ctx.fillText(roundMsg, VW / 2, 90);
+  }
+  if (state === "over") {
+    ctx.fillStyle = "rgba(0,0,0,.6)"; ctx.fillRect(0, 0, VW, VH);
+    ctx.fillStyle = "#fff"; ctx.textAlign = "center";
+    ctx.font = "bold 38px system-ui"; ctx.fillText("They got away!", VW / 2, VH / 2 - 20);
+    ctx.font = "20px system-ui";
+    ctx.fillText("Score: " + score + "  •  Best: " + best, VW / 2, VH / 2 + 20);
+    ctx.fillText("Tap to return to menu", VW / 2, VH / 2 + 60);
+  }
+}
+let last = performance.now();
+function loop(now) {
+  const dt = Math.min(0.05, (now - last) / 1000); last = now;
+  update(dt); draw();
+  requestAnimationFrame(loop);
+}
+requestAnimationFrame(loop);
+</script>
+</body>
+</html>
