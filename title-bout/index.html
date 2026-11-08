@@ -489,7 +489,13 @@ function frame(ts) {
 requestAnimationFrame(frame);
 
 /* ---------------- input ---------------- */
-function toGame(e) { const r = canvas.getBoundingClientRect(); return { x: (e.clientX - r.left) * (canvas.width / r.width - 0) / DPR / scale - ox / scale, y: (e.clientY - r.top) * (canvas.height / r.height) / DPR / scale - oy / scale }; }
+// Tap coords arrive in CSS pixels, but the draw transform (scale/ox/oy) is in
+// device pixels — convert with DPR first. The old formula divided CSS pixels
+// by the DPR-scaled `scale` and subtracted device-pixel offsets from them, so
+// on any phone (DPR > 1) the menu hit zones sat far below the drawn cards:
+// Pops only registered near the bottom of the screen and the next fighter's
+// zone landed off-screen entirely, making him unselectable after the win.
+function toGame(e) { const r = canvas.getBoundingClientRect(); return { x: ((e.clientX - r.left) * DPR - ox) / scale, y: ((e.clientY - r.top) * DPR - oy) / scale }; }
 canvas.addEventListener("pointerdown", e => {
   initAudio();
   const p = toGame(e);
