@@ -1,0 +1,482 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, user-scalable=no">
+<meta name="theme-color" content="#0e2233">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<title>Snowball Showdown</title>
+<style>
+  * { margin:0; padding:0; box-sizing:border-box; }
+  html, body {
+    width:100%; height:100%; overflow:hidden; background:#0e2233;
+    font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+    touch-action:none; user-select:none; -webkit-user-select:none;
+    -webkit-tap-highlight-color: transparent;
+  }
+  canvas { position:fixed; inset:0; display:block; touch-action:none; }
+  #muteBtn {
+    position:fixed; top:10px; right:10px; z-index:10;
+    width:48px; height:48px; border-radius:12px;
+    border:2px solid rgba(170,210,255,.5); background:rgba(8,20,34,.62);
+    color:#fff; font-size:22px; line-height:1; cursor:pointer;
+    touch-action:none; user-select:none; -webkit-user-select:none;
+    display:flex; align-items:center; justify-content:center; padding:0;
+  }
+  .modeBtn {
+    position:fixed; left:50%; transform:translateX(-50%); z-index:10;
+    width:min(300px, 80vw); height:54px; border-radius:14px;
+    border:2px solid rgba(150,200,255,.6); background:rgba(10,24,42,.94);
+    color:#eaf4ff; font-size:18px; font-weight:700; cursor:pointer;
+    touch-action:none; user-select:none; -webkit-user-select:none;
+    display:none;
+  }
+  #btn1 { top:56%; } #btn2 { top:calc(56% + 64px); }
+  #btn3 { top:calc(56% + 128px); } #btn4 { top:calc(56% + 192px); }
+</style>
+</head>
+<body>
+<canvas id="game"></canvas>
+<button id="muteBtn" aria-label="Toggle sound">🔊</button>
+<button class="modeBtn" id="btn1">❄️ 1 Player — you + 3 CPU</button>
+<button class="modeBtn" id="btn2">❄️ 2 Players — + 2 CPU</button>
+<button class="modeBtn" id="btn3">❄️ 3 Players — + 1 CPU</button>
+<button class="modeBtn" id="btn4">❄️ 4 Players — full house!</button>
+<script>
+// iOS audio routing: route Web Audio to the media/playback channel (iOS 17+
+// Audio Session API) on the first gesture and inside audio init, so sound
+// plays even with the silent switch on.
+function iosPlaybackSession() {
+  try { if ('audioSession' in navigator) navigator.audioSession.type = 'playback'; } catch (e) {}
+}
+document.addEventListener('pointerdown', iosPlaybackSession, true);
+document.addEventListener('touchstart', iosPlaybackSession, true);
+
+"use strict";
+/* ============================================================
+   SNOWBALL SHOWDOWN — 4-corner snowball fight for one phone.
+   Four throwers, one in each corner of a snowy arena. Drag in
+   your corner to aim, let go to throw. 3 hits and you're a
+   snowman. Last thrower standing wins the round; first to 3
+   round wins takes the match. Pick 1–4 human players at the
+   start — the CPU covers every empty corner, same throw speed,
+   same cooldown, same 3 hearts as everyone else.
+   ============================================================ */
+
+// Virtual stage. Input is converted with the rect-ratio formula
+// (CSS pixels only), so tap zones line up at every DPR.
+const VW = 400, VH = 640;
+const ARENA = { x: 0, y: 120, s: 400 };           // snowy square
+const INSET = 58;                                  // corner post inset
+const HIT_R = 21, BALL_R = 7, BALL_SPEED = 470;    // virtual units / sec
+const COOLDOWN = 0.55, ROUND_TIME = 60, WIN_CROWNS = 3, MAX_HP = 3;
+
+const canvas = document.getElementById("game");
+const ctx = canvas.getContext("2d");
+let W = 0, H = 0, DPR = 1, scaleCss = 1, oxCss = 0, oyCss = 0;
+function resize() {
+  DPR = Math.min(window.devicePixelRatio || 1, 2);
+  W = window.innerWidth; H = window.innerHeight;
+  canvas.width = Math.round(W * DPR); canvas.height = Math.round(H * DPR);
+  canvas.style.width = W + "px"; canvas.style.height = H + "px";
+  scaleCss = Math.min(W / VW, H / VH);
+  oxCss = (W - VW * scaleCss) / 2; oyCss = (H - VH * scaleCss) / 2;
+}
+window.addEventListener("resize", resize); resize();
+function toGame(clientX, clientY) {
+  const r = canvas.getBoundingClientRect();
+  return { x: ((clientX - r.left) - oxCss) / scaleCss, y: ((clientY - r.top) - oyCss) / scaleCss };
+}
+function clamp(v, a, b) { return v < a ? a : (v > b ? b : v); }
+
+// ---------- Audio ----------
+let actx = null, muted = false;
+const muteBtn = document.getElementById("muteBtn");
+function initAudio() {
+  iosPlaybackSession();
+  if (!actx) {
+    try { const AC = window.AudioContext || window.webkitAudioContext; if (AC) actx = new AC(); } catch (e) { actx = null; }
+    if (actx) startMusicScheduler();
+  }
+  if (actx && actx.state === "suspended") actx.resume();
+}
+function beep(freq, dur, type, vol, slide) {
+  if (!actx || muted) return;
+  const t = actx.currentTime;
+  const o = actx.createOscillator(), g = actx.createGain();
+  o.type = type || "square";
+  o.frequency.setValueAtTime(freq, t);
+  if (slide) o.frequency.exponentialRampToValueAtTime(Math.max(40, slide), t + dur);
+  g.gain.setValueAtTime(vol || 0.07, t);
+  g.gain.exponentialRampToValueAtTime(0.0001, t + dur);
+  o.connect(g); g.connect(actx.destination);
+  o.start(t); o.stop(t + dur + 0.02);
+}
+function sfxThrow() { beep(900, 0.14, "sine", 0.05, 300); }
+function sfxSplat() { beep(180, 0.1, "square", 0.06, 70); }
+function sfxHit() { beep(520, 0.1, "square", 0.07); setTimeout(() => beep(300, 0.14, "square", 0.06), 60); }
+function sfxOut() { [660, 550, 440, 330].forEach((f, i) => setTimeout(() => beep(f, 0.13, "triangle", 0.06), i * 90)); }
+function sfxWin() { [523, 659, 784, 1046, 1318].forEach((f, i) => setTimeout(() => beep(f, 0.16, "triangle", 0.06), i * 105)); }
+
+// Cheerful winter loop, BPM 112. All fundamentals >= ~130 Hz.
+const BPM = 112, STEP_DUR = 60 / BPM / 2;
+const BASS = [ 57,0,0,57, 0,0,57,0, 53,0,0,53, 0,0,53,0, 55,0,0,55, 0,0,55,0, 57,0,0,57, 0,0,57,0 ];
+const LEAD = [ 76,0,79,0, 81,0,79,0, 76,0,74,0, 72,0,0,0, 74,0,76,0, 79,0,76,0, 74,0,0,0, 0,0,0,0 ];
+let musicStep = 0, nextNoteTime = 0, musicTimer = null;
+function midiFreq(m) { return 440 * Math.pow(2, (m - 69) / 12); }
+function toneAt(midi, when, dur, type, vol) {
+  const o = actx.createOscillator(), g = actx.createGain();
+  o.type = type; o.frequency.setValueAtTime(midiFreq(midi), when);
+  g.gain.setValueAtTime(0.0001, when);
+  g.gain.exponentialRampToValueAtTime(vol, when + 0.012);
+  g.gain.exponentialRampToValueAtTime(0.0001, when + dur);
+  o.connect(g); g.connect(actx.destination);
+  o.start(when); o.stop(when + dur + 0.03);
+}
+function startMusicScheduler() {
+  if (musicTimer !== null || !actx) return;
+  musicStep = 0; nextNoteTime = actx.currentTime + 0.06;
+  musicTimer = setInterval(function () {
+    if (!actx) return;
+    if (nextNoteTime < actx.currentTime) nextNoteTime = actx.currentTime + 0.05;
+    while (nextNoteTime < actx.currentTime + 0.12) {
+      if (!muted) {
+        const b = BASS[musicStep % 32]; if (b) toneAt(b, nextNoteTime, STEP_DUR * 0.9, "triangle", 0.03);
+        const l = LEAD[musicStep % 32]; if (l) toneAt(l, nextNoteTime, STEP_DUR * 1.5, "square", 0.014);
+      }
+      nextNoteTime += STEP_DUR; musicStep = (musicStep + 1) % 32;
+    }
+  }, 25);
+}
+function setMuted(m) { muted = m; muteBtn.textContent = muted ? "🔇" : "🔊"; }
+muteBtn.addEventListener("pointerdown", function (e) { e.stopPropagation(); e.preventDefault(); initAudio(); setMuted(!muted); });
+muteBtn.addEventListener("click", function (e) { e.stopPropagation(); e.preventDefault(); });
+
+// ---------- Players ----------
+// Corner order: 0 bottom-left, 1 bottom-right, 2 top-left, 3 top-right.
+// Humans fill in that order; the CPU covers the rest.
+const CORNERS = [
+  { x: ARENA.x + INSET,           y: ARENA.y + ARENA.s - INSET, name: "Blue",   color: "#59c8ff" },
+  { x: ARENA.x + ARENA.s - INSET, y: ARENA.y + ARENA.s - INSET, name: "Red",    color: "#ff5d7a" },
+  { x: ARENA.x + INSET,           y: ARENA.y + INSET,           name: "Green",  color: "#8be04e" },
+  { x: ARENA.x + ARENA.s - INSET, y: ARENA.y + INSET,           name: "Orange", color: "#ffb84d" }
+];
+let players = [], balls = [], splats = [];
+let state = "menu"; // menu | play | roundOver | matchOver
+let humans = 1, round = 1, roundTimer = ROUND_TIME, bannerT = 0, bannerText = "";
+let champs = [0, 0, 0, 0];
+try { const c = JSON.parse(localStorage.getItem("snowball_champs") || "[]"); if (Array.isArray(c)) champs = [c[0] | 0, c[1] | 0, c[2] | 0, c[3] | 0]; } catch (e) {}
+
+function newPlayer(i) {
+  return {
+    i, x: CORNERS[i].x, y: CORNERS[i].y, hp: MAX_HP, alive: true,
+    human: i < humans, cool: 0, flash: 0, bob: Math.random() * 6.28,
+    cpuT: 0.8 + Math.random() * 1.1, throws: 0
+  };
+}
+function startMatch(nHumans) {
+  initAudio();
+  humans = nHumans;
+  players = CORNERS.map((c, i) => newPlayer(i));
+  players.forEach(p => { p.crowns = 0; });
+  round = 1;
+  startRound();
+  hideButtons();
+}
+function startRound() {
+  players.forEach(p => { p.hp = MAX_HP; p.alive = true; p.cool = 0; p.flash = 0; p.cpuT = 0.8 + Math.random() * 1.1; });
+  balls = []; splats = [];
+  roundTimer = ROUND_TIME;
+  state = "play";
+}
+function aliveCount() { return players.filter(p => p.alive).length; }
+function throwBall(p, ang) {
+  balls.push({
+    x: p.x + Math.cos(ang) * (HIT_R + BALL_R + 4),
+    y: p.y + Math.sin(ang) * (HIT_R + BALL_R + 4),
+    vx: Math.cos(ang) * BALL_SPEED, vy: Math.sin(ang) * BALL_SPEED,
+    owner: p.i
+  });
+  p.cool = COOLDOWN; p.throws++;
+  sfxThrow();
+}
+function endRound(winnerIdx, why) {
+  state = "roundOver"; bannerT = 2.4;
+  if (winnerIdx >= 0) {
+    players[winnerIdx].crowns++;
+    bannerText = CORNERS[winnerIdx].name + " wins round " + round + "!";
+    if (players[winnerIdx].crowns >= WIN_CROWNS) {
+      state = "matchOver";
+      champs[winnerIdx]++;
+      try { localStorage.setItem("snowball_champs", JSON.stringify(champs)); } catch (e) {}
+      bannerText = "🏆 " + CORNERS[winnerIdx].name + " takes the match!";
+      sfxWin();
+      return;
+    }
+  } else {
+    bannerText = "Round " + round + " — no winner";
+  }
+  sfxOut();
+}
+
+// ---------- Mode buttons ----------
+const btns = [1, 2, 3, 4].map(n => document.getElementById("btn" + n));
+function showButtons() { btns.forEach(b => { b.style.display = "block"; }); }
+function hideButtons() { btns.forEach(b => { b.style.display = "none"; }); }
+btns.forEach((b, idx) => b.addEventListener("click", function () { startMatch(idx + 1); }));
+
+// ---------- Input: drag in your corner to aim, release to throw ----------
+const aims = new Map(); // pointerId -> { player, x, y }
+function quadrantPlayer(gx, gy) {
+  if (gx < ARENA.x || gx > ARENA.x + ARENA.s || gy < ARENA.y || gy > ARENA.y + ARENA.s) return -1;
+  const left = gx < ARENA.x + ARENA.s / 2, top = gy < ARENA.y + ARENA.s / 2;
+  return top ? (left ? 2 : 3) : (left ? 0 : 1);
+}
+canvas.addEventListener("pointerdown", function (e) {
+  initAudio();
+  if (state === "roundOver" || state === "matchOver") return; // banner timer / tap handled on click
+  if (state !== "play") return;
+  const g = toGame(e.clientX, e.clientY);
+  const pi = quadrantPlayer(g.x, g.y);
+  if (pi < 0) return;
+  const p = players[pi];
+  if (!p.human || !p.alive || p.cool > 0) return;
+  const pid = e.pointerId !== undefined ? e.pointerId : "mouse";
+  aims.set(pid, { player: pi, x: g.x, y: g.y });
+});
+canvas.addEventListener("pointermove", function (e) {
+  const pid = e.pointerId !== undefined ? e.pointerId : "mouse";
+  const a = aims.get(pid);
+  if (!a) return;
+  const g = toGame(e.clientX, e.clientY);
+  a.x = g.x; a.y = g.y;
+});
+function releaseAim(e) {
+  const pid = e.pointerId !== undefined ? e.pointerId : "mouse";
+  const a = aims.get(pid);
+  if (!a) return;
+  aims.delete(pid);
+  if (state !== "play") return;
+  const p = players[a.player];
+  if (!p.alive || p.cool > 0) return;
+  const dx = a.x - p.x, dy = a.y - p.y;
+  if (Math.hypot(dx, dy) < 24) return; // too short — cancelled aim
+  throwBall(p, Math.atan2(dy, dx));
+}
+canvas.addEventListener("pointerup", releaseAim);
+canvas.addEventListener("pointercancel", releaseAim);
+canvas.addEventListener("click", function () {
+  if (state === "matchOver") { state = "menu"; showButtons(); }
+});
+// Keyboard for Player 1 (Blue): ◀ ▶ rotate aim, Space throws.
+let kbAngle = -Math.PI / 4, kbKeys = {};
+window.addEventListener("keydown", function (e) {
+  kbKeys[e.key] = true;
+  if (e.key === " ") { e.preventDefault(); initAudio(); if (state === "menu") startMatch(1); }
+  if (["ArrowLeft", "ArrowRight"].includes(e.key)) e.preventDefault();
+});
+window.addEventListener("keyup", function (e) { kbKeys[e.key] = false; });
+
+// ---------- Update ----------
+function update(dt) {
+  for (const p of players) {
+    if (p.cool > 0) p.cool -= dt;
+    if (p.flash > 0) p.flash -= dt;
+    p.bob += dt * 2.2;
+  }
+  if (state === "roundOver") {
+    bannerT -= dt;
+    if (bannerT <= 0) { round++; startRound(); }
+    return;
+  }
+  if (state !== "play") return;
+
+  roundTimer -= dt;
+  if (roundTimer <= 0) {
+    // Time! Highest hearts left wins the round; a tie means no crown.
+    let best = -1, bestHp = 0, tie = false;
+    for (const p of players) {
+      if (!p.alive) continue;
+      if (p.hp > bestHp) { bestHp = p.hp; best = p.i; tie = false; }
+      else if (p.hp === bestHp) tie = true;
+    }
+    endRound(tie ? -1 : best, "time");
+    return;
+  }
+
+  // Player 1 keyboard aim/throw
+  const p1 = players[0];
+  if (p1.human && p1.alive) {
+    if (kbKeys["ArrowLeft"]) kbAngle -= 2.4 * dt;
+    if (kbKeys["ArrowRight"]) kbAngle += 2.4 * dt;
+    if (kbKeys[" "] && p1.cool <= 0) throwBall(p1, kbAngle);
+  }
+
+  // CPU throwers: same speed/cooldown/hearts as humans; aim error is
+  // generous (±0.16 rad ≈ ±9°) so a moving-free target still gets missed.
+  for (const p of players) {
+    if (p.human || !p.alive) continue;
+    p.cpuT -= dt;
+    if (p.cpuT > 0 || p.cool > 0) continue;
+    const foes = players.filter(q => q.alive && q.i !== p.i);
+    if (!foes.length) break;
+    const t = foes[Math.floor(Math.random() * foes.length)];
+    const ang = Math.atan2(t.y - p.y, t.x - p.x) + (Math.random() * 0.32 - 0.16);
+    throwBall(p, ang);
+    p.cpuT = 1.1 + Math.random() * 0.9;
+  }
+
+  // Balls
+  for (const b of balls) {
+    b.x += b.vx * dt; b.y += b.vy * dt;
+    if (b.x < ARENA.x + BALL_R || b.x > ARENA.x + ARENA.s - BALL_R ||
+        b.y < ARENA.y + BALL_R || b.y > ARENA.y + ARENA.s - BALL_R) { b.dead = true; splats.push({ x: b.x, y: b.y, t: 0.25 }); sfxSplat(); continue; }
+    for (const p of players) {
+      if (!p.alive || p.i === b.owner) continue;
+      if (Math.hypot(p.x - b.x, p.y - b.y) < HIT_R + BALL_R) {
+        b.dead = true;
+        p.hp--; p.flash = 0.35;
+        splats.push({ x: b.x, y: b.y, t: 0.3 });
+        if (p.hp <= 0) { p.alive = false; sfxOut(); } else sfxHit();
+        break;
+      }
+    }
+  }
+  // Snowballs that meet mid-flight splat each other.
+  for (let i = 0; i < balls.length; i++) for (let j = i + 1; j < balls.length; j++) {
+    const a = balls[i], b = balls[j];
+    if (a.dead || b.dead || a.owner === b.owner) continue;
+    if (Math.hypot(a.x - b.x, a.y - b.y) < BALL_R * 2) { a.dead = b.dead = true; splats.push({ x: (a.x + b.x) / 2, y: (a.y + b.y) / 2, t: 0.3 }); sfxSplat(); }
+  }
+  balls = balls.filter(b => !b.dead);
+  for (const s of splats) s.t -= dt;
+  splats = splats.filter(s => s.t > 0);
+
+  if (aliveCount() <= 1) {
+    const w = players.find(p => p.alive);
+    endRound(w ? w.i : -1, "last");
+  }
+}
+
+// ---------- Draw ----------
+function rr(x, y, w, h, r) {
+  r = Math.min(r, w / 2, h / 2);
+  ctx.beginPath(); ctx.moveTo(x + r, y);
+  ctx.arcTo(x + w, y, x + w, y + h, r); ctx.arcTo(x + w, y + h, x, y + h, r);
+  ctx.arcTo(x, y + h, x, y, r); ctx.arcTo(x, y, x + w, y, r);
+  ctx.closePath();
+}
+function drawPlayer(p) {
+  const bobY = p.alive ? Math.sin(p.bob) * 2 : 0;
+  if (!p.alive) {
+    ctx.font = "40px system-ui"; ctx.textAlign = "center"; ctx.textBaseline = "middle";
+    ctx.fillText("⛄", p.x, p.y);
+    return;
+  }
+  // body: snow-suit circle with a white snowball belly
+  ctx.fillStyle = p.flash > 0 ? "#ffffff" : CORNERS[p.i].color;
+  ctx.beginPath(); ctx.arc(p.x, p.y + bobY, HIT_R, 0, Math.PI * 2); ctx.fill();
+  ctx.fillStyle = "#ffffff";
+  ctx.beginPath(); ctx.arc(p.x, p.y + bobY + 4, HIT_R * 0.58, 0, Math.PI * 2); ctx.fill();
+  ctx.fillStyle = "#22303c";
+  ctx.beginPath(); ctx.arc(p.x - 6, p.y + bobY - 4, 2.4, 0, Math.PI * 2); ctx.fill();
+  ctx.beginPath(); ctx.arc(p.x + 6, p.y + bobY - 4, 2.4, 0, Math.PI * 2); ctx.fill();
+  // hearts + crowns under the player
+  ctx.font = "13px system-ui"; ctx.textAlign = "center"; ctx.textBaseline = "middle";
+  ctx.fillText("❤️".repeat(p.hp) + "🖤".repeat(MAX_HP - p.hp), p.x, p.y + HIT_R + 14);
+  ctx.font = "bold 13px system-ui"; ctx.fillStyle = CORNERS[p.i].color;
+  const label = CORNERS[p.i].name + (p.human ? " (P" + (p.i + 1) + ")" : " (CPU)") + (p.crowns ? " 👑×" + p.crowns : "");
+  ctx.fillText(label, p.x, p.y - HIT_R - 12);
+}
+function draw() {
+  ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+  ctx.fillStyle = "#0e2233"; ctx.fillRect(0, 0, W, H);
+  ctx.setTransform(DPR * scaleCss, 0, 0, DPR * scaleCss, DPR * oxCss, DPR * oyCss);
+
+  // arena snowfield
+  ctx.fillStyle = "#eaf4fb"; rr(ARENA.x, ARENA.y, ARENA.s, ARENA.s, 18); ctx.fill();
+  ctx.strokeStyle = "rgba(90,150,200,.45)"; ctx.lineWidth = 3;
+  ctx.setLineDash([8, 10]);
+  ctx.beginPath(); ctx.moveTo(ARENA.x + ARENA.s / 2, ARENA.y + 8); ctx.lineTo(ARENA.x + ARENA.s / 2, ARENA.y + ARENA.s - 8); ctx.stroke();
+  ctx.beginPath(); ctx.moveTo(ARENA.x + 8, ARENA.y + ARENA.s / 2); ctx.lineTo(ARENA.x + ARENA.s - 8, ARENA.y + ARENA.s / 2); ctx.stroke();
+  ctx.setLineDash([]);
+  ctx.fillStyle = "rgba(120,180,230,.25)";
+  ctx.beginPath(); ctx.arc(VW / 2, ARENA.y + ARENA.s / 2, 34, 0, Math.PI * 2); ctx.fill();
+
+  // header
+  ctx.textAlign = "center"; ctx.textBaseline = "middle";
+  ctx.fillStyle = "#bfe2ff"; ctx.font = "bold 30px system-ui, sans-serif";
+  ctx.fillText("❄️ SNOWBALL SHOWDOWN", VW / 2, 40);
+  ctx.font = "15px system-ui, sans-serif"; ctx.fillStyle = "#8fb8d8";
+  if (state === "menu") {
+    ctx.fillText("Drag in your corner to aim — let go to throw!", VW / 2, 74);
+    ctx.fillText("3 hits makes a snowman. First to 👑×" + WIN_CROWNS + " wins.", VW / 2, 96);
+    const winsLine = champs.some(c => c > 0)
+      ? "Match wins — " + CORNERS.map((c, i) => c.name + " " + champs[i]).join(" · ")
+      : "No champions yet — be the first!";
+    ctx.font = "13px system-ui, sans-serif";
+    ctx.fillText(winsLine, VW / 2, 622);
+  } else {
+    ctx.fillText("Round " + round + " · " + Math.max(0, Math.ceil(roundTimer)) + "s", VW / 2, 74);
+  }
+
+  if (state !== "menu") {
+    for (const p of players) drawPlayer(p);
+    // aim guides
+    for (const a of aims.values()) {
+      const p = players[a.player];
+      if (!p.alive) continue;
+      const dx = a.x - p.x, dy = a.y - p.y, len = Math.hypot(dx, dy);
+      ctx.strokeStyle = CORNERS[p.i].color; ctx.lineWidth = 3; ctx.setLineDash([6, 7]);
+      ctx.beginPath(); ctx.moveTo(p.x, p.y);
+      ctx.lineTo(p.x + dx * Math.min(1, 130 / Math.max(1, len)), p.y + dy * Math.min(1, 130 / Math.max(1, len)));
+      ctx.stroke(); ctx.setLineDash([]);
+      if (len >= 24) { ctx.fillStyle = CORNERS[p.i].color; ctx.font = "bold 14px system-ui"; ctx.fillText("THROW!", p.x + dx * 0.4, p.y + dy * 0.4 - 16); }
+    }
+    // snowballs
+    for (const b of balls) {
+      ctx.fillStyle = "#ffffff"; ctx.beginPath(); ctx.arc(b.x, b.y, BALL_R, 0, Math.PI * 2); ctx.fill();
+      ctx.strokeStyle = "rgba(120,180,230,.8)"; ctx.lineWidth = 1.5; ctx.stroke();
+    }
+    for (const s of splats) {
+      ctx.fillStyle = "rgba(255,255,255,.85)"; ctx.font = "16px system-ui";
+      ctx.fillText("💥", s.x, s.y);
+    }
+    if (state === "roundOver" || state === "matchOver") {
+      ctx.fillStyle = "rgba(6,16,28,.78)"; ctx.fillRect(0, ARENA.y, VW, ARENA.s);
+      ctx.fillStyle = "#ffffff"; ctx.font = "bold 27px system-ui, sans-serif";
+      ctx.fillText(bannerText, VW / 2, ARENA.y + ARENA.s / 2 - 14);
+      ctx.font = "16px system-ui, sans-serif"; ctx.fillStyle = "#bfe2ff";
+      ctx.fillText(state === "matchOver" ? "Tap for the menu" : "Next round coming up…", VW / 2, ARENA.y + ARENA.s / 2 + 24);
+    }
+    // footer hint
+    ctx.fillStyle = "#8fb8d8"; ctx.font = "14px system-ui, sans-serif";
+    ctx.fillText("Your corner = your thrower. Drag anywhere in it to aim.", VW / 2, 556);
+  }
+}
+
+// ---------- Loop ----------
+let lastT = 0;
+function frame(t) {
+  requestAnimationFrame(frame);
+  const dt = Math.min(0.05, (t - lastT) / 1000 || 0); lastT = t;
+  update(dt);
+  draw();
+}
+showButtons();
+requestAnimationFrame(frame);
+
+// ---------- QA hooks ----------
+window.__qa = {
+  state: () => state,
+  players: () => players.map(p => ({ i: p.i, hp: p.hp, alive: p.alive, human: p.human, crowns: p.crowns, throws: p.throws })),
+  balls: () => balls.map(b => ({ owner: b.owner, x: Math.round(b.x), y: Math.round(b.y) })),
+  round: () => round,
+  setHp: (i, hp) => { players[i].hp = hp; },
+  setCrowns: (i, n) => { players[i].crowns = n; },
+  pos: i => ({ x: players[i].x, y: players[i].y })
+};
+</script>
+</body>
+</html>
