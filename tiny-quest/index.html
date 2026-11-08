@@ -211,6 +211,14 @@ function update(dt) {
   else if (area === "over" && ch === "C" && gateOpen && wave === 0) {
     wave = 1; slimes = []; spawnSlimes("over", 3); sfx("pick");
   }
+  // The gate tile is solid while locked, so the player can never stand ON
+  // it for the check above — bump-to-unlock: facing the gate with the key
+  // in hand opens it. (Bug found 2026-11-08: key in hand, gate never opened.)
+  if (area === "over" && hasKey && !gateOpen) {
+    const fc = c + (face === "left" ? -1 : face === "right" ? 1 : 0);
+    const fr = r + (face === "up" ? -1 : face === "down" ? 1 : 0);
+    if (mapAt(area, fc, fr) === "G") { gateOpen = true; sfx("pick"); }
+  }
   // gauntlet waves
   if (wave > 0 && slimes.length === 0) {
     if (wave < 3) { wave++; spawnSlimes("over", 2 + wave); }
@@ -325,6 +333,17 @@ function loop(now) {
 }
 resetGame(); state = "menu";
 requestAnimationFrame(loop);
+
+// ---------- QA hooks ----------
+window.__qa = {
+  state: () => state,
+  area: () => area,
+  hasKey: () => hasKey,
+  gateOpen: () => gateOpen,
+  wave: () => wave,
+  pos: () => ({ x: px, y: py, c: Math.floor((px + 18) / TILE), r: Math.floor((py + 18) / TILE) }),
+  setPos: (c, r) => { px = c * TILE + 6; py = r * TILE + 6; slimes = []; }
+};
 </script>
 </body>
 </html>
