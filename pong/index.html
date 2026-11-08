@@ -223,7 +223,7 @@ function endGame(didWin) {
 }
 const btn1p = document.getElementById("btn1p"), btn2p = document.getElementById("btn2p");
 function showModeButtons() {
-  btn1p.style.display = ""; btn2p.style.display = "";
+  btn1p.style.display = "block"; btn2p.style.display = "block";
   btn1p.textContent = state === "over" ? "🏓 Play again — 1 Player" : "🏓 1 Player — vs CPU";
   btn2p.textContent = state === "over" ? "🏓 Play again — 2 Players" : "🏓 2 Players — same phone";
 }
