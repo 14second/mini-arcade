@@ -44,11 +44,32 @@ function iosPlaybackSession() {
 document.addEventListener('pointerdown', iosPlaybackSession, true);
 document.addEventListener('touchstart', iosPlaybackSession, true);
 "use strict";
-/* TINY QUEST — original top-down mini adventure. Explore the field, enter the
-   cave, find the key, open the gate, survive the 3-wave gauntlet.
+/* TINY QUEST — original top-down mini adventure in 12 levels. You are a
+   knight: in each level explore the field, enter the cave, find the key,
+   open the gate, survive the slime gauntlet. Clear level 12 and the knight
+   rescues the princess.
    Fairness: no enemy spawns within 3 tiles of the player; contact damage has
-   a 0.9s invulnerability window; a heart pickup sits before the gauntlet. */
+   a 1.2s invulnerability window; the sword's reach (56) clearly beats a
+   slime's touch (32); a heart pickup sits before the gauntlet; waves
+   trickle in at most 3 at a time; slimes pathfind to the player so no
+   gauntlet can stall; slime speed stays below the player's speed. */
 const VW = 420, VH = 720, TILE = 48, COLS = 9, ROWS = 13;
+// Per-level visual themes: each level (and its cave) gets its own palette,
+// scenery and slime colours, so all twelve look distinct.
+const THEMES = [
+  { name: "Meadow",     wall: "#2f7a35", wallIn: "#236128", floor: ["#63b765", "#5cae60"], decor: ["🌼", "🌷", "🍄"], caveWall: "#3a3348", caveIn: "#241f33", caveFloor: ["#5d4f7a", "#574a6e"], slime: "#39d353", slimeDark: "#1d7a35" },
+  { name: "Meadow",     wall: "#2f7a35", wallIn: "#236128", floor: ["#63b765", "#5cae60"], decor: ["🌼", "🌷", "🍄"], caveWall: "#3a3348", caveIn: "#241f33", caveFloor: ["#5d4f7a", "#574a6e"], slime: "#39d353", slimeDark: "#1d7a35" },
+  { name: "Forest",     wall: "#1e5631", wallIn: "#123c20", floor: ["#3f9155", "#39824c"], decor: ["🌲", "🍄", "🌿"], caveWall: "#2c3e33", caveIn: "#18251d", caveFloor: ["#48604f", "#405646"], slime: "#57cc4f", slimeDark: "#2c7a26" },
+  { name: "Echo Caves", wall: "#5b4a8a", wallIn: "#40336a", floor: ["#7a68ab", "#7262a2"], decor: ["💎", "🪨", "🦇"], caveWall: "#332a52", caveIn: "#1e1838", caveFloor: ["#4a3f70", "#443a66"], slime: "#b48ce8", slimeDark: "#6e44ad" },
+  { name: "Heartwood",  wall: "#6e4517", wallIn: "#4e2f0e", floor: ["#a9803e", "#9c7638"], decor: ["🍂", "🌳", "🍁"], caveWall: "#4a3421", caveIn: "#2c1e12", caveFloor: ["#6e5236", "#63482e"], slime: "#e08a3c", slimeDark: "#9c5514" },
+  { name: "Sunken",     wall: "#155e6b", wallIn: "#0d4250", floor: ["#3d97a3", "#358894"], decor: ["🪸", "🐚", "💧"], caveWall: "#123a4a", caveIn: "#0a2432", caveFloor: ["#20566b", "#1c4c5e"], slime: "#3cc6d8", slimeDark: "#187d8c" },
+  { name: "Bramble",    wall: "#4a5d1a", wallIn: "#33400f", floor: ["#7d9b3a", "#729033"], decor: ["🌵", "🪻", "🥀"], caveWall: "#3a4520", caveIn: "#252c12", caveFloor: ["#5c6b38", "#526030"], slime: "#a8c93c", slimeDark: "#687f1d" },
+  { name: "Deep Dark",  wall: "#23283d", wallIn: "#141826", floor: ["#39405c", "#333a52"], decor: ["🔮", "🕯️", "⭐"], caveWall: "#171b2c", caveIn: "#0b0e1a", caveFloor: ["#2a3049", "#252b40"], slime: "#7d8ce8", slimeDark: "#4450ad" },
+  { name: "Ember",      wall: "#7a2d1d", wallIn: "#571d10", floor: ["#b85c38", "#a8522f"], decor: ["🔥", "🌋", "🪨"], caveWall: "#4a2015", caveIn: "#2e120a", caveFloor: ["#6e3a26", "#633422"], slime: "#f07840", slimeDark: "#a83c14" },
+  { name: "Royal Road", wall: "#6b5a2a", wallIn: "#4a3d18", floor: ["#b09b58", "#a38f4e"], decor: ["🏵️", "🌹", "🦁"], caveWall: "#453a20", caveIn: "#2a2210", caveFloor: ["#5f5130", "#554928"], slime: "#e8c33c", slimeDark: "#a88414" },
+  { name: "Frost",      wall: "#7d99ad", wallIn: "#57778c", floor: ["#c3d9e6", "#b5cfe0"], decor: ["❄️", "⛄", "🧊"], caveWall: "#4a6274", caveIn: "#2e4250", caveFloor: ["#688396", "#5c788c"], slime: "#8fd4f0", slimeDark: "#3f88ad" },
+  { name: "Princess",   wall: "#8a3d68", wallIn: "#66284c", floor: ["#c478a5", "#b96d99"], decor: ["🌸", "💐", "🦋"], caveWall: "#57284a", caveIn: "#381631", caveFloor: ["#7a4066", "#6e3a5c"], slime: "#f08cc0", slimeDark: "#ad4484" }
+];
 const canvas = document.getElementById("game"), ctx = canvas.getContext("2d");
 let W = 0, H = 0, DPR = 1, scale = 1, ox = 0, oy = 0;
 function resize() {
@@ -98,7 +119,9 @@ function startMusic() {
 
 // Maps: '#'=wall, '.'=floor, 'D'=cave door (overworld) / exit (dungeon),
 // 'K'=key chest, 'G'=locked gate, 'H'=heart pickup, 'C'=clearing (gauntlet).
-const OVERWORLD = [
+const LEVELS = [
+{ name: "First Steps", waves: 3,
+  over: [
 "#########",
 "#.......#",
 "#.###...#",
@@ -111,8 +134,8 @@ const OVERWORLD = [
 "#D..#..G#",
 "#.###.H.#",
 "#...#..C#",
-"#########"];
-const DUNGEON = [
+"#########"],
+  dun: [
 "#########",
 "#...#...#",
 "#.###.#.#",
@@ -125,30 +148,432 @@ const DUNGEON = [
 "#.#K#..D#",
 "#########",
 "#########",
-"#########"];
-let state = "menu", area = "over", hearts = 3, hasKey = false, gateOpen = false;
-let wave = 0, waveSpawn = 0, slimes = [], px = 0, py = 0, face = "down";
-let swing = 0, invuln = 0, startTime = 0, elapsed = 0, won = false;
-let best = parseInt(localStorage.getItem("tqBest") || "0", 10);
+"#########"] },
+{ name: "Slime Meadow", waves: 3,
+  over: [
+"#########",
+"#.......#",
+"#.#.###.#",
+"#D#.....#",
+"#.#.###.#",
+"#...#...#",
+"###.#.#.#",
+"#.....#.#",
+"####G####",
+"#.......#",
+"#..H....#",
+"#......C#",
+"#########"],
+  dun: [
+"#########",
+"#....#K.#",
+"#.##.#..#",
+"#.#...#.#",
+"#.#.###.#",
+"#...#...#",
+"###.#.###",
+"#.....#.#",
+"#.#.#.#.#",
+"#D#.#...#",
+"#########",
+"#########",
+"#########"] },
+{ name: "The Long Way Round", waves: 4,
+  over: [
+"#########",
+"#.......#",
+"#D..##..#",
+"#...##..#",
+"#.......#",
+"#.##....#",
+"#....##.#",
+"##G######",
+"#.......#",
+"#..#....#",
+"#..#...H#",
+"#.....C.#",
+"#########"],
+  dun: [
+"#########",
+"#K..#...#",
+"###.#.#.#",
+"#...#.#.#",
+"#.#...#.#",
+"#.#.###.#",
+"#.#.....#",
+"#.#####.#",
+"#......D#",
+"#########",
+"#########",
+"#########",
+"#########"] },
+{ name: "Caves of Echoes", waves: 4,
+  over: [
+"#########",
+"#...#...#",
+"#.#.#.#.#",
+"#.#.#.#.#",
+"#.#.###.#",
+"#...#...#",
+"###.#####",
+"#D..#...#",
+"#.#.#####",
+"#...G..H#",
+"#.###.###",
+"#...#..C#",
+"#########"],
+  dun: [
+"#########",
+"#...#..K#",
+"#.#.#.###",
+"#.#.....#",
+"#.#.###.#",
+"#...#...#",
+"###.#.#.#",
+"#.....#.#",
+"#.#.#.#.#",
+"#.#...#D#",
+"#########",
+"#########",
+"#########"] },
+{ name: "Heartwood", waves: 4,
+  over: [
+"#########",
+"#..D....#",
+"#.#####.#",
+"#.......#",
+"#..###..#",
+"######G##",
+"#.......#",
+"#.#...#.#",
+"#.#.#.#.#",
+"#...#...#",
+"#.H...#C#",
+"#.......#",
+"#########"],
+  dun: [
+"#########",
+"#D......#",
+"#.##.##.#",
+"#..#..#.#",
+"##.#.##.#",
+"#..#....#",
+"#.#..##.#",
+"#...#K#.#",
+"#.###.#.#",
+"#.....#.#",
+"#########",
+"#########",
+"#########"] },
+{ name: "The Sunken Gate", waves: 5,
+  over: [
+"#########",
+"#..#....#",
+"#D.#.##.#",
+"#..#....#",
+"#.##.#..#",
+"#..#.#..#",
+"#..#.#.##",
+"#..#....#",
+"#.###.#.#",
+"#..G..#C#",
+"#..#....#",
+"#..#H...#",
+"#########"],
+  dun: [
+"#########",
+"#......D#",
+"#.####.##",
+"#.#.....#",
+"#.#.##..#",
+"#...#.#.#",
+"###.#.#.#",
+"#K..#...#",
+"#.#####.#",
+"#.......#",
+"#########",
+"#########",
+"#########"] },
+{ name: "Bramble Maze", waves: 5,
+  over: [
+"#########",
+"#...#D..#",
+"#.#.#...#",
+"#.#.....#",
+"#G#######",
+"#.......#",
+"#.#####.#",
+"#.....#.#",
+"#####.#.#",
+"#H....#C#",
+"#.....#.#",
+"#.......#",
+"#########"],
+  dun: [
+"#########",
+"#...#...#",
+"#.###...#",
+"#.#...#K#",
+"#.#.#####",
+"#.#.....#",
+"#.#.###.#",
+"#...#.#D#",
+"#.###.#.#",
+"#.....#.#",
+"#########",
+"#########",
+"#########"] },
+{ name: "Deep Dark", waves: 5,
+  over: [
+"#########",
+"#....#..#",
+"#D...#..#",
+"#.##.#..#",
+"#....#..#",
+"#..#.#.##",
+"#..#.##.#",
+"#..###..#",
+"#....#..#",
+"#....#..#",
+"#....G.H#",
+"#....#C.#",
+"#########"],
+  dun: [
+"#########",
+"#K#.....#",
+"#.#.###.#",
+"#.#...#.#",
+"#.#.#.#.#",
+"#...#.#.#",
+"###.#.#.#",
+"#...#...#",
+"#.#.#####",
+"#.#....D#",
+"#########",
+"#########",
+"#########"] },
+{ name: "The Ninth Wave", waves: 6,
+  over: [
+"#########",
+"#.......#",
+"#D..#...#",
+"#...#.#.#",
+"#.###.#.#",
+"#.....#.#",
+"#.#####.#",
+"#.......#",
+"#..###..#",
+"#.......#",
+"#######G#",
+"#..H...C#",
+"#########"],
+  dun: [
+"#########",
+"#...#...#",
+"#.#.#.#.#",
+"#.#...#.#",
+"#.#.###.#",
+"#.#.....#",
+"#.#.###.#",
+"#...#.#.#",
+"###.#.#.#",
+"#K..#..D#",
+"#########",
+"#########",
+"#########"] },
+{ name: "The Royal Road", waves: 6,
+  over: [
+"#########",
+"#.D.....#",
+"#.......#",
+"###G#####",
+"#.......#",
+"#.#...#.#",
+"#.#.#.#.#",
+"#.......#",
+"#.###.#.#",
+"#.....#.#",
+"#..H..#C#",
+"#.....#.#",
+"#########"],
+  dun: [
+"#########",
+"#....#..#",
+"#.##.#.K#",
+"#.#..#..#",
+"#.#.###.#",
+"#.#.....#",
+"#.#.###.#",
+"#.......#",
+"###.#.###",
+"#D..#...#",
+"#########",
+"#########",
+"#########"] },
+{ name: "The Last Key", waves: 6,
+  over: [
+"#########",
+"#.#.....#",
+"#.#.###.#",
+"#.#...#.#",
+"#.#.#.#.#",
+"#.G.#.#.#",
+"#.#.#...#",
+"#.#.###.#",
+"#.#.....#",
+"#.#..##.#",
+"#D#..H#C#",
+"#.#.....#",
+"#########"],
+  dun: [
+"#########",
+"#...#..K#",
+"#.##..###",
+"#.#.....#",
+"#.#.###.#",
+"#...#...#",
+"###.#.#.#",
+"#.....#.#",
+"#.#.#.#.#",
+"#D#...#.#",
+"#########",
+"#########",
+"#########"] },
+{ name: "The Princess Gate", waves: 7,
+  over: [
+"#########",
+"#...D...#",
+"#.#...#.#",
+"#.#.#.#.#",
+"#...#...#",
+"#.###.###",
+"#.......#",
+"#..#.#..#",
+"####G####",
+"#.......#",
+"#.#.H.#.#",
+"#...C...#",
+"#########"],
+  dun: [
+"#########",
+"#D......#",
+"#######.#",
+"#.....#.#",
+"#.#.###.#",
+"#.#.....#",
+"#.#.#####",
+"#.#.....#",
+"#.#.###.#",
+"#...#K..#",
+"#########",
+"#########",
+"#########"] }
+];
+
+let state = "menu", area = "over", level = 0, hearts = 3, hasKey = false, gateOpen = false;
+let wave = 0, slimes = [], px = 0, py = 0, face = "down";
+let spawnQueue = 0, spawnTimer = 0;
+let slimePrev = null, slimePathTimer = 0;
+function computeSlimePrev() {
+  // BFS outward from the player's tile over non-solid tiles. The prev map
+  // lets each slime trace a real route to the player instead of drifting
+  // straight at him and wedging on walls. Cheap on a 9x13 grid.
+  const pc = clamp(Math.floor((px + 18) / TILE), 0, COLS - 1), pr = clamp(Math.floor((py + 18) / TILE), 0, ROWS - 1);
+  const key = (c, r) => c + "," + r;
+  const prev = new Map([[key(pc, pr), null]]);
+  const q = [[pc, pr]];
+  while (q.length) {
+    const [c, r] = q.shift();
+    for (const [dc, dr] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) {
+      const nc = c + dc, nr = r + dr, k = key(nc, nr);
+      if (nc < 0 || nr < 0 || nc >= COLS || nr >= ROWS || prev.has(k)) continue;
+      const ch = mapAt(area, nc, nr);
+      if (ch === "#" || (ch === "G" && !gateOpen)) continue;
+      prev.set(k, [c, r]); q.push([nc, nr]);
+    }
+  }
+  slimePrev = prev;
+}
+let swing = 0, invuln = 0, startTime = 0, elapsed = 0, pauseAt = 0, won = false;
+let best = parseInt(localStorage.getItem("tqBest12") || "0", 10);
 let chestOpen = false, heartTaken = false;
 
+function curMap(areaName) { return areaName === "over" ? LEVELS[level].over : LEVELS[level].dun; }
 function mapAt(areaName, c, r) {
-  const m = areaName === "over" ? OVERWORLD : DUNGEON;
+  const m = curMap(areaName);
   if (c < 0 || r < 0 || c >= COLS || r >= ROWS) return "#";
   return m[r][c];
 }
 function solid(c, r) { const ch = mapAt(area, c, r); return ch === "#" || (ch === "G" && !gateOpen); }
-function resetGame() {
-  area = "over"; hearts = 3; hasKey = false; gateOpen = false; wave = 0;
+function placeNear(areaName, ch) {
+  // put the player on a floor tile next to the named tile in that area
+  const m = curMap(areaName);
+  for (let r = 0; r < ROWS; r++) for (let c = 0; c < COLS; c++) {
+    if (m[r][c] !== ch) continue;
+    const near = [[1, 0], [-1, 0], [0, 1], [0, -1]];
+    for (const [dc, dr] of near) {
+      const nc = c + dc, nr = r + dr;
+      if (mapAt(areaName, nc, nr) === ".") { px = nc * TILE + 6; py = nr * TILE + 6; return; }
+    }
+  }
+}
+function loadLevel(n) {
+  level = n; area = "over"; hearts = 3; hasKey = false; gateOpen = false; wave = 0;
+  spawnQueue = 0; spawnTimer = 0;
   slimes = []; px = 1 * TILE + 6; py = 1 * TILE + 6; face = "down";
   swing = 0; invuln = 0; chestOpen = false; heartTaken = false; won = false;
+  spawnSlimes("over", 2);
+}
+function resetGame() {
   startTime = performance.now(); elapsed = 0;
-  spawnSlimes(area, 2);
+  loadLevel(0);
+}
+function startWave(n) {
+  const first = Math.min(3, n);
+  regionSpawn(first);
+  spawnQueue = n - first; spawnTimer = 0.7;
+}
+// the gauntlet region: the clearing's side of the gate. When a wave is
+// running, slimes on the far side of the gate stay frozen (the gate
+// grounds them) instead of trekking across the map or piling up.
+function gauntletRegion() {
+  const [gc, gr] = (() => { const m = curMap("over"); for (let r = 0; r < ROWS; r++) for (let c = 0; c < COLS; c++) if (m[r][c] === "G") return [c, r]; return null; })();
+  const [cc, cr] = (() => { const m = curMap("over"); for (let r = 0; r < ROWS; r++) for (let c = 0; c < COLS; c++) if (m[r][c] === "C") return [c, r]; return null; })();
+  if (!gc || !cc) return null;
+  if (cc > gc) return (c, r) => c >= gc;
+  if (cc < gc) return (c, r) => c <= gc;
+  if (cr > gr) return (c, r) => r >= gr;
+  return (c, r) => r <= gr;
+}
+function clearRegionSlimes() {
+  const inRegion = gauntletRegion();
+  if (!inRegion) return;
+  slimes = slimes.filter(s => inRegion(Math.floor((s.x + 18) / TILE), Math.floor((s.y + 18) / TILE)));
+}
+function regionSpawn(n) {
+  // spawn n slimes on floor tiles inside the gauntlet region only,
+  // never within 3 tiles of the player
+  const inRegion = gauntletRegion();
+  if (!inRegion) { spawnSlimes("over", n); return; }
+  const m = curMap("over");
+  const spots = [];
+  for (let r = 1; r < ROWS - 1; r++) for (let c = 1; c < COLS - 1; c++) {
+    if (m[r][c] !== ".") continue;
+    if (!inRegion(c, r)) continue;
+    const dx = Math.abs(c * TILE - px), dy = Math.abs(r * TILE - py);
+    if (dx < 3 * TILE && dy < 3 * TILE) continue;
+    spots.push([c, r]);
+  }
+  for (let i = 0; i < n && spots.length; i++) {
+    const s = spots.splice(Math.floor(Math.random() * spots.length), 1)[0];
+    slimes.push({ x: s[0] * TILE + 6, y: s[1] * TILE + 6, w: 36, h: 36, hp: 1, t: Math.random() * 6 });
+  }
+  if (spots.length === 0 && n > 0) spawnSlimes("over", 0); // region full: remainder stays queued via trickle callers
 }
 function spawnSlimes(a, n) {
   // never within 3 tiles of the player
   const spots = [];
-  const m = a === "over" ? OVERWORLD : DUNGEON;
+  const m = curMap(a);
   for (let r = 1; r < ROWS - 1; r++) for (let c = 1; c < COLS - 1; c++) {
     if (m[r][c] !== ".") continue;
     const dx = Math.abs(c * TILE - px), dy = Math.abs(r * TILE - py);
@@ -182,20 +607,46 @@ function update(dt) {
     const sx = px + (face === "left" ? -34 : face === "right" ? 36 : 0);
     const sy = py + (face === "up" ? -34 : face === "down" ? 36 : 0);
     for (const s of slimes) {
-      if (Math.abs(s.x - sx) < 46 && Math.abs(s.y - sy) < 46) { s.hp = 0; sfx("hit"); }
+      if (Math.abs(s.x - sx) < 56 && Math.abs(s.y - sy) < 56) { s.hp = 0; sfx("hit"); }
     }
     slimes = slimes.filter(s => s.hp > 0);
   }
-  // slime AI: drift toward player
+  // slime AI: hunt the player along a BFS path through open tiles (they
+  // used to drift straight at the player and wedge on walls forever,
+  // which made gauntlets on walled-off levels impossible to finish).
+  // Slimes only chase while in the same area of the map as the player —
+  // across a wall they can't see him, so they idle in place instead of
+  // piling onto the other side of the barrier (fair, and readable).
+  // Faster on later levels and waves, but always slower than the
+  // player (150) so a fair dodge always exists.
+  slimePathTimer -= dt;
+  if (slimePathTimer <= 0) { slimePathTimer = 0.25; computeSlimePrev(); }
   for (const s of slimes) {
     s.t += dt;
-    const dx = px - s.x, dy = py - s.y, d = Math.hypot(dx, dy) || 1;
-    const sp = 46 + wave * 6;
+    const sTileKey = Math.floor((s.x + 18) / TILE) + "," + Math.floor((s.y + 18) / TILE);
+    if (!slimePrev || !slimePrev.has(sTileKey)) {
+      // the player is not reachable from this slime's tile (a wall or a
+      // shut gate between them): idle here, but still dangerous to touch
+      if (invuln <= 0 && Math.abs(s.x - px) < 32 && Math.abs(s.y - py) < 32) {
+        hearts--; invuln = 1.2; sfx("hurt");
+        if (hearts <= 0) { state = "over"; return; }
+      }
+      continue;
+    }
+    let txp = px, typ = py;
+    if (slimePrev) {
+      // aim at the next tile on this slime's BFS route to the player
+      const sc = Math.floor((s.x + 18) / TILE), sr = Math.floor((s.y + 18) / TILE);
+      const nxt = slimePrev.get(sc + "," + sr);
+      if (nxt) { txp = nxt[0] * TILE + 6; typ = nxt[1] * TILE + 6; }
+    }
+    const dx = txp - s.x, dy = typ - s.y, d = Math.hypot(dx, dy) || 1;
+    const sp = Math.min(96, 44 + wave * 5 + level * 2);
     const nx2 = s.x + (dx / d) * sp * dt, ny2 = s.y + (dy / d) * sp * dt;
     const c = Math.floor((nx2 + 18) / TILE), r = Math.floor((ny2 + 18) / TILE);
     if (!solid(c, r)) { s.x = nx2; s.y = ny2; }
     if (invuln <= 0 && Math.abs(s.x - px) < 32 && Math.abs(s.y - py) < 32) {
-      hearts--; invuln = 0.9; sfx("hurt");
+      hearts--; invuln = 1.2; sfx("hurt");
       if (hearts <= 0) { state = "over"; return; }
     }
   }
@@ -203,13 +654,13 @@ function update(dt) {
   // tile interactions
   const c = Math.floor((px + 18) / TILE), r = Math.floor((py + 18) / TILE);
   const ch = mapAt(area, c, r);
-  if (area === "over" && ch === "D") { area = "dun"; px = 6 * TILE + 6; py = 9 * TILE + 6; slimes = []; spawnSlimes("dun", 2); sfx("pick"); }
-  else if (area === "dun" && ch === "D") { area = "over"; px = 2 * TILE + 6; py = 9 * TILE + 6; slimes = []; if (!gateOpen) spawnSlimes("over", 2); }
+  if (area === "over" && ch === "D") { area = "dun"; slimes = []; placeNear("dun", "D"); spawnSlimes("dun", 2); sfx("pick"); }
+  else if (area === "dun" && ch === "D") { area = "over"; placeNear("over", "D"); slimes = []; if (!gateOpen) spawnSlimes("over", 2); }
   else if (area === "dun" && ch === "K" && !chestOpen) { chestOpen = true; hasKey = true; sfx("pick"); }
   else if (area === "over" && ch === "G" && hasKey && !gateOpen) { gateOpen = true; sfx("pick"); }
   else if (area === "over" && ch === "H" && !heartTaken) { heartTaken = true; hearts = Math.min(3, hearts + 1); sfx("pick"); }
   else if (area === "over" && ch === "C" && gateOpen && wave === 0) {
-    wave = 1; slimes = []; spawnSlimes("over", 3); sfx("pick");
+    wave = 1; slimes = []; clearRegionSlimes(); startWave(3 + Math.floor(level / 4)); sfx("pick");
   }
   // The gate tile is solid while locked, so the player can never stand ON
   // it for the check above — bump-to-unlock: facing the gate with the key
@@ -219,26 +670,42 @@ function update(dt) {
     const fr = r + (face === "up" ? -1 : face === "down" ? 1 : 0);
     if (mapAt(area, fc, fr) === "G") { gateOpen = true; sfx("pick"); }
   }
-  // gauntlet waves
-  if (wave > 0 && slimes.length === 0) {
-    if (wave < 3) { wave++; spawnSlimes("over", 2 + wave); }
-    else {
+  // gauntlet waves arrive as a trickle, not a pile: the rest of the wave
+  // queues up and joins one at a time while fewer than 3 slimes are live,
+  // so the knight always faces a fight he can win by playing well
+  if (area === "over" && wave > 0 && spawnQueue > 0) {
+    spawnTimer -= dt;
+    if (spawnTimer <= 0 && slimes.length < 3) { regionSpawn(1); spawnQueue--; spawnTimer = 0.7; }
+  }
+  if (area === "over" && wave > 0 && slimes.length === 0 && spawnQueue === 0) {
+    const wavesTotal = LEVELS[level].waves;
+    if (wave < wavesTotal) { wave++; startWave(2 + wave + Math.floor(level / 4)); }
+    else if (level < LEVELS.length - 1) {
+      state = "clear"; pauseAt = performance.now(); sfx("win");
+    } else {
       won = true; state = "win"; sfx("win");
       const t = Math.floor(elapsed);
-      if (best === 0 || t < best) { best = t; localStorage.setItem("tqBest", String(t)); }
+      if (best === 0 || t < best) { best = t; localStorage.setItem("tqBest12", String(t)); }
     }
   }
 }
 
 const keys = { left: false, right: false, up: false, down: false, swing: false };
 const touch = { left: false, right: false, up: false, down: false, swing: false };
+function advance() {
+  // the one tap/Enter path for every non-play state
+  initAudio();
+  if (state === "menu") { startMusic(); resetGame(); state = "play"; }
+  else if (state === "clear") { startTime += performance.now() - pauseAt; loadLevel(level + 1); state = "play"; }
+  else if (state === "over" || state === "win") state = "menu";
+}
 window.addEventListener("keydown", e => {
   if (e.key === "ArrowLeft" || e.key === "a") keys.left = true;
   if (e.key === "ArrowRight" || e.key === "d") keys.right = true;
   if (e.key === "ArrowUp" || e.key === "w") keys.up = true;
   if (e.key === "ArrowDown" || e.key === "s") keys.down = true;
   if (e.key === " ") { keys.swing = true; e.preventDefault(); }
-  if (e.key === "Enter" && state !== "play") { initAudio(); startMusic(); resetGame(); state = "play"; }
+  if (e.key === "Enter" && state !== "play") advance();
 });
 window.addEventListener("keyup", e => {
   if (e.key === "ArrowLeft" || e.key === "a") keys.left = false;
@@ -255,74 +722,229 @@ function bindBtn(id, prop) {
   el.addEventListener("pointercancel", off); el.addEventListener("pointerleave", off);
 }
 bindBtn("btnU", "up"); bindBtn("btnD", "down"); bindBtn("btnL", "left"); bindBtn("btnR", "right"); bindBtn("btnS", "swing");
-canvas.addEventListener("pointerdown", () => {
-  initAudio();
-  if (state === "menu") { startMusic(); resetGame(); state = "play"; }
-  else if (state === "over" || state === "win") state = "menu";
-});
+canvas.addEventListener("pointerdown", () => { if (state !== "play") advance(); });
 
-function draw() {
-  ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
-  ctx.fillStyle = "#1d4a22"; ctx.fillRect(0, 0, W, H);
-  ctx.setTransform(scale, 0, 0, scale, ox, oy);
-  const m = area === "over" ? OVERWORLD : DUNGEON;
-  const offY = 44;
-  if (state === "menu") {
-    ctx.fillStyle = "#fff"; ctx.textAlign = "center";
-    ctx.font = "bold 42px system-ui"; ctx.fillText("🗡️ Tiny Quest", VW / 2, 130);
-    ctx.font = "20px system-ui"; ctx.fillText("Find the key in the cave,", VW / 2, 190);
-    ctx.fillText("open the gate, survive the gauntlet.", VW / 2, 220);
-    ctx.font = "18px system-ui"; ctx.fillText("Best time: " + (best ? best + "s" : "—"), VW / 2, 270);
-    ctx.fillText("D-pad to move • ⚔️ to swing • Arrows / Space", VW / 2, 320);
-    ctx.font = "bold 22px system-ui"; ctx.fillText("Tap to start", VW / 2, 420);
-    return;
+function drawKnightFig(x, y, s, facing, swingT) {
+  // A proper little knight, centred on (x, y): armoured body, helmet with
+  // plume, shield, and a sword that swings in an arc (swingT 0..1) when
+  // attacking, otherwise held at rest. facing: down/up/left/right.
+  ctx.save(); ctx.translate(x, y);
+  if (facing === "left") ctx.scale(-1, 1);
+  const side = facing === "left" || facing === "right";
+  ctx.fillStyle = "rgba(0,0,0,.28)"; ctx.beginPath(); ctx.ellipse(0, 17 * s, 13 * s, 4.5 * s, 0, 0, Math.PI * 2); ctx.fill(); // shadow
+  const bob = state === "play" ? Math.sin(performance.now() / 140) * 1.1 * s : 0;
+  ctx.translate(0, bob);
+  ctx.fillStyle = "#5a4632"; ctx.fillRect(-11 * s, 11 * s, 8 * s, 6 * s); ctx.fillRect(4 * s, 11 * s, 8 * s, 6 * s); // boots
+  ctx.fillStyle = "#8d99ae"; ctx.fillRect(-10 * s, 1 * s, 20 * s, 11 * s); // legs / skirt of armour
+  ctx.fillStyle = "#4361b8"; ctx.fillRect(-13 * s, -10 * s, 26 * s, 13 * s); // tabard body
+  ctx.fillStyle = "#e8b53a"; ctx.fillRect(-2.5 * s, -10 * s, 5 * s, 13 * s); // gold trim
+  ctx.fillStyle = "#aab6c8"; ctx.fillRect(-13 * s, -10 * s, 4 * s, 10 * s); ctx.fillRect(9 * s, -10 * s, 4 * s, 10 * s); // pauldrons
+  // shield on the left arm
+  ctx.fillStyle = "#c8433c"; ctx.beginPath();
+  ctx.moveTo(-19 * s, -8 * s); ctx.lineTo(-9 * s, -8 * s); ctx.lineTo(-9 * s, 2 * s);
+  ctx.quadraticCurveTo(-9 * s, 8 * s, -14 * s, 11 * s);
+  ctx.quadraticCurveTo(-19 * s, 8 * s, -19 * s, 2 * s); ctx.closePath(); ctx.fill();
+  ctx.fillStyle = "#f4f6f8"; ctx.fillRect(-15.5 * s, -5 * s, 3 * s, 10 * s); ctx.fillRect(-18 * s, -1.5 * s, 8 * s, 3 * s); // cross
+  // sword arm: rest pose or swing arc
+  ctx.save(); ctx.translate(13 * s, -6 * s);
+  if (swingT !== null && swingT !== undefined) {
+    const a = -2.2 + swingT * 2.6; ctx.rotate(a);
+  } else ctx.rotate(0.5);
+  ctx.fillStyle = "#c9a227"; ctx.fillRect(-2 * s, 0, 11 * s, 3.5 * s); // guard
+  ctx.fillStyle = "#eef2f6"; ctx.fillRect(1.5 * s, -2.2 * s, 4.5 * s, 26 * s); // blade
+  ctx.fillStyle = "#8d99ae"; ctx.fillRect(2.8 * s, -2.2 * s, 1.4 * s, 26 * s);
+  ctx.beginPath(); ctx.moveTo(1.5 * s, 23.8 * s); ctx.lineTo(6 * s, 23.8 * s); ctx.lineTo(3.7 * s, 29 * s); ctx.closePath(); ctx.fill(); // tip
+  ctx.restore();
+  // head + helmet
+  ctx.fillStyle = "#f2c894"; ctx.fillRect(-7 * s, -21 * s, 14 * s, 11 * s); // face
+  ctx.fillStyle = "#c7d0dc"; ctx.fillRect(-9 * s, -27 * s, 18 * s, 8 * s); // helm dome
+  ctx.fillRect(-9 * s, -19 * s, 18 * s, 3 * s);
+  ctx.fillStyle = "#d8443c"; ctx.beginPath(); ctx.ellipse(-2 * s, -29 * s, 8 * s, 3.4 * s, -0.35, 0, Math.PI * 2); ctx.fill(); // plume
+  if (facing !== "up") {
+    ctx.fillStyle = "#39424f"; ctx.fillRect(-9 * s, -17 * s, 18 * s, 3.5 * s); // visor slit
+    ctx.fillStyle = "#11161d";
+    if (side) ctx.fillRect(3 * s, -15.5 * s, 3 * s, 3 * s);
+    else { ctx.fillRect(-5.5 * s, -15.5 * s, 3 * s, 3 * s); ctx.fillRect(2.5 * s, -15.5 * s, 3 * s, 3 * s); }
   }
+  ctx.restore();
+}
+function drawPrincessFig(x, y, s) {
+  // the princess, centred on (x, y): pink gown, golden hair, crown
+  ctx.save(); ctx.translate(x, y);
+  ctx.fillStyle = "rgba(0,0,0,.25)"; ctx.beginPath(); ctx.ellipse(0, 19 * s, 13 * s, 4 * s, 0, 0, Math.PI * 2); ctx.fill();
+  ctx.fillStyle = "#e754a8"; ctx.beginPath(); // gown
+  ctx.moveTo(0, -6 * s); ctx.quadraticCurveTo(13 * s, 6 * s, 15 * s, 19 * s); ctx.lineTo(-15 * s, 19 * s);
+  ctx.quadraticCurveTo(-13 * s, 6 * s, 0, -6 * s); ctx.fill();
+  ctx.fillStyle = "#ff9ecf"; ctx.fillRect(-2 * s, -6 * s, 4 * s, 22 * s); // sash
+  ctx.fillStyle = "#d98a4a"; ctx.fillRect(-11 * s, -22 * s, 22 * s, 17 * s); // hair back
+  ctx.fillStyle = "#f2c894"; ctx.beginPath(); ctx.arc(0, -15 * s, 8 * s, 0, Math.PI * 2); ctx.fill(); // face
+  ctx.fillStyle = "#d98a4a"; ctx.fillRect(-8 * s, -23 * s, 16 * s, 5 * s); // fringe
+  ctx.fillStyle = "#11161d"; ctx.fillRect(-4.5 * s, -16 * s, 2.6 * s, 2.6 * s); ctx.fillRect(2 * s, -16 * s, 2.6 * s, 2.6 * s); // eyes
+  ctx.fillStyle = "#ffd94d"; // crown
+  ctx.fillRect(-6 * s, -27 * s, 12 * s, 4 * s);
+  ctx.beginPath(); ctx.moveTo(-6 * s, -27 * s); ctx.lineTo(-6 * s, -31 * s); ctx.lineTo(-3 * s, -27 * s); ctx.lineTo(-0.5 * s, -31.5 * s); ctx.lineTo(2 * s, -27 * s); ctx.lineTo(5 * s, -31 * s); ctx.lineTo(6 * s, -27 * s); ctx.closePath(); ctx.fill();
+  ctx.fillStyle = "#e23b8a"; ctx.beginPath(); ctx.arc(0, -28.5 * s, 1.8 * s, 0, Math.PI * 2); ctx.fill(); // jewel
+  ctx.restore();
+}
+function tileHash(c, r, salt) { let h = (c * 73 + r * 149 + salt * 31) % 97; return h / 97; }
+function drawTiles(th, m, offY) {
   for (let r = 0; r < ROWS; r++) for (let c = 0; c < COLS; c++) {
     const ch = m[r][c], x = c * TILE, y = offY + r * TILE;
-    if (area === "over") ctx.fillStyle = ch === "#" ? "#2f6b34" : "#57a85c";
-    else ctx.fillStyle = ch === "#" ? "#3a3348" : "#574a6e";
+    const isWall = ch === "#";
+    ctx.fillStyle = isWall ? (area === "over" ? th.wall : th.caveWall) : (area === "over" ? th.floor[(c + r) % 2] : th.caveFloor[(c + r) % 2]);
     ctx.fillRect(x, y, TILE, TILE);
-    if (ch === "#") { ctx.fillStyle = area === "over" ? "#1d4a22" : "#241f33"; ctx.fillRect(x + 4, y + 4, TILE - 8, TILE - 8); }
-    if (ch === "D") { ctx.fillStyle = "#6b4a2a"; ctx.fillRect(x + 6, y + 6, TILE - 12, TILE - 12); ctx.fillStyle = "#000"; ctx.fillRect(x + 16, y + 20, 16, 20); }
-    if (ch === "G" && !gateOpen) { ctx.fillStyle = "#c9a227"; ctx.fillRect(x + 4, y + 4, TILE - 8, TILE - 8); ctx.fillStyle = "#7a5c00"; ctx.font = "bold 22px system-ui"; ctx.textAlign = "center"; ctx.fillText("🔒", x + 24, y + 32); }
-    if (ch === "K" && !chestOpen) { ctx.fillStyle = "#c98f2e"; ctx.fillRect(x + 8, y + 14, 32, 22); ctx.fillStyle = "#7a5510"; ctx.fillRect(x + 8, y + 14, 32, 6); }
-    if (ch === "H" && !heartTaken) { ctx.fillStyle = "#e23b3b"; ctx.font = "26px system-ui"; ctx.textAlign = "center"; ctx.fillText("❤️", x + 24, y + 32); }
-    if (ch === "C") { ctx.fillStyle = "rgba(255,217,59,.25)"; ctx.fillRect(x, y, TILE, TILE); }
-  }
-  for (const s of slimes) {
-    ctx.fillStyle = "#39d353";
-    ctx.beginPath(); ctx.arc(s.x + 18, s.y + 18 + Math.sin(s.t * 6) * 2, 17, 0, Math.PI * 2); ctx.fill();
-    ctx.fillStyle = "#fff"; ctx.fillRect(s.x + 10, s.y + 12, 7, 7); ctx.fillRect(s.x + 24, s.y + 12, 7, 7);
-    ctx.fillStyle = "#000"; ctx.fillRect(s.x + 13, s.y + 15, 3, 3); ctx.fillRect(s.x + 27, s.y + 15, 3, 3);
-  }
-  // player (blink while invulnerable)
-  if (!(invuln > 0 && Math.floor(invuln * 10) % 2 === 0)) {
-    const y = offY + py;
-    ctx.fillStyle = "#2f7de1"; ctx.fillRect(px, y, 36, 36);
-    ctx.fillStyle = "#f2c894"; ctx.fillRect(px + 8, y + 6, 20, 16);
-    ctx.fillStyle = "#000"; ctx.fillRect(px + 12, y + 11, 4, 4); ctx.fillRect(px + 22, y + 11, 4, 4);
-    if (swing > 0) {
-      ctx.fillStyle = "#e8e8e8";
-      if (face === "left") ctx.fillRect(px - 30, y + 8, 28, 6);
-      if (face === "right") ctx.fillRect(px + 36, y + 8, 28, 6);
-      if (face === "up") ctx.fillRect(px + 15, y - 30, 6, 28);
-      if (face === "down") ctx.fillRect(px + 15, y + 36, 6, 28);
+    const h1 = tileHash(c, r, level * 7 + (area === "dun" ? 3 : 0));
+    if (!isWall) {
+      // floor texture: speckles outdoors, stone seams in the cave
+      ctx.fillStyle = "rgba(0,0,0,.10)";
+      if (area === "over") { ctx.fillRect(x + 6 + h1 * 30, y + 8 + h1 * 24, 5, 3); ctx.fillRect(x + 26 - h1 * 14, y + 34, 4, 3); }
+      else { ctx.fillRect(x, y + 46, TILE, 2); if ((c + r) % 2 === 0) ctx.fillRect(x + 22, y, 2, 46); }
+      // scenery on some plain floor tiles (never on special tiles)
+      if (ch === "." && h1 < 0.30) {
+        ctx.font = "19px system-ui"; ctx.textAlign = "center";
+        ctx.fillText(th.decor[Math.floor(h1 * 97) % th.decor.length], x + 24, y + 33);
+      }
+    } else {
+      // wall block with a shaded inset face
+      ctx.fillStyle = area === "over" ? th.wallIn : th.caveIn;
+      ctx.fillRect(x + 5, y + 7, TILE - 10, TILE - 10);
+      ctx.fillStyle = "rgba(255,255,255,.14)"; ctx.fillRect(x + 5, y + 7, TILE - 10, 4);
+      ctx.fillStyle = "rgba(0,0,0,.18)"; ctx.fillRect(x + 5, y + TILE - 11, TILE - 10, 4);
     }
+    if (ch === "D") {
+      // arched cave mouth / doorway with steps
+      ctx.fillStyle = "#4a3220"; ctx.fillRect(x + 5, y + 4, TILE - 10, TILE - 8);
+      ctx.fillStyle = "#120d08"; ctx.beginPath();
+      ctx.moveTo(x + 13, y + 44); ctx.lineTo(x + 13, y + 22); ctx.quadraticCurveTo(x + 24, y + 6, x + 35, y + 22); ctx.lineTo(x + 35, y + 44); ctx.closePath(); ctx.fill();
+      ctx.fillStyle = "#8a6a45"; ctx.fillRect(x + 8, y + 42, TILE - 16, 4);
+      ctx.fillStyle = "#ffd94d"; ctx.font = "11px system-ui"; ctx.textAlign = "center"; ctx.fillText("▼", x + 24, y + 16);
+    }
+    if (ch === "G") {
+      if (!gateOpen) {
+        // golden barred gate with a big padlock
+        ctx.fillStyle = "#8a6d1f"; ctx.fillRect(x + 3, y + 3, TILE - 6, TILE - 6);
+        ctx.fillStyle = "#c9a227"; ctx.fillRect(x + 6, y + 6, TILE - 12, TILE - 12);
+        ctx.fillStyle = "#5e4a12";
+        for (let b = 0; b < 4; b++) ctx.fillRect(x + 11 + b * 9, y + 6, 3.5, TILE - 12);
+        ctx.fillStyle = "#7a5c00"; ctx.fillRect(x + 6, y + 22, TILE - 12, 5);
+        ctx.fillStyle = "#5e4a12"; ctx.beginPath(); ctx.arc(x + 24, y + 20, 6.5, Math.PI, 0); ctx.lineWidth = 3.5; ctx.strokeStyle = "#5e4a12"; ctx.stroke();
+        ctx.fillStyle = "#ffd94d"; ctx.fillRect(x + 16, y + 19, 16, 13);
+        ctx.fillStyle = "#5e4a12"; ctx.beginPath(); ctx.arc(x + 24, y + 24, 2.6, 0, Math.PI * 2); ctx.fill(); ctx.fillRect(x + 22.8, y + 24, 2.4, 5);
+      } else {
+        // open gate: bars swung aside, golden threshold
+        ctx.fillStyle = "rgba(255,217,77,.35)"; ctx.fillRect(x, y, TILE, TILE);
+        ctx.fillStyle = "#c9a227"; ctx.fillRect(x + 2, y + 4, 5, TILE - 8); ctx.fillRect(x + TILE - 7, y + 4, 5, TILE - 8);
+      }
+    }
+    if (ch === "K") {
+      // treasure chest: closed with the key, open and glowing once taken
+      ctx.fillStyle = "rgba(0,0,0,.22)"; ctx.beginPath(); ctx.ellipse(x + 24, y + 38, 15, 4, 0, 0, Math.PI * 2); ctx.fill();
+      ctx.fillStyle = "#8a5a22"; ctx.fillRect(x + 8, y + 20, 32, 15);
+      ctx.fillStyle = "#a8742f"; ctx.beginPath(); ctx.arc(x + 24, y + 20, 16, Math.PI, 0); ctx.fill();
+      ctx.fillStyle = "#5e3d12"; ctx.fillRect(x + 8, y + 26, 32, 3);
+      ctx.fillStyle = "#ffd94d"; ctx.fillRect(x + 20, y + 22, 8, 9);
+      if (!chestOpen) { ctx.font = "17px system-ui"; ctx.textAlign = "center"; ctx.fillText("🗝️", x + 24, y + 15 + Math.sin(performance.now() / 300) * 2); }
+      else { ctx.fillStyle = "rgba(255,217,77,.55)"; ctx.beginPath(); ctx.arc(x + 24, y + 20, 9, 0, Math.PI * 2); ctx.fill(); ctx.fillStyle = "#ffe98a"; ctx.beginPath(); ctx.arc(x + 24, y + 20, 5, 0, Math.PI * 2); ctx.fill(); }
+    }
+    if (ch === "H" && !heartTaken) {
+      const pu = 1 + Math.sin(performance.now() / 280) * 0.12;
+      ctx.fillStyle = "rgba(255,90,110,.20)"; ctx.beginPath(); ctx.arc(x + 24, y + 24, 16 * pu, 0, Math.PI * 2); ctx.fill();
+      ctx.font = (24 * pu) + "px system-ui"; ctx.textAlign = "center"; ctx.fillText("❤️", x + 24, y + 33);
+    }
+    if (ch === "C") {
+      const pu = 0.16 + 0.07 * Math.sin(performance.now() / 350);
+      ctx.fillStyle = "rgba(255,217,59," + pu + ")"; ctx.fillRect(x, y, TILE, TILE);
+      ctx.strokeStyle = "rgba(255,217,59,.75)"; ctx.lineWidth = 2.5; ctx.strokeRect(x + 3, y + 3, TILE - 6, TILE - 6);
+      ctx.font = "15px system-ui"; ctx.textAlign = "center"; ctx.fillText("⚔️", x + 24, y + 30);
+    }
+  }
+}
+function drawSlimeFig(s, th, offY) {
+  const cx = s.x + 18, baseY = s.y + 36 + offY;
+  const sq = Math.sin(s.t * 7) * 2.2; // squash & stretch while hopping
+  ctx.fillStyle = "rgba(0,0,0,.22)"; ctx.beginPath(); ctx.ellipse(cx, s.y + 35 + offY, 14, 4, 0, 0, Math.PI * 2); ctx.fill();
+  ctx.fillStyle = th.slime;
+  ctx.beginPath();
+  ctx.moveTo(cx - 16, baseY);
+  ctx.quadraticCurveTo(cx - 17, s.y + 12 + offY - sq, cx - 7, s.y + 7 + offY - sq);
+  ctx.quadraticCurveTo(cx, s.y + 2 + offY - sq, cx + 7, s.y + 7 + offY - sq);
+  ctx.quadraticCurveTo(cx + 17, s.y + 12 + offY - sq, cx + 16, baseY);
+  ctx.closePath(); ctx.fill();
+  ctx.fillStyle = th.slimeDark; ctx.fillRect(cx - 16, baseY - 5, 32, 5); // foot band
+  ctx.fillStyle = "rgba(255,255,255,.45)"; ctx.beginPath(); ctx.ellipse(cx - 6, s.y + 12 + offY - sq, 5, 3.4, -0.5, 0, Math.PI * 2); ctx.fill(); // shine
+  ctx.fillStyle = "#fff"; ctx.beginPath(); ctx.arc(cx - 6, s.y + 17 + offY - sq * 0.5, 4.6, 0, Math.PI * 2); ctx.arc(cx + 7, s.y + 17 + offY - sq * 0.5, 4.6, 0, Math.PI * 2); ctx.fill();
+  ctx.fillStyle = "#14210f"; ctx.beginPath(); ctx.arc(cx - 6, s.y + 18 + offY - sq * 0.5, 2.4, 0, Math.PI * 2); ctx.arc(cx + 7, s.y + 18 + offY - sq * 0.5, 2.4, 0, Math.PI * 2); ctx.fill();
+  ctx.fillStyle = "#14210f"; ctx.fillRect(cx - 2, s.y + 25 + offY - sq * 0.4, 6, 2.2); // mouth
+}
+function draw() {
+  const th = THEMES[level];
+  ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+  ctx.fillStyle = "#14251a"; ctx.fillRect(0, 0, W, H);
+  ctx.setTransform(scale, 0, 0, scale, ox, oy);
+  const m = curMap(area);
+  const offY = 44;
+  if (state === "menu") {
+    ctx.fillStyle = th.floor[0]; ctx.fillRect(0, 0, VW, VH);
+    ctx.fillStyle = "rgba(20,40,24,.88)"; ctx.fillRect(0, 90, VW, 400);
+    drawKnightFig(VW / 2 - 78, 428, 1.5, "down", null);
+    drawPrincessFig(VW / 2 + 78, 424, 1.5);
+    ctx.fillStyle = "#fff"; ctx.textAlign = "center";
+    ctx.font = "bold 42px system-ui"; ctx.fillText("🗡️ Tiny Quest", VW / 2, 150);
+    ctx.font = "20px system-ui";
+    ctx.fillText("The Princess is trapped beyond", VW / 2, 205);
+    ctx.fillText("the twelfth gate! You are the Knight —", VW / 2, 235);
+    ctx.fillText("find each key, open each gate,", VW / 2, 265);
+    ctx.fillText("and survive every gauntlet.", VW / 2, 295);
+    ctx.font = "18px system-ui"; ctx.fillText("Best full run: " + (best ? best + "s" : "—"), VW / 2, 340);
+    ctx.fillText("D-pad to move • ⚔️ to swing • Arrows / Space", VW / 2, 378);
+    ctx.font = "bold 22px system-ui"; ctx.fillText("Tap to start", VW / 2, 470);
+    return;
+  }
+  drawTiles(th, m, offY);
+  for (const s of slimes) drawSlimeFig(s, th, offY);
+
+  // player knight (blink while invulnerable)
+  if (!(invuln > 0 && Math.floor(invuln * 10) % 2 === 0)) {
+    drawKnightFig(px + 18, offY + py + 18, 1, face, swing > 0 ? 1 - swing / 0.28 : null);
   }
   ctx.fillStyle = "rgba(10,30,15,.7)"; ctx.fillRect(0, 0, VW, 44);
   ctx.fillStyle = "#fff"; ctx.font = "bold 18px system-ui"; ctx.textAlign = "left";
-  ctx.fillText(area === "over" ? "🌿 Field" : "🕳️ Cave", 12, 28);
+  ctx.fillText("Lv" + (level + 1) + " " + LEVELS[level].name + (area === "over" ? " 🌿" : " 🕳️"), 12, 28);
   ctx.textAlign = "center";
-  ctx.fillText("❤️".repeat(hearts) + "  " + (hasKey ? "🔑" : "") + (wave > 0 ? "  Wave " + wave + "/3" : ""), VW / 2, 28);
+  ctx.fillText("❤️".repeat(hearts) + "  " + (hasKey ? "🔑" : "") + (wave > 0 ? "  Wave " + wave + "/" + LEVELS[level].waves : ""), VW / 2, 28);
   ctx.textAlign = "right"; ctx.fillText(Math.floor(elapsed) + "s", VW - 12, 28);
-  if (state === "over" || state === "win") {
+  if (state === "clear" || state === "over") {
     ctx.fillStyle = "rgba(0,0,0,.6)"; ctx.fillRect(0, 0, VW, VH);
     ctx.fillStyle = "#fff"; ctx.textAlign = "center";
-    ctx.font = "bold 38px system-ui";
-    ctx.fillText(state === "win" ? "🏆 Quest complete!" : "You fell…", VW / 2, VH / 2 - 20);
+    ctx.font = "bold 36px system-ui";
+    if (state === "clear") {
+      ctx.fillText("⭐ Level " + (level + 1) + " complete!", VW / 2, VH / 2 - 30);
+      ctx.font = "20px system-ui";
+      ctx.fillText("Next: Level " + (level + 2) + " — " + LEVELS[level + 1].name, VW / 2, VH / 2 + 10);
+      ctx.fillText("Tap to continue", VW / 2, VH / 2 + 50);
+    } else {
+      ctx.fillText("You fell…", VW / 2, VH / 2 - 20);
+      ctx.font = "20px system-ui";
+      ctx.fillText("The Princess still waits. Tap to try again", VW / 2, VH / 2 + 20);
+    }
+  }
+  if (state === "win") {
+    // ——— Congratulations: the Knight rescues the Princess ———
+    ctx.fillStyle = "#274b73"; ctx.fillRect(0, 0, VW, VH);
+    ctx.fillStyle = "#fff"; ctx.textAlign = "center";
+    ctx.font = "bold 40px system-ui"; ctx.fillText("🏰", VW / 2, 84);
+    ctx.font = "bold 34px system-ui"; ctx.fillText("🎉 Congratulations! 🎉", VW / 2, 140);
+    ctx.font = "21px system-ui";
+    ctx.fillText("You are the brave Knight who fought", VW / 2, 196);
+    ctx.fillText("through all 12 levels, defeated the", VW / 2, 226);
+    ctx.fillText("slime gauntlets, and rescued", VW / 2, 256);
+    ctx.font = "bold 24px system-ui"; ctx.fillText("the Princess! 👸", VW / 2, 296);
+    drawKnightFig(VW / 2 - 52, 382, 1.6, "down", null);
+    drawPrincessFig(VW / 2 + 52, 378, 1.6);
+    ctx.font = "30px system-ui"; ctx.fillText("❤️", VW / 2, 356 + Math.sin(performance.now() / 300) * 5);
     ctx.font = "20px system-ui";
-    ctx.fillText(state === "win" ? "Time: " + Math.floor(elapsed) + "s  •  Best: " + best + "s" : "Tap to try again", VW / 2, VH / 2 + 20);
-    if (state === "win") ctx.fillText("Tap to return to menu", VW / 2, VH / 2 + 60);
+    ctx.fillText("Time: " + Math.floor(elapsed) + "s  •  Best: " + best + "s", VW / 2, 500);
+    ctx.font = "18px system-ui"; ctx.fillText("Tap to return to menu", VW / 2, 545);
   }
 }
 let last = performance.now();
@@ -331,18 +953,29 @@ function loop(now) {
   update(dt); draw();
   requestAnimationFrame(loop);
 }
-resetGame(); state = "menu";
+loadLevel(0); state = "menu";
 requestAnimationFrame(loop);
 
 // ---------- QA hooks ----------
 window.__qa = {
   state: () => state,
   area: () => area,
+  level: () => level + 1,
+  levels: () => LEVELS.length,
+  levelName: () => LEVELS[level].name,
+  wavesTotal: () => LEVELS[level].waves,
   hasKey: () => hasKey,
   gateOpen: () => gateOpen,
   wave: () => wave,
+  hearts: () => hearts,
+  slimes: () => slimes.length,
+  slimePos: () => slimes.map(s => ({ x: s.x, y: s.y })),
+  levelData: () => LEVELS[level],
   pos: () => ({ x: px, y: py, c: Math.floor((px + 18) / TILE), r: Math.floor((py + 18) / TILE) }),
-  setPos: (c, r) => { px = c * TILE + 6; py = r * TILE + 6; slimes = []; }
+  startLevel: (n) => { startTime = performance.now(); elapsed = 0; loadLevel(n - 1); state = "play"; },
+  setPos: (c, r) => { px = c * TILE + 6; py = r * TILE + 6; slimes = []; },
+  tp: (c, r) => { px = c * TILE + 6; py = r * TILE + 6; },
+  tpPx: (x, y) => { px = x; py = y; }
 };
 </script>
 </body>
