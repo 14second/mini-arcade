@@ -46,8 +46,19 @@ document.addEventListener('pointerdown', iosPlaybackSession, true);
 // (or the sound) running while the app is in the background.
 document.addEventListener("visibilitychange", function () {
   try {
-    if (document.hidden) { if (window.__maCtx && window.__maCtx.suspend) window.__maCtx.suspend(); }
-    else if (window.__maCtx && window.__maCtx.state === "suspended" && window.__maCtx.resume) window.__maCtx.resume();
+    var c = window.__maCtx;
+    if (document.hidden) {
+      window.__maHidden = true;
+      if (c) {
+        if (c.close) { try { var p = c.close(); if (p && p.catch) p.catch(function () {}); } catch (e) {} }
+        if (c.suspend && c.state === "running") { try { c.suspend(); } catch (e) {} }
+        window.__maCtx = null;
+      }
+    } else {
+      window.__maHidden = false;
+      var ac = c || (window.__maActx && window.__maActx());
+      if (ac && ac.state === "suspended" && ac.resume) { try { ac.resume(); } catch (e) {} }
+    }
   } catch (e) {}
 });
 
@@ -140,7 +151,7 @@ function initAudio() {
   try {
     var Ctor = window.AudioContext || window.webkitAudioContext;
     if (!Ctor) return;
-    AC = new Ctor(); window.__maCtx = AC;;
+    AC = new Ctor(); window.__maCtx = AC; window.__maActx = function () { return AC; };;
   } catch (e) { AC = null; }
 }
 function midiFreq(m) { return 440 * Math.pow(2, (m - 69) / 12); }
