@@ -176,6 +176,7 @@ function trySpawn(lane){
 let AC=null, muted=false, audioReady=false;
 function ensureAudio(){
   iosPlaybackSession();
+  if(audioReady && AC && AC.state==='closed'){ AC=null; audioReady=false; if(musicTimer){ clearInterval(musicTimer); musicTimer=null; } }
   if(audioReady) return;
   try{
     AC=new (window.AudioContext||window.webkitAudioContext)(); window.__maCtx = AC; window.__maActx = function () { return AC; };;

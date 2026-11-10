@@ -110,7 +110,7 @@ const muteBtn = document.getElementById("muteBtn");
 
 function initAudio() {
   iosPlaybackSession();
-  if (!actx) {
+  if (!actx || actx.state === "closed") {
     try {
       const AC = window.AudioContext || window.webkitAudioContext;
       if (AC) actx = new AC(); window.__maCtx = actx; window.__maActx = function () { return actx; };;

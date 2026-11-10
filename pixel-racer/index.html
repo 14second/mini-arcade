@@ -147,6 +147,7 @@ var engineOsc = null, engineGain = null;
 
 function initAudio() {
   iosPlaybackSession();
+  if (AC && AC.state === 'closed') AC = null;
   if (AC) { if (AC.state === 'suspended') { try { AC.resume(); } catch (e) {} } return; }
   try {
     var Ctor = window.AudioContext || window.webkitAudioContext;

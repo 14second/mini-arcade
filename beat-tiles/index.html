@@ -125,7 +125,7 @@ var muted = false;
 
 function ensureAudio() {
   iosPlaybackSession();
-  if (!AC) {
+  if (!AC || AC.state === "closed") {
     try {
       var Ctor = window.AudioContext || window.webkitAudioContext;
       if (Ctor) {

@@ -160,7 +160,7 @@ function beep(freq, dur, type, vol, slide) {
   if (muted) return;
   try {
     iosPlaybackSession();
-    AC = AC || new (window.AudioContext || window.webkitAudioContext)(); window.__maCtx = AC; window.__maActx = function () { return AC; };
+    if (AC && AC.state === "closed") AC = null; AC = AC || new (window.AudioContext || window.webkitAudioContext)(); window.__maCtx = AC; window.__maActx = function () { return AC; };
     if (AC.state === "suspended") AC.resume();
     const o = AC.createOscillator(), g = AC.createGain();
     o.type = type || "sine"; o.frequency.setValueAtTime(freq, AC.currentTime);

@@ -82,7 +82,7 @@ window.addEventListener("resize", resize); resize();
 let actx = null, muted = false, musicTimer = null, mStep = 0;
 function initAudio() {
   iosPlaybackSession();
-  if (!actx) { try { const AC = window.AudioContext || window.webkitAudioContext; if (AC) actx = new AC(); window.__maCtx = actx; window.__maActx = function () { return actx; };; } catch (e) {} }
+  if (!actx || actx.state === "closed") { try { const AC = window.AudioContext || window.webkitAudioContext; if (AC) actx = new AC(); window.__maCtx = actx; window.__maActx = function () { return actx; };; } catch (e) {} }
   if (actx && actx.state === "suspended") actx.resume();
   if (actx && !musicTimer) musicTimer = setInterval(musicTick, 205);
 }

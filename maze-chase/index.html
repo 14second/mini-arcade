@@ -261,6 +261,7 @@ let musicStep = 0;
 
 function ensureAudio() {
   iosPlaybackSession();
+  if (actx && actx.state === 'closed') actx = null;
   if (actx) {
     if (actx.state === 'suspended') actx.resume();
     return;
