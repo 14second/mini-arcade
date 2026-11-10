@@ -40,12 +40,23 @@ function iosPlaybackSession() {
   try { if ('audioSession' in navigator) navigator.audioSession.type = 'playback'; } catch (e) {}
 }
 document.addEventListener('pointerdown', iosPlaybackSession, true);
+// Sleep in the background (2026-11-09): the wrapper's pauseTimers stops
+// JS timers, but the Web Audio graph is a separate engine — suspend the
+// audio context whenever the page is hidden so nothing keeps the CPU
+// (or the sound) running while the app is in the background.
+document.addEventListener("visibilitychange", function () {
+  try {
+    if (document.hidden) { if (window.__maCtx && window.__maCtx.suspend) window.__maCtx.suspend(); }
+    else if (window.__maCtx && window.__maCtx.state === "suspended" && window.__maCtx.resume) window.__maCtx.resume();
+  } catch (e) {}
+});
+
 document.addEventListener('touchstart', iosPlaybackSession, true);
 let AC = null;
 function beep(freq, dur, type, vol, slide) {
   try {
     iosPlaybackSession();
-    AC = AC || new (window.AudioContext || window.webkitAudioContext)();
+    AC = AC || new (window.AudioContext || window.webkitAudioContext)(); window.__maCtx = AC;
     if (AC.state === 'suspended') AC.resume();
     const o = AC.createOscillator(), g = AC.createGain();
     o.type = type || 'sine'; o.frequency.setValueAtTime(freq, AC.currentTime);

@@ -47,6 +47,17 @@ function iosPlaybackSession() {
   try { if ('audioSession' in navigator) navigator.audioSession.type = 'playback'; } catch (e) {}
 }
 document.addEventListener('pointerdown', iosPlaybackSession, true);
+// Sleep in the background (2026-11-09): the wrapper's pauseTimers stops
+// JS timers, but the Web Audio graph is a separate engine — suspend the
+// audio context whenever the page is hidden so nothing keeps the CPU
+// (or the sound) running while the app is in the background.
+document.addEventListener("visibilitychange", function () {
+  try {
+    if (document.hidden) { if (window.__maCtx && window.__maCtx.suspend) window.__maCtx.suspend(); }
+    else if (window.__maCtx && window.__maCtx.state === "suspended" && window.__maCtx.resume) window.__maCtx.resume();
+  } catch (e) {}
+});
+
 document.addEventListener('touchstart', iosPlaybackSession, true);
 "use strict";
 /* TITLE BOUT — original pattern-boxing game. Watch the tell, dodge or duck,
@@ -71,7 +82,7 @@ window.addEventListener("resize", resize); resize();
 let actx = null, muted = false, musicTimer = null, mStep = 0;
 function initAudio() {
   iosPlaybackSession();
-  if (!actx) { try { const AC = window.AudioContext || window.webkitAudioContext; if (AC) actx = new AC(); } catch (e) {} }
+  if (!actx) { try { const AC = window.AudioContext || window.webkitAudioContext; if (AC) actx = new AC(); window.__maCtx = actx;; } catch (e) {} }
   if (actx && actx.state === "suspended") actx.resume();
   if (actx && !musicTimer) musicTimer = setInterval(musicTick, 190);
 }
