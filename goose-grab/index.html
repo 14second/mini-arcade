@@ -45,6 +45,7 @@
      and <b>throw her into the other pen</b>. First to 5 — or best score when the 2:00 clock runs out.</p>
   <p>Careful: hold her past 3 seconds and she wriggles free, get tackled and you drop her —
      and sometimes she flaps mid-throw… right back toward <i>your</i> pen. Own goals count. For them.</p>
+  <p><b>Defense:</b> hop into her flight path to snatch her mid-air!</p>
   <p><b>Touch:</b> tap / drag your half to hop · while carrying, a quick tap throws her at their pen — tap left or right to pick the spot.<br>
      <b>Keys:</b> WASD + SPACE (blue) · Arrows + ENTER (red).</p>
   <button class="mbtn" id="btn1p">1 PLAYER — vs CPU</button>
@@ -174,6 +175,8 @@ var TOP_PEN = { x0: PEN_X0, x1: PEN_X1, y0: 0, y1: PEN_H };           /* P2 defe
 var BOT_PEN = { x0: PEN_X0, x1: PEN_X1, y0: H - PEN_H, y1: H };       /* P1 defends, P2 scores here */
 var HOP_SPEED = 240;        /* px/s, both scarecrows */
 var GRAB_R = 34;            /* catch distance, both */
+var INTERCEPT_R = 34;       /* mid-air snatch distance while she flies, both */
+var REGRAB_GRACE = 0.5;     /* s after a throw before the thrower may catch her again */
 var TACKLE_R = 30;          /* tackle distance, both */
 var THROW_RANGE = 500;      /* max throw distance, both. Spawn->far pen centre = 493 <= 500: reachable */
 var WRIGGLE_T = 3.0;        /* seconds held before she wriggles free */
@@ -199,7 +202,8 @@ var score = [0, 0];
 var goose = { x: GOOSE_SPAWN.x, y: GOOSE_SPAWN.y, state: "loose", /* loose|carried|flying */
               vx: 0, vy: 0, wanderA: Math.random() * 6.28, wanderT: 0,
               carrier: null, heldT: 0, grabCd: 0, fx: 0, fy: 0, tx: 0, ty: 0, flyT: 0,
-              flap: false, flapped: false, thrower: null, stunT: 0 };
+              flap: false, flapped: false, thrower: null, throwT: 0, stunT: 0 };
+var calloutMsg = "", calloutT = 0, interceptCount = 0;
 var cpu = { thinkT: 0, dest: null, throwAt: null };
 var debugForceFlap = false;
 
@@ -208,6 +212,7 @@ function resetPositions() {
   P2.x = P2.sx; P2.y = P2.sy; P2.dest = null; P2.stun = 0;
   goose.x = GOOSE_SPAWN.x; goose.y = GOOSE_SPAWN.y; goose.state = "loose";
   goose.carrier = null; goose.heldT = 0; goose.grabCd = 0; goose.vx = 0; goose.vy = 0; goose.stunT = 0;
+  goose.thrower = null; goose.throwT = 0; goose.flap = false; goose.flapped = false;
   cpu.dest = null; cpu.throwAt = null;
 }
 function startMatch(m) {
@@ -257,7 +262,7 @@ function throwGoose(pl, tx, ty) {
   if (d > THROW_RANGE) { tx = pl.x + dx / d * THROW_RANGE; ty = pl.y + dy / d * THROW_RANGE; }
   goose.state = "flying"; goose.fx = pl.x; goose.fy = pl.y - 14;
   goose.tx = tx; goose.ty = ty; goose.flyT = 0;
-  goose.carrier = null; goose.heldT = 0; goose.thrower = pl;
+  goose.carrier = null; goose.heldT = 0; goose.thrower = pl; goose.throwT = 0;
   goose.flap = debugForceFlap || Math.random() < FLAP_CHANCE;
   debugForceFlap = false; goose.flapped = false;
   tone(300, 620, 0.14, "triangle", 0.16, 0);
@@ -413,6 +418,7 @@ function updatePlayer(pl, dt) {
 }
 function update(dt) {
   readKeys();
+  if (calloutT > 0) calloutT -= dt;
   if (phase === "celebrate") {
     celebT -= dt;
     if (celebT <= 0 && phase === "celebrate") { resetPositions(); phase = "play"; }
@@ -437,6 +443,25 @@ function update(dt) {
     if (goose.heldT >= WRIGGLE_T) { honk(); dropGoose(goose.carrier, true); }
   } else if (goose.state === "flying") {
     goose.flyT += dt / 0.55;
+    goose.throwT += dt;
+    var ft = Math.min(1, goose.flyT);
+    goose.x = goose.fx + (goose.tx - goose.fx) * ft;
+    goose.y = goose.fy + (goose.ty - goose.fy) * ft;
+    /* mid-air interception: a non-thrower whose body overlaps her flight path snatches her.
+       The thrower is locked out for REGRAB_GRACE so a throw can't be instantly re-grabbed. */
+    var snatchers = [P1, P2];
+    for (var si = 0; si < 2 && goose.state === "flying"; si++) {
+      var spl = snatchers[si];
+      if (spl.stun > 0) continue;
+      if (spl === goose.thrower && goose.throwT < REGRAB_GRACE) continue;
+      if (Math.hypot(spl.x - goose.x, spl.y - goose.y) <= INTERCEPT_R) {
+        goose.state = "carried"; goose.carrier = spl; goose.heldT = 0;
+        goose.thrower = null; goose.flap = false; goose.flapped = false;
+        calloutMsg = "INTERCEPTED!"; calloutT = 1.0; interceptCount++;
+        whistle(); honk();
+        puff(goose.x, goose.y, 8, "#ffffff");
+      }
+    }
     if (goose.flap && !goose.flapped && goose.flyT >= 0.5) {
       goose.flapped = true; honk();
       var th = goose.thrower;
@@ -445,7 +470,7 @@ function update(dt) {
       goose.tx = Math.max(10, Math.min(W - 10, goose.tx));
       goose.ty = Math.max(10, Math.min(H - 10, goose.ty));
     }
-    if (goose.flyT >= 1) {
+    if (goose.state === "flying" && goose.flyT >= 1) {
       goose.x = goose.tx; goose.y = goose.ty;
       var inTop = goose.x >= TOP_PEN.x0 + 4 && goose.x <= TOP_PEN.x1 - 4 && goose.y <= TOP_PEN.y1;
       var inBot = goose.x >= BOT_PEN.x0 + 4 && goose.x <= BOT_PEN.x1 - 4 && goose.y >= BOT_PEN.y0;
@@ -587,6 +612,11 @@ function draw() {
     ctx.fillStyle = "#ffe9a8"; ctx.font = "bold 25px system-ui"; ctx.textAlign = "center";
     ctx.fillText(celebMsg, W / 2, H / 2 - 8);
   }
+  if (calloutT > 0 && phase === "play") {
+    ctx.fillStyle = "rgba(0,0,0,.5)"; ctx.fillRect(0, 118, W, 54);
+    ctx.fillStyle = "#ffe9a8"; ctx.font = "bold 27px system-ui"; ctx.textAlign = "center";
+    ctx.fillText(calloutMsg, W / 2, 154);
+  }
   if (phase === "title") {
     ctx.fillStyle = "rgba(0,0,0,.25)"; ctx.fillRect(0, 0, W, H);
   }
@@ -632,8 +662,11 @@ window.__gg = {
   clock: function () { return clock; },
   p1: function () { return { x: P1.x, y: P1.y, hopping: P1.hopping, stun: P1.stun }; },
   p2: function () { return { x: P2.x, y: P2.y, hopping: P2.hopping, stun: P2.stun }; },
-  goose: function () { return { x: goose.x, y: goose.y, state: goose.state, heldT: goose.heldT, carrier: goose.carrier === P1 ? 1 : goose.carrier === P2 ? 2 : 0, flapped: goose.flapped }; },
-  consts: { HOP_SPEED: HOP_SPEED, THROW_RANGE: THROW_RANGE, GRAB_R: GRAB_R, TACKLE_R: TACKLE_R,
+  goose: function () { return { x: goose.x, y: goose.y, state: goose.state, heldT: goose.heldT, carrier: goose.carrier === P1 ? 1 : goose.carrier === P2 ? 2 : 0, flapped: goose.flapped,
+              thrower: goose.thrower === P1 ? 1 : goose.thrower === P2 ? 2 : 0, throwT: goose.throwT }; },
+  callout: function () { return calloutT > 0 ? calloutMsg : ""; },
+  intercepts: function () { return interceptCount; },
+  consts: { HOP_SPEED: HOP_SPEED, THROW_RANGE: THROW_RANGE, GRAB_R: GRAB_R, INTERCEPT_R: INTERCEPT_R, REGRAB_GRACE: REGRAB_GRACE, TACKLE_R: TACKLE_R,
             PEN_W: PEN_W, PEN_H: PEN_H, SPAWN1: SPAWN1, SPAWN2: SPAWN2, GOOSE_SPAWN: GOOSE_SPAWN, CENTER: { x: W / 2, y: H / 2 } },
   forceFlapNext: function () { debugForceFlap = true; },
   geom: function () { return { W: W, H: H, scale: scale, ox: ox, oy: oy, dpr: DPR }; }
