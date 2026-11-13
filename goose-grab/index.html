@@ -1,0 +1,644 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+<title>Goose Grab — Mini Arcade</title>
+<style>
+  :root { color-scheme: dark; }
+  html, body { margin:0; padding:0; height:100%; overflow:hidden; background:#1c2b14; }
+  body { font-family: system-ui, -apple-system, sans-serif; color:#fff; -webkit-user-select:none; user-select:none; }
+  canvas { position:fixed; inset:0; display:block; touch-action:none; }
+  .overlay {
+    position:fixed; inset:0; display:none;
+    align-items:center; justify-content:center; flex-direction:column;
+    background:rgba(16,26,10,.82); text-align:center; padding:24px; z-index:5;
+  }
+  .overlay h1 { margin:0 0 6px; font-size:40px; letter-spacing:.5px; }
+  .overlay h2 { margin:0 0 10px; font-size:30px; }
+  .overlay p { margin:4px 0; color:#d8e6c3; font-size:15px; line-height:1.45; max-width:430px; }
+  .overlay .goose { font-size:64px; line-height:1; margin-bottom:2px; }
+  .mbtn {
+    display:block; margin:10px auto 0; padding:15px 34px; font-size:19px; font-weight:700;
+    border:none; border-radius:14px; cursor:pointer; color:#fff; min-width:250px;
+  }
+  #btn1p { background:#2f6fd0; }
+  #btn2p { background:#d0453a; }
+  #btnAgain { background:#3f9e4d; }
+  #btnMenu { background:#5a6b4a; }
+  .mbtn:active { filter:brightness(1.25); }
+  #muteBtn {
+    position:fixed; top:10px; right:10px; z-index:9; display:block;
+    width:46px; height:46px; border-radius:50%; border:1px solid #4a5d3a;
+    background:rgba(20,32,14,.85); color:#fff; font-size:21px; cursor:pointer; padding:0;
+  }
+  #bestLine { color:#ffe9a8; font-size:14px; min-height:18px; }
+</style>
+</head>
+<body>
+<canvas id="cv"></canvas>
+
+<div class="overlay" id="titleScr">
+  <div class="goose">🪿</div>
+  <h1>Goose Grab</h1>
+  <p>Two scarecrows, one goose, zero dignity. Hop to her, grab her,
+     and <b>throw her into the other pen</b>. First to 5 — or best score when the 2:00 clock runs out.</p>
+  <p>Careful: hold her past 3 seconds and she wriggles free, get tackled and you drop her —
+     and sometimes she flaps mid-throw… right back toward <i>your</i> pen. Own goals count. For them.</p>
+  <p><b>Touch:</b> tap / drag your half to hop · while carrying, a quick tap throws her at their pen — tap left or right to pick the spot.<br>
+     <b>Keys:</b> WASD + SPACE (blue) · Arrows + ENTER (red).</p>
+  <button class="mbtn" id="btn1p">1 PLAYER — vs CPU</button>
+  <button class="mbtn" id="btn2p">2 PLAYERS — one phone</button>
+  <p id="bestLine"></p>
+</div>
+
+<div class="overlay" id="winScr">
+  <div class="goose">🏆</div>
+  <h2 id="winText">Blue wins!</h2>
+  <p id="winSub"></p>
+  <button class="mbtn" id="btnAgain">PLAY AGAIN</button>
+  <button class="mbtn" id="btnMenu">CHANGE MODE</button>
+</div>
+
+<button id="muteBtn" aria-label="Mute">🔊</button>
+
+<script>
+"use strict";
+/* ================= storage (guarded from the first line) ================= */
+function safeGet(k) { try { return window.localStorage.getItem(k); } catch (e) { return null; } }
+function safeSet(k, v) { try { window.localStorage.setItem(k, v); } catch (e) {} }
+var bestMargin = parseInt(safeGet("gooseGrabBest") || "0", 10) || 0;
+var muted = safeGet("gooseGrabMute") === "1";
+
+/* ================= iOS audio routing: first gesture ================= */
+function audioRoute() { try { if ("audioSession" in navigator) navigator.audioSession.type = "playback"; } catch (e) {} }
+document.addEventListener("pointerdown", function () { audioRoute(); ensureAudio(); }, true);
+document.addEventListener("touchstart", function () { audioRoute(); ensureAudio(); }, true);
+
+/* ================= audio (all synthesized) ================= */
+var actx = null, masterGain = null, musicTimer = null, musicStep = 0, nextNoteTime = 0;
+function ensureAudio() {
+  audioRoute();
+  if (actx && actx.state === "closed") { actx = null; window.__maCtx = null; }
+  if (!actx) {
+    try {
+      var AC = window.AudioContext || window.webkitAudioContext;
+      if (!AC) return;
+      actx = new AC();
+      window.__maCtx = actx;
+      masterGain = actx.createGain();
+      masterGain.gain.value = muted ? 0 : 0.55;
+      masterGain.connect(actx.destination);
+    } catch (e) { actx = null; }
+  }
+  if (actx && actx.state === "suspended") { try { actx.resume(); } catch (e) {} }
+}
+function tone(freqA, freqB, dur, type, vol, delay) {
+  if (!actx || actx.state === "closed") return;
+  try {
+    var t0 = actx.currentTime + (delay || 0);
+    var o = actx.createOscillator(), g = actx.createGain();
+    o.type = type || "triangle";
+    o.frequency.setValueAtTime(freqA, t0);
+    if (freqB) o.frequency.exponentialRampToValueAtTime(Math.max(40, freqB), t0 + dur);
+    g.gain.setValueAtTime(0.0001, t0);
+    g.gain.exponentialRampToValueAtTime(vol || 0.3, t0 + 0.015);
+    g.gain.exponentialRampToValueAtTime(0.0001, t0 + dur);
+    o.connect(g); g.connect(masterGain);
+    o.start(t0); o.stop(t0 + dur + 0.05);
+  } catch (e) {}
+}
+function honk() { tone(490, 250, 0.16, "sawtooth", 0.22, 0); tone(440, 220, 0.2, "sawtooth", 0.2, 0.13); }
+function boing() { tone(230, 430, 0.09, "triangle", 0.12, 0); }
+function whistle() {
+  if (!actx || actx.state === "closed") return;
+  try {
+    var t0 = actx.currentTime, o = actx.createOscillator(), g = actx.createGain(), lfo = actx.createOscillator(), lg = actx.createGain();
+    o.type = "square"; o.frequency.value = 2093;
+    lfo.frequency.value = 28; lg.gain.value = 130; lfo.connect(lg); lg.connect(o.frequency);
+    g.gain.setValueAtTime(0.0001, t0);
+    g.gain.exponentialRampToValueAtTime(0.07, t0 + 0.03);
+    g.gain.setValueAtTime(0.07, t0 + 0.34);
+    g.gain.exponentialRampToValueAtTime(0.0001, t0 + 0.46);
+    o.connect(g); g.connect(masterGain); o.start(t0); o.stop(t0 + 0.5); lfo.start(t0); lfo.stop(t0 + 0.5);
+  } catch (e) {}
+}
+function jingle() { var n = [523.3, 659.3, 784, 1046.5]; for (var i = 0; i < n.length; i++) tone(n[i], 0, 0.16, "triangle", 0.22, i * 0.09); }
+function crowd() {
+  if (!actx || actx.state === "closed") return;
+  try {
+    var len = Math.floor(actx.sampleRate * 0.4), buf = actx.createBuffer(1, len, actx.sampleRate), d = buf.getChannelData(0);
+    for (var i = 0; i < len; i++) d[i] = (Math.random() * 2 - 1) * (1 - i / len);
+    var src = actx.createBufferSource(); src.buffer = buf;
+    var f = actx.createBiquadFilter(); f.type = "bandpass"; f.frequency.value = 820; f.Q.value = 0.7;
+    var g = actx.createGain(); g.gain.value = 0.16;
+    src.connect(f); f.connect(g); g.connect(masterGain); src.start();
+  } catch (e) {}
+}
+/* light farm-y loop: melody + bass, every fundamental >= 130 Hz */
+var MEL = [261.6, 329.6, 392, 329.6, 293.7, 329.6, 392, 523.3, 440, 392, 329.6, 293.7, 261.6, 293.7, 329.6, 261.6];
+var BAS = [130.8, 196, 146.8, 196];
+function musicTick() {
+  if (!actx || actx.state !== "running") return;
+  var eighth = 60 / 132 / 2;
+  while (nextNoteTime < actx.currentTime + 0.3) {
+    var delay = Math.max(0, nextNoteTime - actx.currentTime);
+    tone(MEL[musicStep % MEL.length], 0, eighth * 0.92, "triangle", 0.11, delay);
+    if (musicStep % 4 === 0) tone(BAS[(musicStep / 4) % BAS.length], 0, eighth * 3.4, "triangle", 0.13, delay);
+    musicStep++; nextNoteTime += eighth;
+  }
+}
+function startMusic() {
+  ensureAudio();
+  if (!actx || musicTimer) return;
+  musicStep = 0; nextNoteTime = actx.currentTime + 0.06;
+  musicTimer = setInterval(musicTick, 120);
+}
+function stopMusic() { if (musicTimer) { clearInterval(musicTimer); musicTimer = null; } }
+
+/* close the AudioContext on hide (round-3 rule); recreate on next tap */
+document.addEventListener("visibilitychange", function () {
+  if (document.hidden) {
+    stopMusic();
+    var c = window.__maCtx;
+    if (c && c.state !== "closed") { try { c.close(); } catch (e) {} }
+    if (actx === c) actx = null;
+    window.__maCtx = null;
+  }
+});
+/* ================= field & fairness constants (identical both sides) ================= */
+var W = 400, H = 640;
+var PEN_W = 240, PEN_H = 54;
+var PEN_X0 = (W - PEN_W) / 2, PEN_X1 = PEN_X0 + PEN_W;      /* 80 .. 320 */
+var TOP_PEN = { x0: PEN_X0, x1: PEN_X1, y0: 0, y1: PEN_H };           /* P2 defends, P1 scores here */
+var BOT_PEN = { x0: PEN_X0, x1: PEN_X1, y0: H - PEN_H, y1: H };       /* P1 defends, P2 scores here */
+var HOP_SPEED = 240;        /* px/s, both scarecrows */
+var GRAB_R = 34;            /* catch distance, both */
+var TACKLE_R = 30;          /* tackle distance, both */
+var THROW_RANGE = 500;      /* max throw distance, both. Spawn->far pen centre = 493 <= 500: reachable */
+var WRIGGLE_T = 3.0;        /* seconds held before she wriggles free */
+var FLAP_CHANCE = 0.20;     /* thrown goose veers back */
+var WIN_SCORE = 5, MATCH_T = 120;
+var SPAWN1 = { x: 200, y: 520 }, SPAWN2 = { x: 200, y: 120 }, GOOSE_SPAWN = { x: 200, y: 320 };
+
+/* ================= state ================= */
+var cv = document.getElementById("cv"), ctx = cv.getContext("2d");
+var DPR = 1, scale = 1, ox = 0, oy = 0, cssW = 0, cssH = 0;
+var phase = "title"; /* title | play | celebrate | win */
+var mode = 1;        /* 1 = vs CPU, 2 = two players */
+var clock = MATCH_T, celebT = 0, celebMsg = "", lastTs = 0;
+var particles = [];
+
+function makePlayer(spawn, color, name) {
+  return { x: spawn.x, y: spawn.y, sx: spawn.x, sy: spawn.y, dest: null, hopDist: 0, hopping: false,
+           boingCd: 0, stun: 0, color: color, name: name, keys: { x: 0, y: 0 } };
+}
+var P1 = makePlayer(SPAWN1, "#2f6fd0", "Blue");
+var P2 = makePlayer(SPAWN2, "#d0453a", "Red");
+var score = [0, 0];
+var goose = { x: GOOSE_SPAWN.x, y: GOOSE_SPAWN.y, state: "loose", /* loose|carried|flying */
+              vx: 0, vy: 0, wanderA: Math.random() * 6.28, wanderT: 0,
+              carrier: null, heldT: 0, grabCd: 0, fx: 0, fy: 0, tx: 0, ty: 0, flyT: 0,
+              flap: false, flapped: false, thrower: null, stunT: 0 };
+var cpu = { thinkT: 0, dest: null, throwAt: null };
+var debugForceFlap = false;
+
+function resetPositions() {
+  P1.x = P1.sx; P1.y = P1.sy; P1.dest = null; P1.stun = 0;
+  P2.x = P2.sx; P2.y = P2.sy; P2.dest = null; P2.stun = 0;
+  goose.x = GOOSE_SPAWN.x; goose.y = GOOSE_SPAWN.y; goose.state = "loose";
+  goose.carrier = null; goose.heldT = 0; goose.grabCd = 0; goose.vx = 0; goose.vy = 0; goose.stunT = 0;
+  cpu.dest = null; cpu.throwAt = null;
+}
+function startMatch(m) {
+  mode = m; score = [0, 0]; clock = MATCH_T; particles = [];
+  resetPositions();
+  phase = "play";
+  document.getElementById("titleScr").style.display = "none";
+  document.getElementById("winScr").style.display = "none";
+  ensureAudio(); startMusic();
+}
+function endMatch(winner) { /* winner: 0 = P1, 1 = P2, -1 = draw */
+  phase = "win"; stopMusic(); whistle(); jingle();
+  var wt = document.getElementById("winText"), ws = document.getElementById("winSub");
+  if (winner < 0) { wt.textContent = "Draw at the fair!"; }
+  else { wt.textContent = (winner === 0 ? P1.name : P2.name) + " wins the goose!"; }
+  ws.textContent = "Final score — Blue " + score[0] + " · " + score[1] + " Red" +
+    (mode === 1 ? (winner === 0 ? "  ·  You beat the CPU!" : winner === 1 ? "  ·  The CPU takes this one." : "") : "");
+  var margin = Math.abs(score[0] - score[1]);
+  if (winner >= 0 && margin > bestMargin) {
+    bestMargin = margin; safeSet("gooseGrabBest", String(bestMargin));
+  }
+  document.getElementById("winScr").style.display = "flex";
+}
+
+/* ================= input ================= */
+function resize() {
+  DPR = Math.min(3, window.devicePixelRatio || 1);
+  cssW = window.innerWidth; cssH = window.innerHeight;
+  cv.width = Math.round(cssW * DPR); cv.height = Math.round(cssH * DPR);
+  cv.style.width = cssW + "px"; cv.style.height = cssH + "px";
+  scale = Math.min(cssW / W, cssH / H);
+  ox = (cssW - W * scale) / 2; oy = (cssH - H * scale) / 2;
+}
+window.addEventListener("resize", resize); resize();
+
+function toGame(cx, cy) {
+  var r = cv.getBoundingClientRect();
+  return { x: ((cx - r.left) * DPR - DPR * ox) / (DPR * scale),
+           y: ((cy - r.top) * DPR - DPR * oy) / (DPR * scale) };
+}
+var pressInfo = {}; /* pointerId -> {player, x, y, t, moved} */
+function playerForPoint(p) { return p.y < H / 2 ? P2 : P1; }
+function humanControlled(pl) { return pl === P1 || mode === 2; }
+
+function throwGoose(pl, tx, ty) {
+  var dx = tx - pl.x, dy = ty - pl.y, d = Math.hypot(dx, dy);
+  if (d > THROW_RANGE) { tx = pl.x + dx / d * THROW_RANGE; ty = pl.y + dy / d * THROW_RANGE; }
+  goose.state = "flying"; goose.fx = pl.x; goose.fy = pl.y - 14;
+  goose.tx = tx; goose.ty = ty; goose.flyT = 0;
+  goose.carrier = null; goose.heldT = 0; goose.thrower = pl;
+  goose.flap = debugForceFlap || Math.random() < FLAP_CHANCE;
+  debugForceFlap = false; goose.flapped = false;
+  tone(300, 620, 0.14, "triangle", 0.16, 0);
+}
+function tapDown(pl, p) {
+  if (phase !== "play" || !humanControlled(pl) || pl.stun > 0) return;
+  if (goose.state === "carried" && goose.carrier === pl) return; /* throw resolved on quick tap-up */
+  pl.dest = { x: Math.max(14, Math.min(W - 14, p.x)), y: Math.max(14, Math.min(H - 14, p.y)) };
+}
+function tapMove(pl, p) {
+  if (phase !== "play" || !humanControlled(pl) || pl.stun > 0) return;
+  pl.dest = { x: Math.max(14, Math.min(W - 14, p.x)), y: Math.max(14, Math.min(H - 14, p.y)) };
+}
+function tapUp(pl, p, quick, moved) {
+  if (phase !== "play" || !humanControlled(pl) || pl.stun > 0) return;
+  if (goose.state === "carried" && goose.carrier === pl && quick && !moved) {
+    /* throw toward the opponent's pen; the tap's x across your half picks the spot across their pen */
+    var pen = pl === P1 ? TOP_PEN : BOT_PEN;
+    var aimX = pen.x0 + Math.max(0, Math.min(1, p.x / W)) * (pen.x1 - pen.x0);
+    throwGoose(pl, aimX, (pen.y0 + pen.y1) / 2);
+  }
+}
+cv.addEventListener("pointerdown", function (e) {
+  e.preventDefault(); ensureAudio();
+  var p = toGame(e.clientX, e.clientY);
+  var pl = playerForPoint(p);
+  pressInfo[e.pointerId] = { player: pl, x: p.x, y: p.y, t: performance.now(), moved: false };
+  tapDown(pl, p);
+});
+cv.addEventListener("pointermove", function (e) {
+  var info = pressInfo[e.pointerId]; if (!info) return;
+  var p = toGame(e.clientX, e.clientY);
+  if (Math.hypot(p.x - info.x, p.y - info.y) > 12) info.moved = true;
+  tapMove(info.player, p);
+});
+function endPress(e) {
+  var info = pressInfo[e.pointerId]; if (!info) return;
+  delete pressInfo[e.pointerId];
+  var p = toGame(e.clientX, e.clientY);
+  tapUp(info.player, { x: info.x, y: info.y }, performance.now() - info.t < 350, info.moved);
+}
+cv.addEventListener("pointerup", endPress);
+cv.addEventListener("pointercancel", endPress);
+
+var keyMap = {};
+var KEYSETS = [
+  { up: "KeyW", down: "KeyS", left: "KeyA", right: "KeyD", throwK: "Space" },
+  { up: "ArrowUp", down: "ArrowDown", left: "ArrowLeft", right: "ArrowRight", throwK: "Enter" }
+];
+function keyPlayer(idx) { return idx === 0 ? P1 : P2; }
+document.addEventListener("keydown", function (e) {
+  if (["ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight", "Space"].indexOf(e.code) >= 0) e.preventDefault();
+  ensureAudio();
+  keyMap[e.code] = true;
+  for (var i = 0; i < 2; i++) {
+    if (e.code === KEYSETS[i].throwK) {
+      var pl = keyPlayer(i);
+      if (phase === "play" && humanControlled(pl) && goose.state === "carried" && goose.carrier === pl && pl.stun <= 0) {
+        var pen = pl === P1 ? TOP_PEN : BOT_PEN;
+        var aimX = (pen.x0 + pen.x1) / 2 + pl.keys.x * 60;
+        throwGoose(pl, aimX, (pen.y0 + pen.y1) / 2);
+      }
+    }
+  }
+});
+document.addEventListener("keyup", function (e) { keyMap[e.code] = false; });
+function readKeys() {
+  for (var i = 0; i < 2; i++) {
+    var pl = keyPlayer(i), ks = KEYSETS[i];
+    pl.keys.x = (keyMap[ks.right] ? 1 : 0) - (keyMap[ks.left] ? 1 : 0);
+    pl.keys.y = (keyMap[ks.down] ? 1 : 0) - (keyMap[ks.up] ? 1 : 0);
+  }
+}
+
+/* ================= CPU (identical stats, simple brain) ================= */
+function cpuThink(dt) {
+  cpu.thinkT -= dt;
+  var me = P2, foe = P1;
+  if (cpu.thinkT > 0) {
+    if (cpu.throwAt) { throwGoose(me, cpu.throwAt.x, cpu.throwAt.y); cpu.throwAt = null; }
+    return;
+  }
+  cpu.thinkT = 0.22;
+  cpu.dest = null; cpu.throwAt = null;
+  if (goose.state === "carried" && goose.carrier === me) {
+    var penC = { x: (BOT_PEN.x0 + BOT_PEN.x1) / 2, y: (BOT_PEN.y0 + BOT_PEN.y1) / 2 };
+    var dPen = Math.hypot(penC.x - me.x, penC.y - me.y);
+    if (dPen < 400 || goose.heldT > 2.1) {
+      cpu.throwAt = { x: penC.x + (Math.random() * 52 - 26), y: penC.y };
+    } else {
+      cpu.dest = { x: penC.x, y: H - 210 };
+    }
+  } else if (goose.state === "carried" && goose.carrier === foe) {
+    cpu.dest = { x: foe.x, y: foe.y }; /* go tackle */
+  } else if (goose.state === "loose") {
+    cpu.dest = { x: goose.x, y: goose.y }; /* fetch the goose */
+  } else {
+    cpu.dest = { x: 200, y: 170 }; /* flying: drift home */
+  }
+  if (cpu.dest) me.dest = { x: cpu.dest.x, y: cpu.dest.y };
+}
+
+/* ================= particles ================= */
+function puff(x, y, n, col) {
+  for (var i = 0; i < n; i++) {
+    var a = Math.random() * 6.28, s = 30 + Math.random() * 80;
+    particles.push({ x: x, y: y, vx: Math.cos(a) * s, vy: Math.sin(a) * s - 20, t: 0, life: 0.5 + Math.random() * 0.3, col: col });
+  }
+}
+
+/* ================= update ================= */
+function dropGoose(pl, burst) {
+  goose.state = "loose"; goose.carrier = null; goose.heldT = 0; goose.grabCd = 0.7;
+  goose.x = pl.x; goose.y = pl.y + (pl === P1 ? -20 : 20);
+  if (burst) { /* wriggle escape: hop away from the carrier */
+    var a = (pl === P1 ? -1 : 1) * (0.6 + Math.random() * 0.8) + (Math.random() - 0.5);
+    goose.vx = Math.sin(a) * 240; goose.vy = (pl === P1 ? -1 : 1) * Math.cos(a) * 200;
+    goose.stunT = 0.001; /* marks burst mode; wander resumes when speed decays */
+  }
+  puff(pl.x, pl.y - 10, 10, "#e8d98a");
+}
+function scoreGoal(penIsTop, thrower) {
+  var scorer = penIsTop ? 0 : 1; /* landing in top pen scores for P1 */
+  score[scorer]++;
+  var own = (thrower === (penIsTop ? P2 : P1));
+  celebMsg = own ? "OWN GOAL! " + (scorer === 0 ? "Blue" : "Red") + " gets the point!"
+                 : "GOAL! " + (scorer === 0 ? "Blue" : "Red") + " scores!";
+  whistle(); crowd(); jingle();
+  puff(goose.x, goose.y, 22, "#fff3b0");
+  phase = "celebrate"; celebT = 1.6;
+  if (score[scorer] >= WIN_SCORE) { endMatch(scorer); }
+}
+function updatePlayer(pl, dt) {
+  if (pl.stun > 0) pl.stun -= dt;
+  if (pl.boingCd > 0) pl.boingCd -= dt;
+  var mx = 0, my = 0;
+  if (pl.keys.x || pl.keys.y) { mx = pl.keys.x; my = pl.keys.y; pl.dest = null; }
+  else if (pl.dest) {
+    var dx = pl.dest.x - pl.x, dy = pl.dest.y - pl.y, d = Math.hypot(dx, dy);
+    if (d < 6) { pl.dest = null; }
+    else { mx = dx / d; my = dy / d; }
+  }
+  var mag = Math.hypot(mx, my);
+  pl.hopping = mag > 0 && pl.stun <= 0;
+  if (pl.hopping) {
+    var step = HOP_SPEED * dt;
+    pl.x += mx / (mag || 1) * step; pl.y += my / (mag || 1) * step;
+    pl.x = Math.max(14, Math.min(W - 14, pl.x));
+    pl.y = Math.max(14, Math.min(H - 14, pl.y));
+    pl.hopDist += step;
+    if (pl.boingCd <= 0) { boing(); pl.boingCd = 0.34; }
+  }
+}
+function update(dt) {
+  readKeys();
+  if (phase === "celebrate") {
+    celebT -= dt;
+    if (celebT <= 0 && phase === "celebrate") { resetPositions(); phase = "play"; }
+  }
+  if (phase !== "play" && phase !== "celebrate") { updateParticles(dt); return; }
+  if (phase === "play") {
+    clock -= dt;
+    if (clock <= 0) {
+      clock = 0;
+      endMatch(score[0] === score[1] ? -1 : (score[0] > score[1] ? 0 : 1));
+      updateParticles(dt); return;
+    }
+  }
+  if (mode === 1 && phase === "play") cpuThink(dt);
+  if (phase === "play") { updatePlayer(P1, dt); updatePlayer(P2, dt); }
+
+  /* goose */
+  if (goose.grabCd > 0) goose.grabCd -= dt;
+  if (goose.state === "carried") {
+    goose.heldT += dt;
+    goose.x = goose.carrier.x; goose.y = goose.carrier.y - 26;
+    if (goose.heldT >= WRIGGLE_T) { honk(); dropGoose(goose.carrier, true); }
+  } else if (goose.state === "flying") {
+    goose.flyT += dt / 0.55;
+    if (goose.flap && !goose.flapped && goose.flyT >= 0.5) {
+      goose.flapped = true; honk();
+      var th = goose.thrower;
+      goose.tx = th.x + (goose.tx - th.x) * -0.55;
+      goose.ty = th.y + (goose.ty - th.y) * -0.55;
+      goose.tx = Math.max(10, Math.min(W - 10, goose.tx));
+      goose.ty = Math.max(10, Math.min(H - 10, goose.ty));
+    }
+    if (goose.flyT >= 1) {
+      goose.x = goose.tx; goose.y = goose.ty;
+      var inTop = goose.x >= TOP_PEN.x0 + 4 && goose.x <= TOP_PEN.x1 - 4 && goose.y <= TOP_PEN.y1;
+      var inBot = goose.x >= BOT_PEN.x0 + 4 && goose.x <= BOT_PEN.x1 - 4 && goose.y >= BOT_PEN.y0;
+      goose.state = "loose"; goose.grabCd = 0.35; goose.stunT = 0.4;
+      if (inTop) scoreGoal(true, goose.thrower);
+      else if (inBot) scoreGoal(false, goose.thrower);
+      else puff(goose.x, goose.y, 6, "#ffffff");
+    }
+  } else { /* loose */
+    if (goose.stunT > 0) goose.stunT -= dt;
+    var sp = Math.hypot(goose.vx, goose.vy);
+    if (sp > 60) { /* wriggle burst, decaying */
+      goose.x += goose.vx * dt; goose.y += goose.vy * dt;
+      goose.vx *= Math.pow(0.12, dt); goose.vy *= Math.pow(0.12, dt);
+    } else {
+      goose.wanderT -= dt;
+      if (goose.wanderT <= 0) { goose.wanderT = 1 + Math.random(); goose.wanderA += (Math.random() - 0.5) * 1.8; }
+      var txv = Math.cos(goose.wanderA) * 55, tyv = Math.sin(goose.wanderA) * 55;
+      goose.x += txv * dt; goose.y += tyv * dt;
+    }
+    if (goose.x < 26) { goose.x = 26; goose.wanderA = Math.PI - goose.wanderA; goose.vx = Math.abs(goose.vx); }
+    if (goose.x > W - 26) { goose.x = W - 26; goose.wanderA = Math.PI - goose.wanderA; goose.vx = -Math.abs(goose.vx); }
+    if (goose.y < PEN_H + 40) { goose.y = PEN_H + 40; goose.wanderA = -goose.wanderA; goose.vy = Math.abs(goose.vy); }
+    if (goose.y > H - PEN_H - 40) { goose.y = H - PEN_H - 40; goose.wanderA = -goose.wanderA; goose.vy = -Math.abs(goose.vy); }
+  }
+
+  /* grabs & tackles */
+  if (phase === "play" && goose.state === "loose" && goose.grabCd <= 0 && goose.stunT <= 0) {
+    var d1 = Math.hypot(P1.x - goose.x, P1.y - goose.y), d2 = Math.hypot(P2.x - goose.x, P2.y - goose.y);
+    if (d1 <= GRAB_R && P1.stun <= 0 && (d2 > GRAB_R || d1 <= d2)) { goose.state = "carried"; goose.carrier = P1; goose.heldT = 0; honk(); }
+    else if (d2 <= GRAB_R && P2.stun <= 0) { goose.state = "carried"; goose.carrier = P2; goose.heldT = 0; honk(); }
+  }
+  if (phase === "play" && goose.state === "carried") {
+    var carrier = goose.carrier, other = carrier === P1 ? P2 : P1;
+    if (other.hopping && Math.hypot(other.x - carrier.x, other.y - carrier.y) <= TACKLE_R) {
+      carrier.stun = 0.5; honk(); dropGoose(carrier, false);
+    }
+  }
+  updateParticles(dt);
+}
+function updateParticles(dt) {
+  for (var i = particles.length - 1; i >= 0; i--) {
+    var p = particles[i]; p.t += dt;
+    if (p.t >= p.life) { particles.splice(i, 1); continue; }
+    p.x += p.vx * dt; p.y += p.vy * dt; p.vy += 160 * dt;
+  }
+}
+
+/* ================= draw ================= */
+function drawPen(pen, col, label) {
+  ctx.fillStyle = col; ctx.globalAlpha = 0.24;
+  ctx.fillRect(pen.x0, pen.y0, pen.x1 - pen.x0, pen.y1 - pen.y0);
+  ctx.globalAlpha = 1;
+  ctx.strokeStyle = "#8a6b42"; ctx.lineWidth = 4;
+  ctx.strokeRect(pen.x0, pen.y0, pen.x1 - pen.x0, pen.y1 - pen.y0);
+  ctx.fillStyle = "#8a6b42";
+  for (var x = pen.x0; x <= pen.x1; x += 24) { ctx.fillRect(x - 2, Math.min(pen.y0, pen.y1 - 10) + (pen.y0 === 0 ? 0 : 0), 4, 10); }
+  ctx.fillStyle = "rgba(255,255,255,.75)"; ctx.font = "bold 13px system-ui"; ctx.textAlign = "center";
+  ctx.fillText(label, (pen.x0 + pen.x1) / 2, pen.y0 === 0 ? 20 : H - 10);
+}
+function drawScarecrow(pl) {
+  var bob = pl.hopping ? -Math.abs(Math.sin(pl.hopDist * 0.11)) * 11 : 0;
+  var y = pl.y + bob;
+  ctx.fillStyle = "rgba(0,0,0,.25)";
+  ctx.beginPath(); ctx.ellipse(pl.x, pl.y + 16, 15, 5, 0, 0, 6.29); ctx.fill();
+  ctx.strokeStyle = "#7a5a30"; ctx.lineWidth = 4;
+  ctx.beginPath(); ctx.moveTo(pl.x, y + 14); ctx.lineTo(pl.x, y - 12); ctx.stroke(); /* pole */
+  ctx.strokeStyle = pl.color; ctx.lineWidth = 6;
+  ctx.beginPath(); ctx.moveTo(pl.x - 14, y - 4); ctx.lineTo(pl.x + 14, y - 4); ctx.stroke(); /* arms */
+  ctx.fillStyle = pl.color; ctx.fillRect(pl.x - 10, y - 12, 20, 18); /* shirt */
+  ctx.fillStyle = "#f2c98a"; ctx.beginPath(); ctx.arc(pl.x, y - 20, 9, 0, 6.29); ctx.fill(); /* head */
+  ctx.fillStyle = "#e8b93e"; ctx.fillRect(pl.x - 13, y - 30, 26, 5); /* hat brim */
+  ctx.fillRect(pl.x - 8, y - 38, 16, 9); /* hat top */
+  if (pl.stun > 0) { ctx.fillStyle = "#fff"; ctx.font = "bold 13px system-ui"; ctx.textAlign = "center"; ctx.fillText("✦", pl.x, y - 44); }
+}
+function drawGoose() {
+  var gx = goose.x, gy = goose.y, flyArc = 0;
+  if (goose.state === "flying") {
+    var t = Math.min(1, goose.flyT);
+    gx = goose.fx + (goose.tx - goose.fx) * t;
+    gy = goose.fy + (goose.ty - goose.fy) * t;
+    flyArc = Math.sin(t * Math.PI) * 90;
+    ctx.strokeStyle = "rgba(255,255,255,.4)"; ctx.lineWidth = 2; ctx.setLineDash([4, 5]);
+    ctx.beginPath(); ctx.moveTo(goose.fx, goose.fy); ctx.lineTo(goose.tx, goose.ty); ctx.stroke(); ctx.setLineDash([]);
+    ctx.fillStyle = "rgba(0,0,0,.2)"; ctx.beginPath(); ctx.ellipse(gx, gy + 14, 13, 4, 0, 0, 6.29); ctx.fill();
+  }
+  var y = gy - flyArc;
+  ctx.fillStyle = "#f4f4f0"; ctx.beginPath(); ctx.ellipse(gx, y, 15, 10, 0, 0, 6.29); ctx.fill(); /* body */
+  ctx.strokeStyle = "#e8e8e2"; ctx.lineWidth = 3;
+  ctx.beginPath(); ctx.moveTo(gx + 8, y - 6); ctx.quadraticCurveTo(gx + 14, y - 18, gx + 12, y - 20); ctx.stroke(); /* neck */
+  ctx.fillStyle = "#f4f4f0"; ctx.beginPath(); ctx.arc(gx + 12, y - 21, 5.5, 0, 6.29); ctx.fill(); /* head */
+  ctx.fillStyle = "#f39c2c"; ctx.beginPath(); ctx.moveTo(gx + 16, y - 22); ctx.lineTo(gx + 23, y - 20); ctx.lineTo(gx + 16, y - 18); ctx.fill(); /* beak */
+  ctx.fillStyle = "#222"; ctx.fillRect(gx + 12, y - 23, 2, 2); /* eye */
+  if (goose.state === "flying" || goose.state === "carried") { /* wing */
+    ctx.strokeStyle = "#dcdcd4"; ctx.lineWidth = 4;
+    var wob = Math.sin(performance.now() * 0.03) * 4;
+    ctx.beginPath(); ctx.moveTo(gx - 4, y - 4); ctx.lineTo(gx - 14, y - 12 + wob); ctx.stroke();
+  }
+  if (goose.flapped && goose.state === "flying") {
+    ctx.fillStyle = "#ff5252"; ctx.font = "bold 26px system-ui"; ctx.textAlign = "center";
+    ctx.fillText("!", gx, y - 34);
+  }
+  if (goose.state === "carried") { /* wriggle meter */
+    var f = Math.min(1, goose.heldT / WRIGGLE_T);
+    ctx.fillStyle = "rgba(0,0,0,.4)"; ctx.fillRect(gx - 16, y - 44, 32, 5);
+    ctx.fillStyle = f > 0.75 ? "#ff5252" : "#ffd94d"; ctx.fillRect(gx - 16, y - 44, 32 * f, 5);
+  }
+}
+function draw() {
+  ctx.setTransform(1, 0, 0, 1, 0, 0);
+  ctx.fillStyle = "#16240f"; ctx.fillRect(0, 0, cv.width, cv.height);
+  ctx.setTransform(DPR * scale, 0, 0, DPR * scale, DPR * ox, DPR * oy);
+  /* grass with mow stripes */
+  for (var i = 0; i < 8; i++) { ctx.fillStyle = i % 2 ? "#4d7c33" : "#557f38"; ctx.fillRect(0, i * H / 8, W, H / 8); }
+  ctx.strokeStyle = "rgba(255,255,255,.35)"; ctx.lineWidth = 2; ctx.setLineDash([8, 8]);
+  ctx.beginPath(); ctx.moveTo(0, H / 2); ctx.lineTo(W, H / 2); ctx.stroke(); ctx.setLineDash([]);
+  drawPen(TOP_PEN, "#d0453a", "RED'S PEN");
+  drawPen(BOT_PEN, "#2f6fd0", "BLUE'S PEN");
+  /* scoreboard strip */
+  ctx.fillStyle = "rgba(0,0,0,.45)"; ctx.fillRect(W / 2 - 86, H / 2 - 17, 172, 34);
+  ctx.font = "bold 16px system-ui"; ctx.textAlign = "center";
+  ctx.fillStyle = "#7db4ff"; ctx.fillText("BLUE " + score[0], W / 2 - 52, H / 2 + 6);
+  ctx.fillStyle = "#ffb0a6"; ctx.fillText(score[1] + " RED", W / 2 + 52, H / 2 + 6);
+  var t = Math.max(0, Math.ceil(clock));
+  ctx.fillStyle = "#fff"; ctx.fillText(Math.floor(t / 60) + ":" + ("0" + (t % 60)).slice(-2), W / 2, H / 2 + 6);
+  /* entities: far ones first */
+  var ents = [{ y: P1.y, f: function () { drawScarecrow(P1); } }, { y: P2.y, f: function () { drawScarecrow(P2); } }];
+  ents.sort(function (a, b) { return a.y - b.y; });
+  if (goose.state !== "carried") drawGoose();
+  ents.forEach(function (e) { e.f(); });
+  if (goose.state === "carried") drawGoose();
+  /* particles */
+  particles.forEach(function (p) {
+    ctx.globalAlpha = 1 - p.t / p.life; ctx.fillStyle = p.col;
+    ctx.fillRect(p.x - 2, p.y - 2, 4, 4); ctx.globalAlpha = 1;
+  });
+  if (phase === "celebrate") {
+    ctx.fillStyle = "rgba(0,0,0,.45)"; ctx.fillRect(0, H / 2 - 60, W, 84);
+    ctx.fillStyle = "#ffe9a8"; ctx.font = "bold 25px system-ui"; ctx.textAlign = "center";
+    ctx.fillText(celebMsg, W / 2, H / 2 - 8);
+  }
+  if (phase === "title") {
+    ctx.fillStyle = "rgba(0,0,0,.25)"; ctx.fillRect(0, 0, W, H);
+  }
+}
+
+/* ================= main loop ================= */
+function loop(ts) {
+  requestAnimationFrame(loop);
+  if (!lastTs) lastTs = ts;
+  var dt = Math.min(0.033, (ts - lastTs) / 1000); lastTs = ts;
+  if (!document.hidden) { update(dt); draw(); }
+}
+
+/* ================= UI wiring ================= */
+var titleScr = document.getElementById("titleScr");
+var winScr = document.getElementById("winScr");
+titleScr.style.display = "flex";
+winScr.style.display = "none";
+function refreshBest() {
+  document.getElementById("bestLine").textContent = bestMargin > 0 ? "Best win margin so far: " + bestMargin : "";
+}
+refreshBest();
+document.getElementById("btn1p").addEventListener("click", function () { ensureAudio(); startMatch(1); });
+document.getElementById("btn2p").addEventListener("click", function () { ensureAudio(); startMatch(2); });
+document.getElementById("btnAgain").addEventListener("click", function () { ensureAudio(); startMatch(mode); });
+document.getElementById("btnMenu").addEventListener("click", function () {
+  phase = "title"; winScr.style.display = "none"; titleScr.style.display = "flex"; refreshBest();
+});
+var muteBtn = document.getElementById("muteBtn");
+function paintMute() { muteBtn.textContent = muted ? "🔇" : "🔊"; }
+paintMute();
+muteBtn.addEventListener("click", function () {
+  muted = !muted; safeSet("gooseGrabMute", muted ? "1" : "0"); paintMute();
+  ensureAudio();
+  if (masterGain) masterGain.gain.value = muted ? 0 : 0.55;
+});
+
+/* ================= QA / probe hook (read-only state + flap flag) ================= */
+window.__gg = {
+  state: function () { return phase; },
+  mode: function () { return mode; },
+  scores: function () { return [score[0], score[1]]; },
+  clock: function () { return clock; },
+  p1: function () { return { x: P1.x, y: P1.y, hopping: P1.hopping, stun: P1.stun }; },
+  p2: function () { return { x: P2.x, y: P2.y, hopping: P2.hopping, stun: P2.stun }; },
+  goose: function () { return { x: goose.x, y: goose.y, state: goose.state, heldT: goose.heldT, carrier: goose.carrier === P1 ? 1 : goose.carrier === P2 ? 2 : 0, flapped: goose.flapped }; },
+  consts: { HOP_SPEED: HOP_SPEED, THROW_RANGE: THROW_RANGE, GRAB_R: GRAB_R, TACKLE_R: TACKLE_R,
+            PEN_W: PEN_W, PEN_H: PEN_H, SPAWN1: SPAWN1, SPAWN2: SPAWN2, GOOSE_SPAWN: GOOSE_SPAWN, CENTER: { x: W / 2, y: H / 2 } },
+  forceFlapNext: function () { debugForceFlap = true; },
+  geom: function () { return { W: W, H: H, scale: scale, ox: ox, oy: oy, dpr: DPR }; }
+};
+requestAnimationFrame(loop);
+</script>
+</body>
+</html>
