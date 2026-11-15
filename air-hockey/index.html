@@ -77,8 +77,8 @@ document.addEventListener('touchstart', iosPlaybackSession, true);
 /* ============================================================
    AIR HOCKEY — drag your mallet, guard your goal, first to 7.
    1 Player against a CPU that sharpens as you score, or
-   2 Players on one phone: one mallet at each end, with the
-   top player's controls flipped for playing across the table.
+   2 Players on one phone: one mallet at each end, and each
+   mallet follows its player's finger exactly.
    ============================================================ */
 
 const canvas = document.getElementById("game");
@@ -370,9 +370,9 @@ function applyPointer(e) {
     pMallet.tx = e.clientX; pMallet.ty = e.clientY; pMallet.hasTarget = true;
     pointers.set(e.pointerId, "P");
   } else {
-    // top half: in 2P the far-end player's controls are flipped
-    if (mode === 2) { cMallet.tx = W - e.clientX; cMallet.ty = e.clientY; }
-    else { cMallet.tx = e.clientX; cMallet.ty = e.clientY; }
+    // top half: the mallet follows the finger exactly (direct touch —
+    // no flip; an earlier X-only flip made horizontal motion reversed)
+    cMallet.tx = e.clientX; cMallet.ty = e.clientY;
     if (mode === 2) { cMallet.hasTarget = true; pointers.set(e.pointerId, "C"); }
   }
 }
@@ -510,7 +510,7 @@ function draw() {
     if (state === "menu") {
       ctx.fillText("Drag your mallet. First to 7 takes it.", W / 2, H * 0.365);
       ctx.fillText("2 Players: one at each end of the phone —", W / 2, H * 0.405);
-      ctx.fillText("the top player's controls are flipped.", W / 2, H * 0.445);
+      ctx.fillText("each mallet follows its player's finger.", W / 2, H * 0.445);
     } else {
       const pWon = pScore > cScore;
       ctx.fillStyle = pWon ? "#8be04e" : "#ff5d7a";

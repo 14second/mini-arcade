@@ -114,12 +114,43 @@ const sfx = {
   ding:  () => { beep(880, 0.09, "sine", 0.08); setTimeout(() => beep(1320, 0.12, "sine", 0.08), 90); },
   thud:  () => beep(160, 0.25, "sawtooth", 0.10, 60),
   start: () => beep(520, 0.10, "triangle", 0.08, 780),
+  pick:  () => beep(660, 0.07, "triangle", 0.07, 920),
 };
+
+// ---------- guarded storage ----------
+// Storage can be denied (preview panes, private-mode webviews) and a
+// throwing read at startup would kill the whole script — every access
+// goes through these helpers.
+function storeGet(k) { try { return localStorage.getItem(k); } catch (e) { return null; } }
+function storeSet(k, v) { try { localStorage.setItem(k, v); } catch (e) {} }
 
 // ---------- state ----------
 let state = "menu";           // menu | play | dead
 let t = 0, speed = CONFIG.startSpeed, dist = 0, score = 0;
-let hi = +(localStorage.getItem("bushdash_hi") || 0);
+let hi = +(storeGet("bushdash_hi") || 0);
+
+// ---------- player character ----------
+// Cat, dog, or squirrel: identical size, physics, and difficulty —
+// only the sprite (and its picker name) differs.
+const CHARACTERS = [
+  { id: "cat", name: "Cat" },
+  { id: "dog", name: "Dog" },
+  { id: "squirrel", name: "Squirrel" },
+];
+let character = storeGet("bushdash_char") || "cat";
+if (!CHARACTERS.some(c => c.id === character)) character = "cat";
+function syncSub() {
+  const sub = document.querySelector("p.sub");
+  if (sub) sub.textContent = "a tiny " + character + " jumper — how far can you get?";
+}
+function selectChar(id) {
+  if (!CHARACTERS.some(c => c.id === id)) return;
+  character = id;
+  storeSet("bushdash_char", id);
+  syncSub();
+  sfx.pick();
+}
+syncSub();
 let lastMilestone = 0, flash = 0, shake = 0;
 let deadT = 0;
 
@@ -165,6 +196,13 @@ function releaseJump() { holding = false; }
 
 addEventListener("keydown", e => {
   if (e.repeat) return;
+  if (state === "menu") {
+    // character picker: arrows cycle, 1/2/3 pick directly
+    const idx = CHARACTERS.findIndex(c => c.id === character);
+    if (e.code === "ArrowLeft") { selectChar(CHARACTERS[(idx + CHARACTERS.length - 1) % CHARACTERS.length].id); return; }
+    if (e.code === "ArrowRight") { selectChar(CHARACTERS[(idx + 1) % CHARACTERS.length].id); return; }
+    if (e.code === "Digit1" || e.code === "Digit2" || e.code === "Digit3") { selectChar(CHARACTERS[+e.code.slice(-1) - 1].id); return; }
+  }
   if (e.code === "Space" || e.code === "ArrowUp" || e.code === "KeyW") { e.preventDefault(); pressJump(); }
   if (e.code === "KeyR" && state !== "menu") reset();
   if (e.code === "KeyM") muted = !muted;
@@ -173,7 +211,36 @@ addEventListener("keydown", e => {
 addEventListener("keyup", e => {
   if (e.code === "Space" || e.code === "ArrowUp" || e.code === "KeyW") releaseJump();
 });
-cv.addEventListener("pointerdown", e => { e.preventDefault(); pressJump(); });
+// ---------- character picker (menu) ----------
+// Canvas tap zones shared by the menu drawing and the hit test.
+// Pointer coords are CSS pixels; convert through the canvas rect
+// (rect-ratio conversion — correct at any device pixel ratio).
+function toGame(e) {
+  const r = cv.getBoundingClientRect();
+  return { x: (e.clientX - r.left) * (W / r.width), y: (e.clientY - r.top) * (H / r.height) };
+}
+const PICK = { w: 136, h: 120, gap: 16, y: 218 };
+function pickBox(i) {
+  const total = CHARACTERS.length * PICK.w + (CHARACTERS.length - 1) * PICK.gap;
+  return { x: W / 2 - total / 2 + i * (PICK.w + PICK.gap), y: PICK.y, w: PICK.w, h: PICK.h };
+}
+function pickAt(x, y) {
+  for (let i = 0; i < CHARACTERS.length; i++) {
+    const b = pickBox(i);
+    if (x >= b.x && x <= b.x + b.w && y >= b.y && y <= b.y + b.h) return CHARACTERS[i].id;
+  }
+  return null;
+}
+
+cv.addEventListener("pointerdown", e => {
+  e.preventDefault();
+  if (state === "menu") {
+    const p = toGame(e);
+    const id = pickAt(p.x, p.y);
+    if (id) { selectChar(id); return; }  // choosing a runner doesn't start the run
+  }
+  pressJump();
+});
 addEventListener("pointerup", releaseJump);
 addEventListener("blur", () => { holding = false; });
 
@@ -257,7 +324,7 @@ function update(dt) {
     const bx = b.x + 8, bw = b.w - 16, by = CONFIG.groundY - b.h + 12, bh = b.h - 12;
     if (hx < bx + bw && hx + hw > bx && hy < by + bh && hy + hh > by) {
       state = "dead"; deadT = 0; cat.dead = true; shake = 0.45; sfx.thud();
-      if (score > hi) { hi = score; localStorage.setItem("bushdash_hi", hi); }
+      if (score > hi) { hi = score; storeSet("bushdash_hi", hi); }
       for (let i = 0; i < 14; i++) puffs.push({ x: cat.x + 40, y: cat.y - 20, vx: -120 + Math.random() * 260, vy: -160 - Math.random() * 120, life: 0.7 });
       break;
     }
@@ -421,6 +488,202 @@ function drawCat() {
   ctx.restore();
 }
 
+function drawDog() {
+  ctx.save();
+  ctx.translate(cat.x, cat.y);
+  if (shake > 0) ctx.translate((Math.random() - 0.5) * 8 * shake, (Math.random() - 0.5) * 8 * shake);
+
+  const BODY = "#c98a4b", DARK = "#9c662f", CREAM = "#ffe9c9";
+  const running = cat.onGround && state === "play";
+  const legSwing = running ? Math.sin(cat.runPhase * Math.PI * 2) * 9 : 0;
+  const airTilt = !cat.onGround ? -0.10 : 0;
+  ctx.rotate(cat.dead ? 0.35 : airTilt);
+
+  // tail (short, curves up, wags fast)
+  const wag = Math.sin(t * 11) * 7;
+  ctx.strokeStyle = BODY; ctx.lineWidth = 10; ctx.lineCap = "round";
+  ctx.beginPath(); ctx.moveTo(-30, -42);
+  ctx.quadraticCurveTo(-48, -50, -50, -66 + wag);
+  ctx.stroke();
+
+  // legs (same pattern and sizes as the cat)
+  const legH = cat.onGround ? 20 : 12;
+  const tuck = cat.onGround ? 0 : 8;
+  ctx.fillStyle = DARK;
+  rrect(-24 + legSwing * 0.6, -legH, 13, legH - tuck, 6); ctx.fill();
+  rrect(8 - legSwing * 0.6, -legH, 13, legH - tuck, 6); ctx.fill();
+  ctx.fillStyle = BODY;
+  rrect(-16 - legSwing * 0.6, -legH, 13, legH - tuck, 6); ctx.fill();
+  rrect(16 + legSwing * 0.6, -legH, 13, legH - tuck, 6); ctx.fill();
+
+  // body
+  ctx.fillStyle = BODY;
+  ctx.beginPath(); ctx.ellipse(2, -38, 34, 21, 0, 0, 7); ctx.fill();
+  // spot
+  ctx.fillStyle = DARK;
+  ctx.beginPath(); ctx.ellipse(-10, -44, 12, 9, -0.4, 0, 7); ctx.fill();
+  // belly
+  ctx.fillStyle = CREAM;
+  ctx.beginPath(); ctx.ellipse(6, -28, 20, 9, 0, 0, 7); ctx.fill();
+
+  // head
+  const hx = 34, hy = -52;
+  ctx.fillStyle = BODY;
+  ctx.beginPath(); ctx.arc(hx, hy, 21, 0, 7); ctx.fill();
+  // floppy ear (dark, hangs down the back of the head)
+  ctx.fillStyle = DARK;
+  ctx.save(); ctx.translate(hx - 10, hy - 8); ctx.rotate(0.25);
+  ctx.beginPath(); ctx.ellipse(0, 8, 8, 17, 0, 0, 7); ctx.fill();
+  ctx.restore();
+  // muzzle
+  ctx.fillStyle = CREAM;
+  ctx.beginPath(); ctx.ellipse(hx + 11, hy + 7, 14, 9, 0, 0, 7); ctx.fill();
+  // nose
+  ctx.fillStyle = "#4a3220";
+  ctx.beginPath(); ctx.ellipse(hx + 23, hy + 3, 5.5, 4.5, 0, 0, 7); ctx.fill();
+  // tongue (panting happily; hidden when dead)
+  if (!cat.dead) {
+    ctx.fillStyle = "#f28ba8";
+    rrect(hx + 13, hy + 11, 7, 9, 3.5); ctx.fill();
+  }
+  // eye
+  if (cat.dead) {
+    ctx.strokeStyle = "#3a2c1c"; ctx.lineWidth = 2.5;
+    ctx.beginPath(); ctx.moveTo(hx + 1, hy - 8); ctx.lineTo(hx + 9, hy); ctx.moveTo(hx + 9, hy - 8); ctx.lineTo(hx + 1, hy); ctx.stroke();
+  } else if (cat.blink > 0) {
+    ctx.strokeStyle = "#3a2c1c"; ctx.lineWidth = 2.5;
+    ctx.beginPath(); ctx.moveTo(hx, hy - 4); ctx.lineTo(hx + 10, hy - 4); ctx.stroke();
+  } else {
+    ctx.fillStyle = "#3a2c1c";
+    ctx.beginPath(); ctx.arc(hx + 5, hy - 3, 5, 0, 7); ctx.fill();
+    ctx.fillStyle = "rgba(255,255,255,.9)";
+    ctx.beginPath(); ctx.arc(hx + 3.4, hy - 4.6, 1.6, 0, 7); ctx.fill();
+  }
+  ctx.restore();
+}
+
+function drawSquirrel() {
+  ctx.save();
+  ctx.translate(cat.x, cat.y);
+  if (shake > 0) ctx.translate((Math.random() - 0.5) * 8 * shake, (Math.random() - 0.5) * 8 * shake);
+
+  const BODY = "#a3a8ad", DARK = "#7e858c", CREAM = "#f4efe6";
+  const running = cat.onGround && state === "play";
+  const legSwing = running ? Math.sin(cat.runPhase * Math.PI * 2) * 9 : 0;
+  const airTilt = !cat.onGround ? -0.10 : 0;
+  ctx.rotate(cat.dead ? 0.35 : airTilt);
+
+  // big bushy tail (layered strokes rising behind the body)
+  const sway = Math.sin(t * 5) * 4;
+  ctx.lineCap = "round";
+  ctx.strokeStyle = DARK; ctx.lineWidth = 21;
+  ctx.beginPath(); ctx.moveTo(-24, -24);
+  ctx.bezierCurveTo(-46, -40, -54, -62, -40 + sway, -92);
+  ctx.stroke();
+  ctx.strokeStyle = BODY; ctx.lineWidth = 13;
+  ctx.beginPath(); ctx.moveTo(-24, -24);
+  ctx.bezierCurveTo(-44, -40, -50, -60, -38 + sway, -88);
+  ctx.stroke();
+
+  // legs (same pattern and sizes as the cat)
+  const legH = cat.onGround ? 20 : 12;
+  const tuck = cat.onGround ? 0 : 8;
+  ctx.fillStyle = DARK;
+  rrect(-24 + legSwing * 0.6, -legH, 13, legH - tuck, 6); ctx.fill();
+  rrect(8 - legSwing * 0.6, -legH, 13, legH - tuck, 6); ctx.fill();
+  ctx.fillStyle = BODY;
+  rrect(-16 - legSwing * 0.6, -legH, 13, legH - tuck, 6); ctx.fill();
+  rrect(16 + legSwing * 0.6, -legH, 13, legH - tuck, 6); ctx.fill();
+
+  // body
+  ctx.fillStyle = BODY;
+  ctx.beginPath(); ctx.ellipse(2, -37, 32, 20, 0, 0, 7); ctx.fill();
+  // belly
+  ctx.fillStyle = CREAM;
+  ctx.beginPath(); ctx.ellipse(6, -27, 19, 9, 0, 0, 7); ctx.fill();
+
+  // head
+  const hx = 34, hy = -50;
+  ctx.fillStyle = BODY;
+  ctx.beginPath(); ctx.arc(hx, hy, 20, 0, 7); ctx.fill();
+  // small rounded ears
+  ctx.beginPath(); ctx.moveTo(hx - 14, hy - 12); ctx.lineTo(hx - 10, hy - 27); ctx.lineTo(hx - 2, hy - 15); ctx.closePath(); ctx.fill();
+  ctx.beginPath(); ctx.moveTo(hx + 4, hy - 16); ctx.lineTo(hx + 11, hy - 28); ctx.lineTo(hx + 15, hy - 13); ctx.closePath(); ctx.fill();
+  // cheek / muzzle
+  ctx.fillStyle = CREAM;
+  ctx.beginPath(); ctx.ellipse(hx + 8, hy + 7, 11, 8, 0, 0, 7); ctx.fill();
+  // nose
+  ctx.fillStyle = "#4a3a30";
+  ctx.beginPath(); ctx.ellipse(hx + 17, hy + 3, 4, 3.2, 0, 0, 7); ctx.fill();
+  // front tooth
+  if (!cat.dead) {
+    ctx.fillStyle = "#ffffff";
+    rrect(hx + 11, hy + 10, 5, 6, 1.5); ctx.fill();
+  }
+  // eye (big and dark)
+  if (cat.dead) {
+    ctx.strokeStyle = "#3a3630"; ctx.lineWidth = 2.5;
+    ctx.beginPath(); ctx.moveTo(hx + 1, hy - 9); ctx.lineTo(hx + 11, hy + 1); ctx.moveTo(hx + 11, hy - 9); ctx.lineTo(hx + 1, hy + 1); ctx.stroke();
+  } else if (cat.blink > 0) {
+    ctx.strokeStyle = "#3a3630"; ctx.lineWidth = 2.5;
+    ctx.beginPath(); ctx.moveTo(hx, hy - 4); ctx.lineTo(hx + 12, hy - 4); ctx.stroke();
+  } else {
+    ctx.fillStyle = "#26221e";
+    ctx.beginPath(); ctx.arc(hx + 6, hy - 3, 6, 0, 7); ctx.fill();
+    ctx.fillStyle = "rgba(255,255,255,.95)";
+    ctx.beginPath(); ctx.arc(hx + 3.8, hy - 5.2, 2.2, 0, 7); ctx.fill();
+  }
+  ctx.restore();
+}
+
+// draw the currently selected character (in-game sprite)
+function drawPlayer() {
+  if (character === "dog") drawDog();
+  else if (character === "squirrel") drawSquirrel();
+  else drawCat();
+}
+
+// draw a character portrait for the menu picker, standing at (cx, feetY)
+function drawPortrait(id, cx, feetY, s) {
+  const savedChar = character, sx = cat.x, sy = cat.y, sd = cat.dead, sb = cat.blink;
+  character = id; cat.x = 0; cat.y = 0; cat.dead = false; cat.blink = 0;
+  ctx.save(); ctx.translate(cx, feetY); ctx.scale(s, s);
+  drawPlayer();
+  ctx.restore();
+  character = savedChar; cat.x = sx; cat.y = sy; cat.dead = sd; cat.blink = sb;
+}
+
+function drawMenu() {
+  ctx.textAlign = "center";
+  ctx.fillStyle = "rgba(20,28,40,.72)";
+  rrect(W / 2 - 300, 74, 600, 338, 18); ctx.fill();
+  ctx.fillStyle = "#fff";
+  ctx.font = "800 54px 'Segoe UI', system-ui, sans-serif";
+  ctx.fillText("BUSH DASH", W / 2, 138);
+  ctx.font = "400 19px 'Segoe UI', system-ui, sans-serif";
+  ctx.fillStyle = "#cdd8e6";
+  ctx.fillText("a tiny " + character + " jumper", W / 2, 170);
+  ctx.font = "600 13px 'Segoe UI', system-ui, sans-serif";
+  ctx.fillStyle = "#8fa1b8";
+  ctx.fillText("P I C K   Y O U R   R U N N E R", W / 2, 204);
+  for (let i = 0; i < CHARACTERS.length; i++) {
+    const b = pickBox(i), sel = CHARACTERS[i].id === character;
+    ctx.fillStyle = sel ? "rgba(255,184,77,.20)" : "rgba(255,255,255,.07)";
+    rrect(b.x, b.y, b.w, b.h, 14); ctx.fill();
+    ctx.lineWidth = sel ? 3.5 : 2;
+    ctx.strokeStyle = sel ? "#ffb84d" : "rgba(255,255,255,.28)";
+    rrect(b.x, b.y, b.w, b.h, 14); ctx.stroke();
+    drawPortrait(CHARACTERS[i].id, b.x + b.w / 2, b.y + b.h - 30, 0.8);
+    ctx.fillStyle = sel ? "#ffd9a0" : "#cdd8e6";
+    ctx.font = (sel ? "700 " : "600 ") + "17px 'Segoe UI', system-ui, sans-serif";
+    ctx.textAlign = "center";
+    ctx.fillText(CHARACTERS[i].name, b.x + b.w / 2, b.y + b.h - 7);
+  }
+  ctx.font = "600 16px 'Segoe UI', system-ui, sans-serif";
+  ctx.fillStyle = "#8fa1b8";
+  ctx.fillText("tap a runner to choose · SPACE / tap to start", W / 2, 382);
+}
+
 function rrect(x, y, w, h, r) {
   ctx.beginPath();
   ctx.moveTo(x + r, y);
@@ -487,10 +750,10 @@ function draw() {
   const sorted = [...bushes].sort((a, b) => a.x - b.x);
   for (const b of sorted) drawBush(b);
   drawPuffs();
-  drawCat();
+  drawPlayer();
   drawHUD();
   if (state === "menu") {
-    centerText("BUSH DASH", "a tiny cat jumper", 54);
+    drawMenu();
   } else if (state === "dead") {
     deadT += 1 / 60;
     if (deadT > 0.5) {
@@ -518,6 +781,10 @@ if (demo) { state = "menu"; setTimeout(() => { if (state === "menu") reset(); },
 window.__bushdash = {
   get state() { return state; }, get score() { return score; },
   get speed() { return speed; }, cat, get bushes() { return bushes; },
+  get character() { return character; },
+  characters: CHARACTERS.map(c => c.id),
+  pickBox: i => pickBox(i),
+  size: { W, H },
 };
 requestAnimationFrame(frame);
 </script>
