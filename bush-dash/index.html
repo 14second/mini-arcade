@@ -49,9 +49,14 @@ const CONFIG = {
   jumpCut: -520,        // upward velocity cap when released early (gentle cut)
   coyote: 0.09,         // grace time to still jump after leaving ground
   buffer: 0.12,         // jump presses remembered this long before landing
-  startSpeed: 380,      // px/s
-  maxSpeed: 820,
-  accel: 7,             // px/s gained per second survived
+  startSpeed: 380,      // px/s at the start of a run
+  // Progressive speed ramp (2026-11-15): world speed is a smooth function
+  // of run time — mult(t) = 1 + rampA*t - rampB*t^2, hard-capped at
+  // rampCap. 1.00x at 0s, ~1.25x at 20s, ~1.50x at 45s, 1.75x cap
+  // (665 px/s) from ~84s on, flat after that. Identical for every runner.
+  rampCap: 1.75,        // top speed multiplier
+  rampA: 0.01361,       // linear term (per second)
+  rampB: 0.0000556,     // quadratic term (per second^2) — eases the ramp off
   groundY: 452,
 };
 
@@ -256,12 +261,24 @@ function spawnBush(x) {
   bushes.push({ x, w, h, seed: Math.random() * 100 });
 }
 
+// World speed for a run that has lasted tt seconds: starts at
+// CONFIG.startSpeed and climbs smoothly to startSpeed * rampCap.
+// The quadratic peaks at rampA/(2*rampB) (~122s) and would turn back
+// down after that, so freeze the input there: the multiplier must never
+// decrease on a long run, or the game would get easier after ~2:40.
+function speedAtTime(tt) {
+  const tPeak = CONFIG.rampA / (2 * CONFIG.rampB);
+  const te = Math.min(tt, tPeak);
+  const m = 1 + CONFIG.rampA * te - CONFIG.rampB * te * te;
+  return CONFIG.startSpeed * Math.min(CONFIG.rampCap, Math.max(1, m));
+}
+
 // ---------- update ----------
 function update(dt) {
   t += dt;
   if (state !== "play") { updateScenery(dt, state === "menu" ? 120 : 0); return; }
 
-  speed = Math.min(CONFIG.maxSpeed, speed + CONFIG.accel * dt);
+  speed = speedAtTime(t);
   dist += speed * dt;
   score = Math.floor(dist / 12);
 
@@ -780,7 +797,8 @@ if (demo) { state = "menu"; setTimeout(() => { if (state === "menu") reset(); },
 // hook for automated capture / debugging
 window.__bushdash = {
   get state() { return state; }, get score() { return score; },
-  get speed() { return speed; }, cat, get bushes() { return bushes; },
+  get speed() { return speed; }, get t() { return t; },
+  cat, get bushes() { return bushes; },
   get character() { return character; },
   characters: CHARACTERS.map(c => c.id),
   pickBox: i => pickBox(i),
