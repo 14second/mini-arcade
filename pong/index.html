@@ -10,27 +10,41 @@
 <style>
   * { margin:0; padding:0; box-sizing:border-box; }
   html, body {
-    width:100%; height:100%; overflow:hidden; background:#0a0a14;
-    font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+    width:100%; height:100%; overflow:hidden;
+    background:
+      radial-gradient(120% 80% at 50% 0%, #23234d 0%, rgba(35,35,77,0) 55%),
+      linear-gradient(180deg, #12122a 0%, #0a0a14 60%, #06060e 100%);
+    font-family:"Avenir Next", "Segoe UI", system-ui, -apple-system, Roboto, sans-serif;
     touch-action:none; user-select:none; -webkit-user-select:none;
     -webkit-tap-highlight-color: transparent;
   }
   canvas { position:fixed; inset:0; display:block; touch-action:none; }
   #muteBtn {
     position:fixed; top:10px; right:10px; z-index:10;
-    width:48px; height:48px; border-radius:12px;
-    border:2px solid rgba(160,170,255,.5); background:rgba(8,8,22,.62);
+    width:48px; height:48px; border-radius:14px;
+    border:1.5px solid rgba(180,190,255,.55);
+    background:linear-gradient(180deg, rgba(60,64,120,.72), rgba(8,8,22,.72));
+    backdrop-filter:blur(8px); -webkit-backdrop-filter:blur(8px);
+    box-shadow:0 8px 22px rgba(0,0,0,.45), inset 0 1px 0 rgba(255,255,255,.25);
     color:#fff; font-size:22px; line-height:1; cursor:pointer;
     touch-action:none; user-select:none; -webkit-user-select:none;
     display:flex; align-items:center; justify-content:center; padding:0;
   }
   .modeBtn {
     position:fixed; left:50%; transform:translateX(-50%); z-index:10;
-    width:min(280px, 76vw); height:58px; border-radius:14px;
-    border:2px solid rgba(140,170,255,.6); background:rgba(10,12,30,.92);
-    color:#e8eaff; font-size:19px; font-weight:700; cursor:pointer;
+    width:min(300px, 78vw); height:58px; border-radius:16px;
+    border:1.5px solid rgba(140,200,255,.75);
+    background:linear-gradient(180deg, rgba(50,150,225,.88), rgba(18,70,140,.92));
+    box-shadow:0 14px 34px rgba(0,0,0,.5), 0 0 22px rgba(89,200,255,.28), inset 0 1px 0 rgba(255,255,255,.4);
+    color:#fff; font-size:19px; font-weight:700; letter-spacing:.3px; cursor:pointer;
+    text-shadow:0 1px 3px rgba(0,20,50,.5);
     touch-action:none; user-select:none; -webkit-user-select:none;
     display:none;
+  }
+  #btn2p {
+    border-color:rgba(255,170,190,.75);
+    background:linear-gradient(180deg, rgba(235,110,145,.88), rgba(150,35,70,.92));
+    box-shadow:0 14px 34px rgba(0,0,0,.5), 0 0 22px rgba(255,93,122,.28), inset 0 1px 0 rgba(255,255,255,.4);
   }
   #btn1p { top:60%; }
   #btn2p { top:calc(60% + 72px); }
@@ -370,14 +384,46 @@ function rr(x, y, w, h, r) {
   ctx.arcTo(x, y + h, x, y, r); ctx.arcTo(x, y, x + w, y, r);
   ctx.closePath();
 }
+function glassPanel(x, y, w, h) {
+  ctx.save();
+  ctx.shadowColor = "rgba(0,0,0,.5)"; ctx.shadowBlur = 34; ctx.shadowOffsetY = 12;
+  const g = ctx.createLinearGradient(0, y, 0, y + h);
+  g.addColorStop(0, "rgba(30,32,64,.88)"); g.addColorStop(1, "rgba(10,10,24,.90)");
+  ctx.fillStyle = g; rr(x, y, w, h, 22); ctx.fill();
+  ctx.restore();
+  ctx.lineWidth = 1.5; ctx.strokeStyle = "rgba(255,255,255,.18)"; rr(x, y, w, h, 22); ctx.stroke();
+  ctx.strokeStyle = "rgba(255,255,255,.10)"; ctx.lineWidth = 1;
+  ctx.beginPath(); ctx.moveTo(x + 22, y + 1); ctx.lineTo(x + w - 22, y + 1); ctx.stroke();
+}
+function glossyPaddle(x, y, light, base, dark) {
+  ctx.save();
+  ctx.shadowColor = "rgba(0,0,0,.5)"; ctx.shadowBlur = 12; ctx.shadowOffsetY = 4;
+  const g = ctx.createLinearGradient(0, y, 0, y + padH);
+  g.addColorStop(0, light); g.addColorStop(0.5, base); g.addColorStop(1, dark);
+  ctx.fillStyle = g; rr(x, y, padW, padH, padH / 2); ctx.fill();
+  ctx.restore();
+  ctx.fillStyle = "rgba(255,255,255,.45)";
+  rr(x + 6, y + 2, padW - 12, Math.max(2, padH * 0.32), padH * 0.16); ctx.fill();
+}
 function draw() {
-  ctx.fillStyle = "#0a0a14"; ctx.fillRect(0, 0, W, H);
+  const bg = ctx.createLinearGradient(0, 0, 0, H);
+  bg.addColorStop(0, "#171736"); bg.addColorStop(0.5, "#0d0d20"); bg.addColorStop(1, "#06060f");
+  ctx.fillStyle = bg; ctx.fillRect(0, 0, W, H);
+  const glow = ctx.createRadialGradient(W / 2, H / 2, 10, W / 2, H / 2, H * 0.6);
+  glow.addColorStop(0, "rgba(110,130,255,.14)"); glow.addColorStop(1, "rgba(110,130,255,0)");
+  ctx.fillStyle = glow; ctx.fillRect(0, 0, W, H);
+  // faint starfield dots (deterministic, visual only)
+  ctx.fillStyle = "rgba(200,210,255,.35)";
+  for (let i = 0; i < 26; i++) {
+    const sx = ((i * 137.5) % 97) / 97 * W, sy = ((i * 89.3) % 91) / 91 * H;
+    ctx.fillRect(sx, sy, 2, 2);
+  }
   // court
-  ctx.strokeStyle = "rgba(160,170,255,0.25)"; ctx.lineWidth = 2;
+  ctx.strokeStyle = "rgba(170,185,255,0.38)"; ctx.lineWidth = 2;
   ctx.setLineDash([10, 12]);
   ctx.beginPath(); ctx.moveTo(0, H / 2); ctx.lineTo(W, H / 2); ctx.stroke();
   ctx.setLineDash([]);
-  ctx.strokeStyle = "rgba(160,170,255,0.12)";
+  ctx.strokeStyle = "rgba(170,185,255,0.20)";
   ctx.beginPath(); ctx.arc(W / 2, H / 2, u * 11, 0, Math.PI * 2); ctx.stroke();
   // scores (big, ghosted)
   ctx.textAlign = "center"; ctx.textBaseline = "middle";
@@ -391,26 +437,46 @@ function draw() {
   ctx.fillText(mode === 2 ? "P2" : "RIVAL", W / 2, H * 0.30 - u * 11);
   ctx.fillStyle = "rgba(120,220,255,0.75)";
   ctx.fillText(mode === 2 ? "P1" : "YOU", W / 2, H * 0.70 + u * 11.5);
+  // frosted HUD pill
+  ctx.save();
+  ctx.fillStyle = "rgba(14,14,34,.48)"; rr(8, 8, Math.min(W * 0.66, 360), 30, 15); ctx.fill();
+  ctx.lineWidth = 1; ctx.strokeStyle = "rgba(255,255,255,.22)"; rr(8, 8, Math.min(W * 0.66, 360), 30, 15); ctx.stroke();
+  ctx.restore();
   ctx.font = Math.round(u * 3.4) + "px system-ui, sans-serif";
-  ctx.fillStyle = "#8b90b8";
+  ctx.fillStyle = "#c9cdf2";
   ctx.textAlign = "left";
   ctx.fillText(mode === 2
     ? "First to " + WIN_SCORE + " · Match wins — P1: " + p2wins.p1 + " · P2: " + p2wins.p2
-    : "First to " + WIN_SCORE + " · Matches won: " + hi, 12, 24);
-  // paddles
-  ctx.fillStyle = "#ff5d7a"; rr(ai.x - padW / 2, aiY, padW, padH, padH / 2); ctx.fill();
-  ctx.fillStyle = "#59c8ff"; rr(player.x - padW / 2, playerY, padW, padH, padH / 2); ctx.fill();
-  // ball
+    : "First to " + WIN_SCORE + " · Matches won: " + hi, 18, 24);
+  // paddles: glossy gradients with soft shadows
+  glossyPaddle(ai.x - padW / 2, aiY, "#ffb3c2", "#ff5d7a", "#c22a4a");
+  glossyPaddle(player.x - padW / 2, playerY, "#bfeaff", "#59c8ff", "#2478c8");
+  // ball: glowing glossy orb with a short motion trail (visual only)
   if (state === "play" && serveTimer <= 0.45) {
-    ctx.fillStyle = "#ffffff";
+    ctx.fillStyle = "rgba(140,200,255,.14)";
+    ctx.beginPath(); ctx.arc(ball.x - ball.vx * 0.028, ball.y - ball.vy * 0.028, ballR * 0.85, 0, Math.PI * 2); ctx.fill();
+    ctx.fillStyle = "rgba(140,200,255,.22)";
+    ctx.beginPath(); ctx.arc(ball.x - ball.vx * 0.014, ball.y - ball.vy * 0.014, ballR * 0.92, 0, Math.PI * 2); ctx.fill();
+    const halo = ctx.createRadialGradient(ball.x, ball.y, ballR * 0.3, ball.x, ball.y, ballR * 2.2);
+    halo.addColorStop(0, "rgba(255,255,255,.35)"); halo.addColorStop(1, "rgba(255,255,255,0)");
+    ctx.fillStyle = halo;
+    ctx.beginPath(); ctx.arc(ball.x, ball.y, ballR * 2.2, 0, Math.PI * 2); ctx.fill();
+    const bg2 = ctx.createRadialGradient(ball.x - ballR * 0.35, ball.y - ballR * 0.4, ballR * 0.15, ball.x, ball.y, ballR * 1.2);
+    bg2.addColorStop(0, "#ffffff"); bg2.addColorStop(0.7, "#eef4ff"); bg2.addColorStop(1, "#b9c8e8");
+    ctx.fillStyle = bg2;
     ctx.beginPath(); ctx.arc(ball.x, ball.y, ballR, 0, Math.PI * 2); ctx.fill();
-    ctx.fillStyle = "rgba(255,255,255,0.25)";
-    ctx.beginPath(); ctx.arc(ball.x, ball.y, ballR * 1.9, 0, Math.PI * 2); ctx.fill();
   }
+  // vignette
+  const vg = ctx.createRadialGradient(W / 2, H / 2, H * 0.42, W / 2, H / 2, H * 0.92);
+  vg.addColorStop(0, "rgba(0,0,10,0)"); vg.addColorStop(1, "rgba(0,0,10,.28)");
+  ctx.fillStyle = vg; ctx.fillRect(0, 0, W, H);
   if (state !== "play") {
-    ctx.fillStyle = "rgba(3,3,10,0.8)"; ctx.fillRect(0, 0, W, H);
+    ctx.fillStyle = "rgba(3,3,10,0.62)"; ctx.fillRect(0, 0, W, H);
+    glassPanel(Math.max(12, W / 2 - 230), H * 0.20, Math.min(W - 24, 460), H * 0.46);
     ctx.textAlign = "center";
-    ctx.fillStyle = "#59c8ff";
+    const tg = ctx.createLinearGradient(0, H * 0.25, 0, H * 0.33);
+    tg.addColorStop(0, "#ffffff"); tg.addColorStop(0.55, "#bfeaff"); tg.addColorStop(1, "#59c8ff");
+    ctx.fillStyle = tg;
     ctx.font = "bold " + Math.round(u * 11) + "px system-ui, sans-serif";
     ctx.fillText("PONG", W / 2, H * 0.30);
     ctx.fillStyle = "#e8eaff";

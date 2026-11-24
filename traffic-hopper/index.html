@@ -8,12 +8,12 @@
 <meta name="apple-mobile-web-app-capable" content="yes">
 <title>Traffic Hopper</title>
 <style>
-  html,body{margin:0;padding:0;width:100%;height:100%;background:#0b1e2d;overflow:hidden;
+  html,body{margin:0;padding:0;width:100%;height:100%;background:radial-gradient(120% 90% at 50% 0%,#1d3d5c 0%,rgba(29,61,92,0) 55%),linear-gradient(180deg,#0b1e2d,#050f18 75%);overflow:hidden;
     font-family:system-ui,-apple-system,Segoe UI,Roboto,sans-serif;color:#fff;
     touch-action:none;user-select:none;-webkit-user-select:none;-webkit-tap-highlight-color:transparent}
   canvas{position:fixed;inset:0;display:block;touch-action:none}
-  #muteBtn{position:fixed;top:10px;right:10px;z-index:10;width:48px;height:48px;border-radius:12px;
-    border:2px solid rgba(255,255,255,.35);background:rgba(0,0,0,.45);color:#fff;font-size:24px;
+  #muteBtn{position:fixed;top:10px;right:10px;z-index:10;width:48px;height:48px;border-radius:14px;
+    border:1px solid rgba(255,255,255,.35);background:rgba(10,25,40,.5);backdrop-filter:blur(8px);-webkit-backdrop-filter:blur(8px);box-shadow:0 8px 22px rgba(0,0,0,.35);color:#fff;font-size:24px;
     line-height:1;cursor:pointer;display:flex;align-items:center;justify-content:center;padding:0}
   #muteBtn:active{background:rgba(255,255,255,.25)}
 </style>
@@ -380,17 +380,18 @@ function rr(x,y,w,h,r){
   ctx.arcTo(x,y+h,x,y,r); ctx.arcTo(x,y,x+w,y,r); ctx.closePath();
 }
 function drawBackground(){
-  ctx.fillStyle='#0b1e2d'; ctx.fillRect(0,0,W,H);
-  // rows
+  const bgG=ctx.createLinearGradient(0,0,0,H); bgG.addColorStop(0,'#12314d'); bgG.addColorStop(1,'#050f18');
+  ctx.fillStyle=bgG; ctx.fillRect(0,0,W,H);
+  // rows — layered gradients for depth
   for(let r=0;r<ROWS;r++){
     const y=OY+r*CELL;
-    let c;
-    if(r===0) c='#14532d';
-    else if(r>=1&&r<=5) c=(r%2?'#1565a8':'#176fb5');
-    else if(r===6) c='#3f6212';
-    else if(r>=7&&r<=11) c='#2b2f36';
-    else c='#3f6212';
-    ctx.fillStyle=c; ctx.fillRect(OX,y,FW,CELL);
+    const g=ctx.createLinearGradient(0,y,0,y+CELL);
+    if(r===0){ g.addColorStop(0,'#1c6b3a'); g.addColorStop(1,'#0f4423'); }
+    else if(r>=1&&r<=5){ if(r%2){ g.addColorStop(0,'#1d7cc4'); g.addColorStop(1,'#12548c'); } else { g.addColorStop(0,'#2288d2'); g.addColorStop(1,'#1560a0'); } }
+    else if(r===6||r===12){ g.addColorStop(0,'#5d8a22'); g.addColorStop(1,'#3a5c10'); }
+    else { g.addColorStop(0,'#3a3f4a'); g.addColorStop(1,'#22252c'); }
+    ctx.fillStyle=g; ctx.fillRect(OX,y,FW,CELL);
+    ctx.fillStyle='rgba(255,255,255,.07)'; ctx.fillRect(OX,y,FW,2);
     if(r>=7&&r<=11){ // lane dashes
       ctx.fillStyle='rgba(255,235,150,.55)';
       const dashW=CELL*0.55;
@@ -434,8 +435,10 @@ function drawBackground(){
 }
 function drawLog(e,row){
   const y=OY+row*CELL;
-  ctx.fillStyle='#8b5a2b'; rr(e.x,y+CELL*0.16,e.w,CELL*0.68,CELL*0.22); ctx.fill();
-  ctx.fillStyle='#a06a35'; rr(e.x+4,y+CELL*0.24,e.w-8,CELL*0.20,CELL*0.10); ctx.fill();
+  ctx.fillStyle='rgba(0,20,40,.30)'; rr(e.x+2,y+CELL*0.20,e.w,CELL*0.68,CELL*0.22); ctx.fill();
+  const lg=ctx.createLinearGradient(0,y+CELL*0.16,0,y+CELL*0.84); lg.addColorStop(0,'#b57a3e'); lg.addColorStop(0.5,'#8b5a2b'); lg.addColorStop(1,'#5f3a18');
+  ctx.fillStyle=lg; rr(e.x,y+CELL*0.16,e.w,CELL*0.68,CELL*0.22); ctx.fill();
+  ctx.fillStyle='rgba(255,220,160,.35)'; rr(e.x+4,y+CELL*0.24,e.w-8,CELL*0.20,CELL*0.10); ctx.fill();
   ctx.fillStyle='#6d4420';
   ctx.beginPath(); ctx.arc(e.x+CELL*0.32,y+CELL/2,CELL*0.13,0,Math.PI*2); ctx.fill();
   ctx.beginPath(); ctx.arc(e.x+e.w-CELL*0.32,y+CELL/2,CELL*0.13,0,Math.PI*2); ctx.fill();
@@ -444,8 +447,10 @@ function drawLog(e,row){
 }
 function drawVehicle(e,row){
   const y=OY+row*CELL, h=CELL*0.68, yy=y+(CELL-h)/2;
-  ctx.fillStyle='rgba(0,0,0,.25)'; rr(e.x+2,yy+3,e.w,h,8); ctx.fill();
-  ctx.fillStyle=e.color; rr(e.x,yy,e.w,h,8); ctx.fill();
+  ctx.fillStyle='rgba(0,0,0,.32)'; rr(e.x+2,yy+4,e.w,h,8); ctx.fill();
+  const vg=ctx.createLinearGradient(0,yy,0,yy+h); vg.addColorStop(0,e.color); vg.addColorStop(1,'rgba(0,0,0,0.28)');
+  ctx.fillStyle=vg; rr(e.x,yy,e.w,h,8); ctx.fill();
+  ctx.fillStyle='rgba(255,255,255,.28)'; rr(e.x+3,yy+2,e.w-6,h*0.30,6); ctx.fill();
   // cabin / cargo
   ctx.fillStyle='rgba(255,255,255,.35)';
   if(e.kind==='car'){ rr(e.x+e.w*0.28,yy+h*0.16,e.w*0.42,h*0.42,5); ctx.fill(); }
@@ -478,9 +483,11 @@ function drawTurtle(cx,cy,s,face,small){
   ctx.fillStyle='#052e16';
   ctx.beginPath(); ctx.arc(-s*0.11,-s*0.84,s*0.06,0,Math.PI*2); ctx.fill();
   ctx.beginPath(); ctx.arc(s*0.11,-s*0.84,s*0.06,0,Math.PI*2); ctx.fill();
-  // shell
-  ctx.fillStyle='#15803d'; ctx.beginPath(); ctx.arc(0,0,s*0.78,0,Math.PI*2); ctx.fill();
-  ctx.fillStyle='#22c55e'; ctx.beginPath(); ctx.arc(0,0,s*0.56,0,Math.PI*2); ctx.fill();
+  // shell — glossy gradient
+  const sg=ctx.createRadialGradient(-s*0.25,-s*0.3,s*0.15,0,0,s*0.85); sg.addColorStop(0,'#4ade80'); sg.addColorStop(0.6,'#22c55e'); sg.addColorStop(1,'#15803d');
+  ctx.fillStyle=sg; ctx.beginPath(); ctx.arc(0,0,s*0.78,0,Math.PI*2); ctx.fill();
+  ctx.fillStyle='#34d399'; ctx.beginPath(); ctx.arc(0,0,s*0.56,0,Math.PI*2); ctx.fill();
+  ctx.fillStyle='rgba(255,255,255,.35)'; ctx.beginPath(); ctx.ellipse(-s*0.28,-s*0.34,s*0.28,s*0.14,-0.5,0,Math.PI*2); ctx.fill();
   ctx.strokeStyle='#14532d'; ctx.lineWidth=Math.max(1.5,s*0.08);
   ctx.beginPath(); ctx.arc(0,0,s*0.34,0,Math.PI*2); ctx.stroke();
   ctx.beginPath(); ctx.moveTo(-s*0.56,0); ctx.lineTo(s*0.56,0); ctx.stroke();
@@ -498,6 +505,9 @@ function drawHero(){
 function drawHUD(){
   ctx.textAlign='left'; ctx.textBaseline='top';
   const pad=12;
+  ctx.save(); ctx.shadowColor='rgba(0,0,0,.35)'; ctx.shadowBlur=12; ctx.shadowOffsetY=3;
+  ctx.fillStyle='rgba(8,22,36,.48)'; rr(6,6,132,104,14); ctx.fill(); ctx.restore();
+  ctx.lineWidth=1; ctx.strokeStyle='rgba(255,255,255,.28)'; rr(6,6,132,104,14); ctx.stroke();
   ctx.fillStyle='#fff'; ctx.font='bold 18px system-ui,sans-serif';
   ctx.fillText('Score '+score,pad,10);
   ctx.font='14px system-ui,sans-serif'; ctx.fillStyle='rgba(255,255,255,.85)';
@@ -520,7 +530,12 @@ function drawHUD(){
   }
 }
 function overlay(title,lines,bigColor){
-  ctx.fillStyle='rgba(4,18,30,.78)'; ctx.fillRect(0,0,W,H);
+  ctx.fillStyle='rgba(4,18,30,.62)'; ctx.fillRect(0,0,W,H);
+  const pw=Math.min(W-32,430), ph=150+lines.length*28, px=(W-pw)/2, py=H/2-90-ph/2+40;
+  ctx.save(); ctx.shadowColor='rgba(0,0,0,.5)'; ctx.shadowBlur=30; ctx.shadowOffsetY=12;
+  const pg=ctx.createLinearGradient(0,py,0,py+ph); pg.addColorStop(0,'rgba(22,42,64,.90)'); pg.addColorStop(1,'rgba(8,18,30,.92)');
+  ctx.fillStyle=pg; rr(px,py,pw,ph,20); ctx.fill(); ctx.restore();
+  ctx.lineWidth=1.5; ctx.strokeStyle='rgba(255,255,255,.20)'; rr(px,py,pw,ph,20); ctx.stroke();
   ctx.textAlign='center'; ctx.textBaseline='middle';
   ctx.fillStyle=bigColor||'#fff'; ctx.font='bold 42px system-ui,sans-serif';
   ctx.fillText(title,W/2,H/2-90);

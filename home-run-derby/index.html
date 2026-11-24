@@ -9,16 +9,25 @@
 <title>Home Run Derby</title>
 <style>
   * { margin:0; padding:0; box-sizing:border-box; }
-  html, body { width:100%; height:100%; overflow:hidden; background:#0d2b16;
+  html, body { width:100%; height:100%; overflow:hidden;
+    background:
+      radial-gradient(120% 90% at 50% 0%, #1d3a24 0%, rgba(29,58,36,0) 55%),
+      linear-gradient(180deg, #0d2b16 0%, #08190d 60%, #050f07 100%);
     font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
     touch-action:none; user-select:none; -webkit-user-select:none; -webkit-tap-highlight-color: transparent; }
   canvas { position:fixed; inset:0; display:block; touch-action:none; }
-  #muteBtn { position:fixed; top:10px; right:10px; z-index:10; width:48px; height:48px; border-radius:12px;
-    border:2px solid rgba(255,255,255,.7); background:rgba(8,35,16,.55); color:#fff; font-size:22px;
+  #muteBtn { position:fixed; top:10px; right:10px; z-index:10; width:48px; height:48px; border-radius:14px;
+    border:1px solid rgba(255,255,255,.45);
+    background:linear-gradient(180deg, rgba(30,70,38,.68), rgba(6,26,12,.68));
+    -webkit-backdrop-filter:blur(6px); backdrop-filter:blur(6px);
+    box-shadow:0 6px 18px rgba(0,0,0,.4), inset 0 1px 0 rgba(255,255,255,.25);
+    color:#fff; font-size:22px;
     line-height:1; cursor:pointer; display:flex; align-items:center; justify-content:center; padding:0; }
   #swing { position:fixed; left:50%; transform:translateX(-50%); bottom:calc(18px + env(safe-area-inset-bottom)); z-index:10;
     width:210px; height:76px; border-radius:38px; border:3px solid #ffe9a8;
-    background:linear-gradient(180deg,#e0532f,#b9331c); color:#fff; font-size:27px; font-weight:800; letter-spacing:1px; cursor:pointer; }
+    background:linear-gradient(180deg,#f0683c,#c93a1e 55%,#a82c14); color:#fff; font-size:27px; font-weight:800; letter-spacing:1px; cursor:pointer;
+    box-shadow:0 12px 28px rgba(0,0,0,.5), inset 0 2px 0 rgba(255,255,255,.35), inset 0 -4px 0 rgba(0,0,0,.22);
+    text-shadow:0 2px 4px rgba(0,0,0,.35); }
   #swing:active { filter:brightness(1.25); }
 </style>
 </head>
@@ -125,8 +134,8 @@ const PLATE_Y = 560, MOUND_Y = 196, ZONE_PX = 84; // last 84 px before the plate
 const PERFECT_MS = 60, CONTACT_MS = 160;          // timing half-windows → 320 ms full contact window
 let state = "menu"; // menu | play | over
 let pitch, score, homers, hits, outs, dist, best, bestHR, banner, bannerT, swingT, nextAt, lastT;
-best = +(localStorage.getItem("derby_best") || 0);
-bestHR = +(localStorage.getItem("derby_besthr") || 0);
+// guarded storage: a throwing read at startup (storage denied) must not kill the script
+try { best = +(localStorage.getItem("derby_best") || 0); bestHR = +(localStorage.getItem("derby_besthr") || 0); } catch (e) { best = 0; bestHR = 0; }
 function newPitch(now) {
   const keys = Object.keys(PITCHES);
   const type = keys[Math.floor(Math.random() * keys.length)];
@@ -185,8 +194,8 @@ function doSwing(now) {
 }
 function finish(now) {
   state = "over"; bannerT = now;
-  if (score > best) { best = score; localStorage.setItem("derby_best", best); }
-  if (homers > bestHR) { bestHR = homers; localStorage.setItem("derby_besthr", bestHR); }
+  if (score > best) { best = score; try { localStorage.setItem("derby_best", best); } catch (e) {} }
+  if (homers > bestHR) { bestHR = homers; try { localStorage.setItem("derby_besthr", bestHR); } catch (e) {} }
 }
 function startGame() {
   score = 0; homers = 0; hits = 0; outs = 0; dist = 0; banner = ""; pitch = null;
@@ -216,31 +225,91 @@ function fairnessCheck() {
 }
 
 /* ---------------- draw ---------------- */
+// Visual helpers (restyle): safe gradient wrappers — if a canvas stub
+// returns a plain object without addColorStop, patch it so nothing throws.
+function gradL(x0, y0, x1, y1) {
+  const g = ctx.createLinearGradient(x0, y0, x1, y1);
+  if (g && typeof g.addColorStop !== "function") { try { g.addColorStop = function () {}; } catch (e) { return "#888888"; } }
+  return g;
+}
+function gradR(x0, y0, r0, x1, y1, r1) {
+  const g = ctx.createRadialGradient(x0, y0, r0, x1, y1, r1);
+  if (g && typeof g.addColorStop !== "function") { try { g.addColorStop = function () {}; } catch (e) { return "#888888"; } }
+  return g;
+}
+function shade(hex, amt) {
+  const n = parseInt(hex.slice(1), 16);
+  const c = v => Math.max(0, Math.min(255, v));
+  return "rgb(" + c((n >> 16) + amt) + "," + c(((n >> 8) & 255) + amt) + "," + c((n & 255) + amt) + ")";
+}
+function rr(x, y, w, h, r) {
+  r = Math.min(r, w / 2, h / 2);
+  ctx.beginPath(); ctx.moveTo(x + r, y);
+  ctx.arcTo(x + w, y, x + w, y + h, r); ctx.arcTo(x + w, y + h, x, y + h, r);
+  ctx.arcTo(x, y + h, x, y, r); ctx.arcTo(x, y, x + w, y, r);
+  ctx.closePath();
+}
+function glassPanel(x, y, w, h, r) {
+  ctx.save();
+  ctx.shadowColor = "rgba(2,10,5,.5)"; ctx.shadowBlur = 30; ctx.shadowOffsetY = 10;
+  const g = gradL(0, y, 0, y + h);
+  g.addColorStop(0, "rgba(18,38,24,.90)"); g.addColorStop(1, "rgba(6,16,9,.92)");
+  ctx.fillStyle = g; rr(x, y, w, h, r); ctx.fill();
+  ctx.restore();
+  ctx.lineWidth = 1.5; ctx.strokeStyle = "rgba(255,255,255,.18)"; rr(x, y, w, h, r); ctx.stroke();
+  ctx.strokeStyle = "rgba(255,255,255,.10)"; ctx.lineWidth = 1;
+  ctx.beginPath(); ctx.moveTo(x + r, y + 1); ctx.lineTo(x + w - r, y + 1); ctx.stroke();
+}
 function draw(now) {
   ctx.setTransform(1, 0, 0, 1, 0, 0);
   ctx.fillStyle = "#08190d"; ctx.fillRect(0, 0, canvas.width, canvas.height);
   ctx.setTransform(scale, 0, 0, scale, ox, oy);
   // stands + field
-  const sky = ctx.createLinearGradient(0, 0, 0, 250);
-  sky.addColorStop(0, "#274a78"); sky.addColorStop(1, "#7fa6c9");
+  const sky = gradL(0, 0, 0, 250);
+  sky.addColorStop(0, "#16283f"); sky.addColorStop(0.6, "#3d6390"); sky.addColorStop(1, "#8fb4d4");
   ctx.fillStyle = sky; ctx.fillRect(0, 0, VW, 250);
-  ctx.fillStyle = "#54473a"; ctx.fillRect(0, 150, VW, 100);
+  // floodlight glows in the dusk sky
+  for (const fx of [42, VW - 42]) {
+    const fg = gradR(fx, 26, 4, fx, 26, 74);
+    fg.addColorStop(0, "rgba(255,246,210,.85)"); fg.addColorStop(0.35, "rgba(255,240,190,.28)"); fg.addColorStop(1, "rgba(255,240,190,0)");
+    ctx.fillStyle = fg; ctx.fillRect(fx - 74, -48, 148, 148);
+    ctx.fillStyle = "#fffbe8"; ctx.beginPath(); ctx.arc(fx, 26, 6, 0, 7); ctx.fill();
+  }
+  const stands = gradL(0, 150, 0, 250);
+  stands.addColorStop(0, "#6a5947"); stands.addColorStop(1, "#463a2f");
+  ctx.fillStyle = stands; ctx.fillRect(0, 150, VW, 100);
+  ctx.fillStyle = "rgba(255,240,200,.45)"; ctx.fillRect(0, 147, VW, 3);
   for (let i = 0; i < 130; i++) { ctx.fillStyle = ["#d9b38c", "#8fb0d8", "#e8e3d5", "#c96f4a"][(i * 7) % 4]; ctx.fillRect((i * 53) % VW, 158 + (i * 29) % 84, 4, 4); }
-  ctx.fillStyle = "#2e7d3e"; ctx.beginPath();
+  const grass = gradL(0, 250, 0, VH);
+  grass.addColorStop(0, "#35934a"); grass.addColorStop(1, "#1e5c2c");
+  ctx.fillStyle = grass; ctx.beginPath();
   ctx.moveTo(0, 250); ctx.lineTo(VW, 250); ctx.lineTo(VW, VH); ctx.lineTo(0, VH); ctx.closePath(); ctx.fill();
-  ctx.fillStyle = "#3f9e52"; ctx.beginPath();
+  const wedge = gradL(0, 250, 0, VH);
+  wedge.addColorStop(0, "#4cb364"); wedge.addColorStop(1, "#2f7d3e");
+  ctx.fillStyle = wedge; ctx.beginPath();
   ctx.moveTo(VW / 2, 250); ctx.lineTo(VW, VH); ctx.lineTo(0, VH); ctx.closePath(); ctx.fill();
-  ctx.fillStyle = "#c9a06a"; ctx.beginPath(); // dirt diamond wedge
+  // mow stripes across the outfield grass
+  ctx.fillStyle = "rgba(255,255,255,.05)";
+  for (let y = 278; y < VH; y += 112) ctx.fillRect(0, y, VW, 56);
+  const dirt = gradL(0, MOUND_Y - 4, 0, PLATE_Y + 26);
+  dirt.addColorStop(0, "#dcb87f"); dirt.addColorStop(1, "#b28a52");
+  ctx.fillStyle = dirt; ctx.beginPath(); // dirt diamond wedge
   ctx.moveTo(VW / 2 - 14, MOUND_Y - 4); ctx.lineTo(VW / 2 + 14, MOUND_Y - 4); ctx.lineTo(VW / 2 + 64, PLATE_Y + 26); ctx.lineTo(VW / 2 - 64, PLATE_Y + 26); ctx.closePath(); ctx.fill();
   ctx.fillStyle = "#e8e3d5"; ctx.fillRect(VW / 2 - 26, PLATE_Y + 18, 52, 7); // plate
   // strike zone hint
   ctx.strokeStyle = "rgba(255,255,255,.55)"; ctx.lineWidth = 2; ctx.setLineDash([6, 5]);
   ctx.strokeRect(VW / 2 - 46, PLATE_Y - 66, 92, 88); ctx.setLineDash([]);
   // pitcher
-  ctx.fillStyle = "#28418c"; ctx.beginPath(); ctx.arc(VW / 2, MOUND_Y - 34, 11, 0, 7); ctx.fill();
-  ctx.fillRect(VW / 2 - 10, MOUND_Y - 24, 20, 26);
+  ctx.fillStyle = "rgba(0,0,0,.18)"; ctx.beginPath(); ctx.ellipse(VW / 2, MOUND_Y + 4, 15, 4, 0, 0, 7); ctx.fill();
+  ctx.fillStyle = "#e8b98d"; ctx.beginPath(); ctx.arc(VW / 2, MOUND_Y - 34, 11, 0, 7); ctx.fill();
+  const jersey = gradL(0, MOUND_Y - 24, 0, MOUND_Y + 2);
+  jersey.addColorStop(0, "#35539f"); jersey.addColorStop(1, "#1f3468");
+  ctx.fillStyle = jersey; ctx.fillRect(VW / 2 - 10, MOUND_Y - 24, 20, 26);
   ctx.fillStyle = "#f2f2f2"; ctx.fillRect(VW / 2 - 12, MOUND_Y - 46, 24, 6);
-  // HUD
+  ctx.fillStyle = "rgba(255,255,255,.35)"; ctx.fillRect(VW / 2 - 12, MOUND_Y - 46, 24, 2);
+  // HUD — frosted pill behind the readouts
+  ctx.fillStyle = "rgba(6,20,10,.50)"; rr(8, 12, 348, 56, 14); ctx.fill();
+  ctx.strokeStyle = "rgba(255,255,255,.22)"; ctx.lineWidth = 1; rr(8, 12, 348, 56, 14); ctx.stroke();
   ctx.fillStyle = "#fff"; ctx.font = "700 21px system-ui"; ctx.textAlign = "left";
   ctx.fillText("HR " + homers + "   HITS " + hits + "   OUTS " + outs + "/10", 16, 34);
   ctx.font = "600 15px system-ui"; ctx.fillStyle = "#ffe9a8";
@@ -249,7 +318,9 @@ function draw(now) {
   if (state === "play" && pitch) {
     const b = ballPos(now);
     if (b.t >= 0) {
-      ctx.fillStyle = PITCHES[pitch.type].color;
+      const ballGrad = gradR(b.x - b.r * 0.35, b.y - b.r * 0.4, b.r * 0.15, b.x, b.y, b.r * 1.25);
+      ballGrad.addColorStop(0, "#ffffff"); ballGrad.addColorStop(0.55, PITCHES[pitch.type].color); ballGrad.addColorStop(1, shade(PITCHES[pitch.type].color, -70));
+      ctx.fillStyle = ballGrad;
       ctx.beginPath(); ctx.arc(b.x, b.y, b.r, 0, 7); ctx.fill();
       ctx.strokeStyle = "#c0392b"; ctx.lineWidth = Math.max(1.5, b.r * 0.09);
       ctx.beginPath(); ctx.arc(b.x - b.r * 0.35, b.y, b.r * 0.55, -1.1, 1.1); ctx.stroke();
@@ -259,18 +330,24 @@ function draw(now) {
   }
   // swing flash
   if (swingT && now - swingT < 200) {
+    ctx.strokeStyle = "rgba(255,190,90,.30)"; ctx.lineWidth = 15;
+    ctx.beginPath(); ctx.arc(VW / 2, PLATE_Y, 92, -0.4, 1.7); ctx.stroke();
     ctx.strokeStyle = "rgba(255,233,168,.9)"; ctx.lineWidth = 7;
     ctx.beginPath(); ctx.arc(VW / 2, PLATE_Y, 92, -0.4, 1.7); ctx.stroke();
   }
   if (banner && now - bannerT < 1400 && state !== "menu") {
-    ctx.fillStyle = "rgba(0,0,0,.55)"; ctx.fillRect(0, 300, VW, 56);
-    ctx.fillStyle = banner.includes("HOME RUN") ? "#ffd94a" : "#fff";
     ctx.font = "800 26px system-ui"; ctx.textAlign = "center";
+    const bw = ctx.measureText(banner).width + 56;
+    ctx.fillStyle = "rgba(6,18,9,.68)"; rr(VW / 2 - bw / 2, 298, bw, 60, 16); ctx.fill();
+    ctx.strokeStyle = "rgba(255,255,255,.22)"; ctx.lineWidth = 1; rr(VW / 2 - bw / 2, 298, bw, 60, 16); ctx.stroke();
+    ctx.fillStyle = banner.includes("HOME RUN") ? "#ffd94a" : "#fff";
     ctx.fillText(banner, VW / 2, 338);
   }
   if (state === "menu") {
-    ctx.fillStyle = "rgba(4,16,8,.82)"; ctx.fillRect(0, 220, VW, 235);
-    ctx.fillStyle = "#fff"; ctx.font = "700 32px system-ui"; ctx.textAlign = "center";
+    glassPanel(14, 214, VW - 28, 248, 20);
+    const titleGrad = gradL(0, 252, 0, 288);
+    titleGrad.addColorStop(0, "#ffffff"); titleGrad.addColorStop(0.6, "#ffe9a8"); titleGrad.addColorStop(1, "#ffb84d");
+    ctx.fillStyle = titleGrad; ctx.font = "700 32px system-ui"; ctx.textAlign = "center";
     ctx.fillText("HOME RUN DERBY", VW / 2, 284);
     ctx.font = "400 16px system-ui"; ctx.fillStyle = "#d7ecd9";
     ctx.fillText("Watch the pitch grow toward the plate.", VW / 2, 320);
@@ -280,8 +357,10 @@ function draw(now) {
     ctx.fillText("TAP TO START", VW / 2, 422);
   }
   if (state === "over") {
-    ctx.fillStyle = "rgba(4,16,8,.84)"; ctx.fillRect(0, 220, VW, 245);
-    ctx.fillStyle = "#fff"; ctx.font = "700 31px system-ui"; ctx.textAlign = "center";
+    glassPanel(14, 214, VW - 28, 258, 20);
+    const overGrad = gradL(0, 250, 0, 286);
+    overGrad.addColorStop(0, "#ffffff"); overGrad.addColorStop(0.6, "#ffe9a8"); overGrad.addColorStop(1, "#ffb84d");
+    ctx.fillStyle = overGrad; ctx.font = "700 31px system-ui"; ctx.textAlign = "center";
     ctx.fillText("DERBY OVER", VW / 2, 282);
     ctx.font = "400 18px system-ui"; ctx.fillStyle = "#d7ecd9";
     ctx.fillText(homers + " home runs · " + hits + " hits · " + dist + " ft", VW / 2, 320);
@@ -312,8 +391,8 @@ window.addEventListener("keydown", e => {
 });
 const muteBtn = document.getElementById("muteBtn");
 function syncMute() { muteBtn.textContent = muted ? "🔇" : "🔊"; }
-muteBtn.addEventListener("click", e => { e.stopPropagation(); muted = !muted; localStorage.setItem("derby_muted", muted ? 1 : 0); syncMute(); });
-muted = localStorage.getItem("derby_muted") === "1"; syncMute();
+muteBtn.addEventListener("click", e => { e.stopPropagation(); muted = !muted; try { localStorage.setItem("derby_muted", muted ? 1 : 0); } catch (e) {} syncMute(); });
+try { muted = localStorage.getItem("derby_muted") === "1"; } catch (e) { muted = false; } syncMute();
 if (QA_MODE) fairnessCheck();
 </script>
 </body>

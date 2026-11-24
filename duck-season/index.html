@@ -9,12 +9,18 @@
 <title>Duck Season</title>
 <style>
   * { margin:0; padding:0; box-sizing:border-box; }
-  html, body { width:100%; height:100%; overflow:hidden; background:#7ec8e3;
+  html, body { width:100%; height:100%; overflow:hidden;
+    background:
+      radial-gradient(120% 90% at 50% 0%, #bfe9f7 0%, rgba(191,233,247,0) 55%),
+      linear-gradient(180deg, #7ec8e3 0%, #4a9ec4 60%, #2f7396 100%);
     font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
     touch-action:none; user-select:none; -webkit-user-select:none; -webkit-tap-highlight-color: transparent; }
   canvas { position:fixed; inset:0; display:block; touch-action:none; cursor:crosshair; }
-  #muteBtn { position:fixed; top:10px; right:10px; z-index:10; width:48px; height:48px; border-radius:12px;
-    border:2px solid rgba(255,255,255,.55); background:rgba(20,60,90,.45); color:#fff; font-size:22px;
+  #muteBtn { position:fixed; top:10px; right:10px; z-index:10; width:48px; height:48px; border-radius:14px;
+    border:1px solid rgba(255,255,255,.65); background:linear-gradient(180deg, rgba(70,140,180,.55), rgba(20,60,90,.55));
+    backdrop-filter:blur(8px); -webkit-backdrop-filter:blur(8px);
+    box-shadow:0 6px 18px rgba(10,40,60,.35), inset 0 1px 0 rgba(255,255,255,.35);
+    color:#fff; font-size:22px;
     line-height:1; cursor:pointer; display:flex; align-items:center; justify-content:center; padding:0; }
 </style>
 </head>
@@ -76,10 +82,15 @@ function resize() {
 }
 window.addEventListener("resize", resize); resize();
 
-let actx = null, muted = localStorage.getItem("dsMuted") === "1", musicTimer = null, musicStep = 0;
+// Guarded storage (2026-11-23 restyle robustness fix): a raw localStorage
+// read at boot throws when storage is denied (preview panes / private mode)
+// and kills the whole script — same keys, wrapped in try/catch.
+function lsGet(k) { try { return localStorage.getItem(k); } catch (e) { return null; } }
+function lsSet(k, v) { try { localStorage.setItem(k, v); } catch (e) {} }
+let actx = null, muted = lsGet("dsMuted") === "1", musicTimer = null, musicStep = 0;
 const muteBtn = document.getElementById("muteBtn");
 muteBtn.textContent = muted ? "🔇" : "🔊";
-muteBtn.addEventListener("click", () => { muted = !muted; localStorage.setItem("dsMuted", muted ? "1" : "0"); muteBtn.textContent = muted ? "🔇" : "🔊"; });
+muteBtn.addEventListener("click", () => { muted = !muted; lsSet("dsMuted", muted ? "1" : "0"); muteBtn.textContent = muted ? "🔇" : "🔊"; });
 function initAudio() {
   iosPlaybackSession();
   if (!actx || actx.state === "closed") { try { const AC = window.AudioContext || window.webkitAudioContext; if (AC) actx = new AC(); window.__maCtx = actx; window.__maActx = function () { return actx; };; } catch (e) {} }
@@ -113,7 +124,7 @@ function startMusic() {
 let state = "menu", round = 1, score = 0, best = 0, hits = 0, ducksSeen = 0;
 let ducks = [], spawnTimer = 0, flightAmmo = 0, roundMsg = "", roundMsgT = 0;
 let crossX = VW / 2, crossY = VH / 2;
-best = parseInt(localStorage.getItem("dsBest") || "0", 10);
+best = parseInt(lsGet("dsBest") || "0", 10);
 function quota() { return Math.min(10, 5 + round); }
 function duckSpeed() { return Math.min(MAX_SPEED, 95 + round * 16); }
 function resetGame() {
@@ -153,7 +164,7 @@ function update(dt) {
       roundMsg = "Round " + round + " — hit " + quota() + " of 10!"; roundMsgT = 2.2;
     } else {
       state = "over"; sfx("lose");
-      if (score > best) { best = score; localStorage.setItem("dsBest", String(best)); }
+      if (score > best) { best = score; lsSet("dsBest", String(best)); }
     }
   }
 }
@@ -186,19 +197,72 @@ window.addEventListener("keydown", e => {
   if (e.key === "Enter" && state !== "play") { initAudio(); startMusic(); resetGame(); state = "play"; }
 });
 
+// ---- visual-only helpers (restyle): rounded rects, glass panels, HUD pill ----
+function rr(x, y, w, h, r) {
+  ctx.beginPath(); ctx.moveTo(x + r, y);
+  ctx.arcTo(x + w, y, x + w, y + h, r); ctx.arcTo(x + w, y + h, x, y + h, r);
+  ctx.arcTo(x, y + h, x, y, r); ctx.arcTo(x, y, x + w, y, r); ctx.closePath();
+}
+function glassPanel(x, y, w, h) {
+  ctx.save();
+  ctx.shadowColor = "rgba(10,40,60,.4)"; ctx.shadowBlur = 26; ctx.shadowOffsetY = 10;
+  const g = ctx.createLinearGradient(0, y, 0, y + h);
+  g.addColorStop(0, "rgba(240,250,255,.88)"); g.addColorStop(1, "rgba(190,225,245,.92)");
+  rr(x, y, w, h, 18); ctx.fillStyle = g; ctx.fill();
+  ctx.restore();
+  rr(x, y, w, h, 18); ctx.strokeStyle = "rgba(255,255,255,.7)"; ctx.lineWidth = 1.5; ctx.stroke();
+  rr(x + 6, y + 6, w - 12, (h - 12) / 2, 12); ctx.fillStyle = "rgba(255,255,255,.35)"; ctx.fill();
+}
+function hudPill() {
+  ctx.save();
+  ctx.shadowColor = "rgba(10,40,60,.35)"; ctx.shadowBlur = 10; ctx.shadowOffsetY = 3;
+  const g = ctx.createLinearGradient(0, 6, 0, 44);
+  g.addColorStop(0, "rgba(38,92,124,.85)"); g.addColorStop(1, "rgba(18,52,74,.85)");
+  rr(6, 6, VW - 12, 38, 19); ctx.fillStyle = g; ctx.fill();
+  ctx.restore();
+  rr(6, 6, VW - 12, 38, 19); ctx.strokeStyle = "rgba(255,255,255,.35)"; ctx.lineWidth = 1; ctx.stroke();
+}
 function draw() {
   ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
-  ctx.fillStyle = "#7ec8e3"; ctx.fillRect(0, 0, W, H);
+  const pageG = ctx.createLinearGradient(0, 0, 0, H);
+  pageG.addColorStop(0, "#8fd0ea"); pageG.addColorStop(0.6, "#57a8cf"); pageG.addColorStop(1, "#35779c");
+  ctx.fillStyle = pageG; ctx.fillRect(0, 0, W, H);
   ctx.setTransform(scale, 0, 0, scale, ox, oy);
-  // sky + clouds + grass
-  ctx.fillStyle = "#a5dcf0"; ctx.fillRect(0, 0, VW, VH);
-  ctx.fillStyle = "rgba(255,255,255,.85)";
-  for (let i = 0; i < 5; i++) { const x = (i * 130 + 30) % VW, y = 70 + i * 55; ctx.fillRect(x, y, 56, 16); ctx.fillRect(x + 12, y - 10, 32, 12); }
-  ctx.fillStyle = "#57a85c"; ctx.fillRect(0, VH - 90, VW, 90);
-  ctx.fillStyle = "#3d8a44"; ctx.fillRect(0, VH - 90, VW, 10);
+  // sky gradient with depth + sun halo (visual only)
+  const skyG = ctx.createLinearGradient(0, 0, 0, VH);
+  skyG.addColorStop(0, "#aee2f5"); skyG.addColorStop(0.55, "#8fd0ea"); skyG.addColorStop(1, "#cdeffb");
+  ctx.fillStyle = skyG; ctx.fillRect(0, 0, VW, VH);
+  const sun = ctx.createRadialGradient(52, 58, 6, 52, 58, 120);
+  sun.addColorStop(0, "rgba(255,244,180,.95)"); sun.addColorStop(0.25, "rgba(255,236,150,.55)"); sun.addColorStop(1, "rgba(255,236,150,0)");
+  ctx.fillStyle = sun; ctx.fillRect(0, 0, VW, VH);
+  ctx.fillStyle = "#fff3b0"; ctx.beginPath(); ctx.arc(52, 58, 22, 0, Math.PI * 2); ctx.fill();
+  // soft rounded clouds (same anchor points as before, glossier shapes)
+  for (let i = 0; i < 5; i++) {
+    const x = (i * 130 + 30) % VW, y = 70 + i * 55;
+    ctx.fillStyle = "rgba(190,220,238,.5)";
+    ctx.beginPath(); ctx.ellipse(x + 28, y + 10, 34, 12, 0, 0, Math.PI * 2); ctx.fill();
+    ctx.fillStyle = "rgba(255,255,255,.92)";
+    ctx.beginPath();
+    ctx.ellipse(x + 28, y + 6, 32, 12, 0, 0, Math.PI * 2);
+    ctx.ellipse(x + 14, y + 2, 18, 10, 0, 0, Math.PI * 2);
+    ctx.ellipse(x + 42, y + 1, 20, 11, 0, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.fillStyle = "rgba(255,255,255,.5)";
+    ctx.beginPath(); ctx.ellipse(x + 24, y, 18, 6, 0, 0, Math.PI * 2); ctx.fill();
+  }
+  // grass: layered gradient meadow with a lit top edge and a darker hedge band
+  const grG = ctx.createLinearGradient(0, VH - 90, 0, VH);
+  grG.addColorStop(0, "#6fc276"); grG.addColorStop(0.18, "#57a85c"); grG.addColorStop(1, "#2f7038");
+  ctx.fillStyle = grG; ctx.fillRect(0, VH - 90, VW, 90);
+  ctx.fillStyle = "rgba(255,255,200,.5)"; ctx.fillRect(0, VH - 90, VW, 3);
+  ctx.fillStyle = "rgba(30,90,40,.35)"; ctx.fillRect(0, VH - 26, VW, 26);
   if (state === "menu") {
-    ctx.fillStyle = "#1d3a4a"; ctx.textAlign = "center";
+    glassPanel(20, 104, VW - 40, 330);
+    const tg = ctx.createLinearGradient(0, 118, 0, 164);
+    tg.addColorStop(0, "#2a5a74"); tg.addColorStop(1, "#123a4c");
+    ctx.fillStyle = tg; ctx.textAlign = "center";
     ctx.font = "bold 42px system-ui"; ctx.fillText("🦆 Duck Season", VW / 2, 150);
+    ctx.fillStyle = "#1d3a4a";
     ctx.font = "20px system-ui"; ctx.fillText("Tap the ducks before they escape!", VW / 2, 210);
     ctx.fillText("3 shots per duck • 10 ducks a round", VW / 2, 240);
     ctx.font = "18px system-ui"; ctx.fillText("Best: " + best, VW / 2, 290);
@@ -208,36 +272,56 @@ function draw() {
   for (const d of ducks) {
     const y = duckY(d), flip = d.dir < 0;
     ctx.save(); ctx.translate(d.x, y); if (flip) ctx.scale(-1, 1);
+    ctx.shadowColor = "rgba(20,60,90,.35)"; ctx.shadowBlur = 7; ctx.shadowOffsetY = 3;
     ctx.fillStyle = d.color;
     ctx.beginPath(); ctx.ellipse(0, 0, 22, 12, 0, 0, Math.PI * 2); ctx.fill();
     ctx.fillRect(18, -4, 16, 7);
+    ctx.shadowColor = "transparent"; ctx.shadowBlur = 0; ctx.shadowOffsetY = 0;
+    // glossy sheen over the body + head
+    const sheen = ctx.createRadialGradient(-6, -8, 2, -6, -8, 24);
+    sheen.addColorStop(0, "rgba(255,255,255,.5)"); sheen.addColorStop(1, "rgba(255,255,255,0)");
+    ctx.fillStyle = sheen;
+    ctx.beginPath(); ctx.ellipse(0, 0, 22, 12, 0, 0, Math.PI * 2); ctx.fill();
     ctx.fillStyle = "#f2c200"; ctx.fillRect(30, -2, 8, 4);
     ctx.fillStyle = "#fff"; ctx.fillRect(22, -6, 6, 6); ctx.fillStyle = "#000"; ctx.fillRect(24, -4, 3, 3);
+    ctx.fillStyle = "rgba(255,255,255,.85)"; ctx.fillRect(23, -5, 2, 2);
     ctx.fillStyle = d.color; ctx.beginPath();
     ctx.moveTo(-8, -8); ctx.lineTo(-2, -22 + Math.sin(d.t * 10) * 4); ctx.lineTo(6, -8); ctx.fill();
+    ctx.fillStyle = "rgba(255,255,255,.35)"; ctx.beginPath();
+    ctx.moveTo(-6, -8); ctx.lineTo(-2, -19 + Math.sin(d.t * 10) * 4); ctx.lineTo(3, -8); ctx.fill();
     ctx.restore();
     if (d.hit) { ctx.fillStyle = "#e23b3b"; ctx.font = "bold 18px system-ui"; ctx.textAlign = "center"; ctx.fillText("💥", d.x, y - 20); }
   }
-  // crosshair
+  // crosshair (soft red glow)
+  ctx.save(); ctx.shadowColor = "rgba(226,59,59,.75)"; ctx.shadowBlur = 8;
   ctx.strokeStyle = "rgba(226,59,59,.9)"; ctx.lineWidth = 2;
   ctx.beginPath(); ctx.arc(crossX, crossY, 16, 0, Math.PI * 2); ctx.stroke();
   ctx.beginPath(); ctx.moveTo(crossX - 22, crossY); ctx.lineTo(crossX - 10, crossY);
   ctx.moveTo(crossX + 10, crossY); ctx.lineTo(crossX + 22, crossY);
   ctx.moveTo(crossX, crossY - 22); ctx.lineTo(crossX, crossY - 10);
   ctx.moveTo(crossX, crossY + 10); ctx.lineTo(crossX, crossY + 22); ctx.stroke();
-  ctx.fillStyle = "rgba(20,60,90,.7)"; ctx.fillRect(0, 0, VW, 44);
+  ctx.restore();
+  hudPill();
   ctx.fillStyle = "#fff"; ctx.font = "bold 18px system-ui"; ctx.textAlign = "left";
   ctx.fillText("Round " + round, 12, 28);
   ctx.textAlign = "center"; ctx.fillText("🦆 " + hits + "/" + quota() + "  •  Shots: " + flightAmmo, VW / 2, 28);
   ctx.textAlign = "right"; ctx.fillText(score + " pts", VW - 12, 28);
   if (roundMsgT > 0) {
+    ctx.fillStyle = "rgba(18,52,74,.55)"; rr(VW / 2 - 165, 58, 330, 42, 21); ctx.fill();
+    ctx.strokeStyle = "rgba(255,255,255,.35)"; ctx.lineWidth = 1; rr(VW / 2 - 165, 58, 330, 42, 21); ctx.stroke();
+    ctx.save(); ctx.shadowColor = "rgba(255,220,90,.8)"; ctx.shadowBlur = 10;
     ctx.fillStyle = "#fff"; ctx.font = "bold 20px system-ui"; ctx.textAlign = "center";
-    ctx.fillText(roundMsg, VW / 2, 90);
+    ctx.fillText(roundMsg, VW / 2, 86);
+    ctx.restore();
   }
   if (state === "over") {
-    ctx.fillStyle = "rgba(0,0,0,.6)"; ctx.fillRect(0, 0, VW, VH);
-    ctx.fillStyle = "#fff"; ctx.textAlign = "center";
+    ctx.fillStyle = "rgba(8,30,45,.55)"; ctx.fillRect(0, 0, VW, VH);
+    glassPanel(VW / 2 - 175, VH / 2 - 95, 350, 190);
+    const og = ctx.createLinearGradient(0, VH / 2 - 62, 0, VH / 2 - 16);
+    og.addColorStop(0, "#2a5a74"); og.addColorStop(1, "#123a4c");
+    ctx.fillStyle = og; ctx.textAlign = "center";
     ctx.font = "bold 38px system-ui"; ctx.fillText("They got away!", VW / 2, VH / 2 - 20);
+    ctx.fillStyle = "#1d3a4a";
     ctx.font = "20px system-ui";
     ctx.fillText("Score: " + score + "  •  Best: " + best, VW / 2, VH / 2 + 20);
     ctx.fillText("Tap to return to menu", VW / 2, VH / 2 + 60);

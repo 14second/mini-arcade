@@ -9,17 +9,21 @@
 <title>Tilt Maze</title>
 <style>
   * { margin:0; padding:0; box-sizing:border-box; }
-  html, body { width:100%; height:100%; overflow:hidden; background:#12321e;
+  html, body { width:100%; height:100%; overflow:hidden;
+    background: radial-gradient(120% 90% at 50% 0%, #1e5c33 0%, rgba(30,92,51,0) 55%), linear-gradient(180deg, #12321e 0%, #0a2013 60%, #05150b 100%);
     font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
     touch-action:none; user-select:none; -webkit-user-select:none; -webkit-tap-highlight-color: transparent; }
   canvas { position:fixed; inset:0; display:block; touch-action:none; }
-  #muteBtn { position:fixed; top:10px; right:10px; z-index:10; width:48px; height:48px; border-radius:12px;
-    border:2px solid rgba(255,255,255,.7); background:rgba(10,40,20,.5); color:#fff; font-size:22px;
+  #muteBtn { position:fixed; top:10px; right:10px; z-index:10; width:48px; height:48px; border-radius:14px;
+    border:1.5px solid rgba(255,255,255,.55); background:linear-gradient(180deg, rgba(30,80,45,.62), rgba(8,32,16,.62)); color:#fff; font-size:22px;
+    box-shadow:0 8px 22px rgba(0,0,0,.4), inset 0 1px 0 rgba(255,255,255,.35);
     line-height:1; cursor:pointer; display:flex; align-items:center; justify-content:center; padding:0; }
   #stick { position:fixed; left:50%; transform:translateX(-50%); bottom:20px; z-index:10; width:110px; height:110px; border-radius:50%;
-    border:2px solid rgba(255,255,255,.55); background:rgba(10,40,20,.35); }
+    border:1.5px solid rgba(255,255,255,.45); background:radial-gradient(circle at 50% 35%, rgba(70,140,90,.45), rgba(10,40,20,.5) 70%);
+    box-shadow:0 12px 28px rgba(0,0,0,.45), inset 0 2px 6px rgba(255,255,255,.18), inset 0 -8px 16px rgba(0,0,0,.3); }
   #nub { position:absolute; left:50%; top:50%; width:48px; height:48px; border-radius:50%;
-    background:rgba(255,255,255,.5); transform:translate(-50%,-50%); }
+    background:radial-gradient(circle at 35% 30%, rgba(255,255,255,.95), rgba(200,220,205,.55) 55%, rgba(140,170,150,.5));
+    box-shadow:0 6px 14px rgba(0,0,0,.4), inset 0 -3px 6px rgba(0,0,0,.18); transform:translate(-50%,-50%); }
 </style>
 </head>
 <body>
@@ -77,6 +81,8 @@ function resize() {
   scale = Math.min(W / VW, H / VH) * DPR; ox = (W * DPR - VW * scale) / 2; oy = (H * DPR - VH * scale) / 2;
 }
 window.addEventListener("resize", resize); resize();
+function storeGet(k) { try { return localStorage.getItem(k); } catch (e) { return null; } }
+function storeSet(k, v) { try { localStorage.setItem(k, v); } catch (e) {} }
 
 /* ---------------- audio ---------------- */
 let actx = null, muted = false, musicTimer = null, mStep = 0;
@@ -299,10 +305,10 @@ function update(dt) {
     if (mazeIdx + 1 < MAZES.length) { state = "mazeClear"; }
     else {
       state = "win"; sfx("win");
-      const best = parseFloat(localStorage.getItem("tiltMazeBest") || "0");
-      if (!best || totalTime < best) localStorage.setItem("tiltMazeBest", totalTime.toFixed(1));
-      const bs = parseInt(localStorage.getItem("tiltMazeScore") || "0", 10);
-      if (score > bs) localStorage.setItem("tiltMazeScore", String(score));
+      const best = parseFloat(storeGet("tiltMazeBest") || "0");
+      if (!best || totalTime < best) storeSet("tiltMazeBest", totalTime.toFixed(1));
+      const bs = parseInt(storeGet("tiltMazeScore") || "0", 10);
+      if (score > bs) storeSet("tiltMazeScore", String(score));
     }
   }
 }
@@ -314,43 +320,123 @@ function hitsWall(px, py) {
 }
 
 /* ---------------- draw ---------------- */
+function gradL(x0, y0, x1, y1) {
+  const g = ctx["createLinearGradient"](x0, y0, x1, y1);
+  if (g && typeof g.addColorStop !== "function") { try { g.addColorStop = function () {}; } catch (e) { return "#888888"; } }
+  return g;
+}
+function gradR(x0, y0, r0, x1, y1, r1) {
+  const g = ctx["createRadialGradient"](x0, y0, r0, x1, y1, r1);
+  if (g && typeof g.addColorStop !== "function") { try { g.addColorStop = function () {}; } catch (e) { return "#888888"; } }
+  return g;
+}
+function rr(x, y, w, h, r) {
+  ctx.beginPath();
+  ctx.moveTo(x + r, y);
+  ctx.arcTo(x + w, y, x + w, y + h, r); ctx.arcTo(x + w, y + h, x, y + h, r);
+  ctx.arcTo(x, y + h, x, y, r); ctx.arcTo(x, y, x + w, y, r);
+  ctx.closePath();
+}
+function glassPanel(x, y, w, h, r) {
+  ctx.save();
+  ctx.shadowColor = "rgba(0,0,0,.5)"; ctx.shadowBlur = 30; ctx.shadowOffsetY = 10;
+  const g = gradL(0, y, 0, y + h);
+  g.addColorStop(0, "rgba(18,42,26,.88)"); g.addColorStop(1, "rgba(7,20,11,.90)");
+  ctx.fillStyle = g; rr(x, y, w, h, r); ctx.fill();
+  ctx.restore();
+  ctx.lineWidth = 1.5; ctx.strokeStyle = "rgba(255,255,255,.18)"; rr(x, y, w, h, r); ctx.stroke();
+}
+function starPath(cx, cy, r) {
+  ctx.beginPath();
+  for (let i = 0; i < 10; i++) {
+    const rad = i % 2 ? r * 0.48 : r, a = -Math.PI / 2 + i * Math.PI / 5;
+    const x = cx + Math.cos(a) * rad, y = cy + Math.sin(a) * rad;
+    if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+  }
+  ctx.closePath();
+}
 function draw() {
   ctx.setTransform(1, 0, 0, 1, 0, 0);
-  ctx.fillStyle = "#12321e"; ctx.fillRect(0, 0, canvas.width, canvas.height);
+  const bg = gradR(canvas.width / 2, canvas.height * 0.18, 60, canvas.width / 2, canvas.height / 2, canvas.height * 0.85);
+  bg.addColorStop(0, "#1d5a31"); bg.addColorStop(0.55, "#12321e"); bg.addColorStop(1, "#06170c");
+  ctx.fillStyle = bg; ctx.fillRect(0, 0, canvas.width, canvas.height);
   ctx.setTransform(scale, 0, 0, scale, ox, oy);
   ctx.textAlign = "center";
   if (state === "menu") {
-    ctx.fillStyle = "#ffd23e"; ctx.font = "bold 42px sans-serif"; ctx.fillText("TILT MAZE", VW / 2, 120);
-    ctx.fillStyle = "#fff"; ctx.font = "16px sans-serif";
+    glassPanel(18, 62, VW - 36, 330, 22);
+    const tg = gradL(0, 84, 0, 124);
+    tg.addColorStop(0, "#fff6c8"); tg.addColorStop(0.55, "#ffd23e"); tg.addColorStop(1, "#f09c1e");
+    ctx.fillStyle = tg; ctx.font = "bold 42px sans-serif"; ctx.fillText("TILT MAZE", VW / 2, 120);
+    ctx.fillStyle = "#eef6ee"; ctx.font = "16px sans-serif";
     ctx.fillText("Roll the marble to the gold gate before", VW / 2, 158);
     ctx.fillText("the clock runs out. Use the joystick,", VW / 2, 182);
     ctx.fillText("drag anywhere, or the arrow keys.", VW / 2, 206);
     ctx.fillText("Mind the gaps — off the edge costs a ball.", VW / 2, 242);
     ctx.fillText("5 mazes · 3 balls each · stars are risky bonus lines.", VW / 2, 268);
-    const best = localStorage.getItem("tiltMazeBest"), bs = localStorage.getItem("tiltMazeScore");
+    const best = storeGet("tiltMazeBest"), bs = storeGet("tiltMazeScore");
     if (best) { ctx.font = "bold 16px sans-serif"; ctx.fillText("Best full run: " + best + "s · Best score: " + (bs || 0), VW / 2, 308); }
-    ctx.font = "bold 21px sans-serif"; ctx.fillText("TAP TO START", VW / 2, 360);
+    ctx.save();
+    ctx.shadowColor = "rgba(0,0,0,.35)"; ctx.shadowBlur = 12; ctx.shadowOffsetY = 4;
+    const sg2 = gradL(0, 330, 0, 372);
+    sg2.addColorStop(0, "#ffe066"); sg2.addColorStop(1, "#f0a51e");
+    ctx.fillStyle = sg2; rr(VW / 2 - 110, 330, 220, 44, 22); ctx.fill();
+    ctx.restore();
+    ctx.fillStyle = "#4a3200"; ctx.font = "bold 21px sans-serif"; ctx.fillText("TAP TO START", VW / 2, 359);
     if (QA_MODE) drawQA();
     return;
   }
   const m = MAZES[mazeIdx];
-  // board
+  // board: soft drop-shadow plate under the whole maze (visual only)
+  ctx.save();
+  ctx.shadowColor = "rgba(0,0,0,.5)"; ctx.shadowBlur = 26; ctx.shadowOffsetY = 10;
+  ctx.fillStyle = "rgba(8,26,13,.9)";
+  rr(MAZE_OX - 7, MAZE_OY - 7, m.rows[0].length * CELL + 14, m.rows.length * CELL + 14, 14); ctx.fill();
+  ctx.restore();
   for (let y = 0; y < m.rows.length; y++) for (let x = 0; x < m.rows[0].length; x++) {
     const c = m.rows[y][x], px = MAZE_OX + x * CELL, py = MAZE_OY + y * CELL;
     if (c === " ") continue;
-    ctx.fillStyle = c === "#" ? "#2e6b3e" : ((x + y) % 2 ? "#dcefe0" : "#cfe6d4");
-    ctx.fillRect(px, py, CELL, CELL);
-    if (c === "#") { ctx.fillStyle = "rgba(0,0,0,.22)"; ctx.fillRect(px, py + CELL - 6, CELL, 6); }
-    if (c === "G") { ctx.fillStyle = "#ffd23e"; ctx.beginPath(); ctx.arc(px + CELL / 2, py + CELL / 2, 12, 0, 7); ctx.fill(); ctx.fillStyle = "#7a5200"; ctx.font = "bold 13px sans-serif"; ctx.fillText("G", px + CELL / 2, py + CELL / 2 + 1); }
-    if (c === "*" && !takenStars.has(x + "," + y)) { ctx.font = "17px sans-serif"; ctx.fillText("⭐", px + CELL / 2, py + CELL / 2 + 2); }
-    if (c === "S") { ctx.strokeStyle = "rgba(20,80,40,.4)"; ctx.beginPath(); ctx.arc(px + CELL / 2, py + CELL / 2, 10, 0, 7); ctx.stroke(); }
+    const cg = gradL(0, py, 0, py + CELL);
+    if (c === "#") { cg.addColorStop(0, "#3d8a52"); cg.addColorStop(0.55, "#2e6b3e"); cg.addColorStop(1, "#1f4d2a"); }
+    else if ((x + y) % 2) { cg.addColorStop(0, "#e8f5ea"); cg.addColorStop(1, "#cfe2d2"); }
+    else { cg.addColorStop(0, "#ddefe1"); cg.addColorStop(1, "#bfd8c2"); }
+    ctx.fillStyle = cg; ctx.fillRect(px, py, CELL, CELL);
+    if (c === "#") {
+      ctx.fillStyle = "rgba(255,255,255,.20)"; ctx.fillRect(px, py, CELL, 4);
+      ctx.fillStyle = "rgba(0,0,0,.25)"; ctx.fillRect(px, py + CELL - 6, CELL, 6);
+      ctx.fillStyle = "rgba(0,0,0,.12)"; ctx.fillRect(px + 4, py + 9, CELL - 8, 3);
+    } else {
+      ctx.fillStyle = "rgba(255,255,255,.25)"; ctx.fillRect(px, py, CELL, 1.5);
+    }
+    if (c === "G") {
+      const gp2 = 1 + Math.sin(performance.now() / 300) * 0.08;
+      const gg = gradR(px + CELL / 2 - 3, py + CELL / 2 - 4, 2, px + CELL / 2, py + CELL / 2, 15);
+      gg.addColorStop(0, "#fff3a0"); gg.addColorStop(0.6, "#ffd23e"); gg.addColorStop(1, "#e09c12");
+      ctx.fillStyle = "rgba(255,210,62,.30)"; ctx.beginPath(); ctx.arc(px + CELL / 2, py + CELL / 2, 14.5 * gp2, 0, 7); ctx.fill();
+      ctx.fillStyle = gg; ctx.beginPath(); ctx.arc(px + CELL / 2, py + CELL / 2, 12 * gp2, 0, 7); ctx.fill();
+      ctx.strokeStyle = "rgba(122,82,0,.7)"; ctx.lineWidth = 1.5; ctx.beginPath(); ctx.arc(px + CELL / 2, py + CELL / 2, 12 * gp2, 0, 7); ctx.stroke();
+      ctx.fillStyle = "#7a5200"; ctx.font = "bold 13px sans-serif"; ctx.fillText("G", px + CELL / 2, py + CELL / 2 + 1);
+    }
+    if (c === "*" && !takenStars.has(x + "," + y)) {
+      const sp2 = 1 + Math.sin(performance.now() / 260 + (x * 7 + y * 13)) * 0.12;
+      const stg = gradL(0, py + 4, 0, py + CELL - 4);
+      stg.addColorStop(0, "#fff3a0"); stg.addColorStop(0.55, "#ffd93b"); stg.addColorStop(1, "#f0a51e");
+      ctx.fillStyle = stg; starPath(px + CELL / 2, py + CELL / 2, 10 * sp2); ctx.fill();
+      ctx.strokeStyle = "rgba(160,100,10,.6)"; ctx.lineWidth = 1.2; starPath(px + CELL / 2, py + CELL / 2, 10 * sp2); ctx.stroke();
+    }
+    if (c === "S") { ctx.strokeStyle = "rgba(20,80,40,.45)"; ctx.lineWidth = 2; ctx.beginPath(); ctx.arc(px + CELL / 2, py + CELL / 2, 10, 0, 7); ctx.stroke(); ctx.fillStyle = "rgba(20,80,40,.35)"; ctx.beginPath(); ctx.arc(px + CELL / 2, py + CELL / 2, 2.5, 0, 7); ctx.fill(); }
   }
-  // ball
-  const grd = ctx.createRadialGradient(ball.x - 4, ball.y - 5, 2, ball.x, ball.y, BALL_R + 2);
-  grd.addColorStop(0, "#ffffff"); grd.addColorStop(0.5, "#d43a2f"); grd.addColorStop(1, "#8c1f16");
+  // ball: soft contact shadow, then the glossy marble
+  ctx.fillStyle = "rgba(0,0,0,.28)"; ctx.beginPath(); ctx.ellipse(ball.x + 2, ball.y + BALL_R - 1, BALL_R * 0.92, 4, 0, 0, 7); ctx.fill();
+  const grd = gradR(ball.x - 4, ball.y - 5, 2, ball.x, ball.y, BALL_R + 2);
+  grd.addColorStop(0, "#ffffff"); grd.addColorStop(0.35, "#f0665a"); grd.addColorStop(0.7, "#d43a2f"); grd.addColorStop(1, "#8c1f16");
   ctx.fillStyle = grd; ctx.beginPath(); ctx.arc(ball.x, ball.y, BALL_R, 0, 7); ctx.fill();
-  // HUD
-  ctx.fillStyle = "rgba(0,0,0,.4)"; ctx.fillRect(8, 8, 250, 56);
+  ctx.fillStyle = "rgba(255,255,255,.85)"; ctx.beginPath(); ctx.ellipse(ball.x - 4.5, ball.y - 5.5, 3.4, 2.2, -0.5, 0, 7); ctx.fill();
+  // HUD: frosted pill
+  ctx.save();
+  ctx.shadowColor = "rgba(0,0,0,.35)"; ctx.shadowBlur = 12; ctx.shadowOffsetY = 3;
+  ctx.fillStyle = "rgba(10,28,16,.55)"; rr(8, 8, 250, 56, 14); ctx.fill();
+  ctx.restore();
+  ctx.lineWidth = 1; ctx.strokeStyle = "rgba(255,255,255,.28)"; rr(8, 8, 250, 56, 14); ctx.stroke();
   ctx.fillStyle = timeLeft < 8 ? "#ff7b72" : "#fff"; ctx.font = "bold 21px sans-serif"; ctx.textAlign = "left";
   ctx.fillText("⏱ " + Math.max(0, timeLeft).toFixed(0) + "s", 16, 36);
   ctx.font = "14px sans-serif"; ctx.fillStyle = "#ffd23e";
@@ -364,9 +450,12 @@ function draw() {
   if (state === "win") overlay("ALL MAZES CLEARED! 🏆", "Time " + totalTime.toFixed(1) + "s · Score " + score + " — tap to play again");
 }
 function overlay(t, s) {
-  ctx.fillStyle = "rgba(0,0,0,.55)"; ctx.fillRect(0, 0, VW, VH);
-  ctx.fillStyle = "#ffd23e"; ctx.font = "bold 28px sans-serif"; ctx.textAlign = "center"; ctx.fillText(t, VW / 2, 340);
-  ctx.fillStyle = "#fff"; ctx.font = "16px sans-serif"; ctx.fillText(s, VW / 2, 374);
+  ctx.fillStyle = "rgba(0,0,0,.45)"; ctx.fillRect(0, 0, VW, VH);
+  glassPanel(28, 272, VW - 56, 128, 20);
+  const og = gradL(0, 306, 0, 342);
+  og.addColorStop(0, "#fff6c8"); og.addColorStop(1, "#f0a51e");
+  ctx.fillStyle = og; ctx.font = "bold 28px sans-serif"; ctx.textAlign = "center"; ctx.fillText(t, VW / 2, 340);
+  ctx.fillStyle = "#eef6ee"; ctx.font = "16px sans-serif"; ctx.fillText(s, VW / 2, 374);
 }
 function drawQA() {
   const r = fairnessCheck();

@@ -10,7 +10,11 @@
 <style>
   * { margin:0; padding:0; box-sizing:border-box; }
   html, body {
-    width:100%; height:100%; overflow:hidden; background:#140a10;
+    width:100%; height:100%; overflow:hidden;
+    background:
+      radial-gradient(120% 90% at 50% 0%, #57203f 0%, rgba(87,32,63,0) 55%),
+      linear-gradient(180deg, #2b1030 0%, #140a10 60%, #0a0509 100%);
+    background-color:#140a10;
     font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
     touch-action:none; user-select:none; -webkit-user-select:none;
     -webkit-tap-highlight-color: transparent;
@@ -19,7 +23,10 @@
   #muteBtn {
     position:fixed; top:10px; right:10px; z-index:10;
     width:48px; height:48px; border-radius:12px;
-    border:2px solid rgba(255,170,200,.5); background:rgba(22,8,14,.62);
+    border:2px solid rgba(255,170,200,.45);
+    background:linear-gradient(180deg, rgba(96,40,66,.78), rgba(30,10,20,.78));
+    backdrop-filter:blur(6px); -webkit-backdrop-filter:blur(6px);
+    box-shadow:0 6px 18px rgba(0,0,0,.45), inset 0 1px 0 rgba(255,255,255,.22);
     color:#fff; font-size:22px; line-height:1; cursor:pointer;
     touch-action:none; user-select:none; -webkit-user-select:none;
     display:flex; align-items:center; justify-content:center; padding:0;
@@ -76,6 +83,33 @@ const ctx = canvas.getContext("2d");
 let W = 0, H = 0, DPR = 1, u = 4;
 function clamp(v, a, b) { return v < a ? a : (v > b ? b : v); }
 function lerp(a, b, t) { return a + (b - a) * t; }
+
+// ---------- visual helpers (restyle) ----------
+// Safe gradient wrapper: a canvas stub that returns a plain object for
+// create*Gradient must not be able to throw on addColorStop.
+function G(g) { return (g && typeof g.addColorStop === "function") ? g : { addColorStop: function () {} }; }
+function rr(x, y, w, h, r) {
+  ctx.beginPath();
+  ctx.moveTo(x + r, y);
+  ctx.arcTo(x + w, y, x + w, y + h, r);
+  ctx.arcTo(x + w, y + h, x, y + h, r);
+  ctx.arcTo(x, y + h, x, y, r);
+  ctx.arcTo(x, y, x + w, y, r);
+  ctx.closePath();
+}
+// Glass panel look for the menu / game-over card.
+function glassPanel(x, y, w, h, r) {
+  ctx.save();
+  ctx.shadowColor = "rgba(8,2,6,.6)"; ctx.shadowBlur = 30; ctx.shadowOffsetY = 10;
+  const g = G(ctx.createLinearGradient(0, y, 0, y + h));
+  g.addColorStop(0, "rgba(56,26,44,.90)"); g.addColorStop(1, "rgba(20,8,16,.92)");
+  ctx.fillStyle = g; rr(x, y, w, h, r); ctx.fill();
+  ctx.restore();
+  ctx.lineWidth = 1.5; ctx.strokeStyle = "rgba(255,190,220,.20)";
+  rr(x, y, w, h, r); ctx.stroke();
+  ctx.strokeStyle = "rgba(255,255,255,.10)"; ctx.lineWidth = 1;
+  ctx.beginPath(); ctx.moveTo(x + r, y + 1); ctx.lineTo(x + w - r, y + 1); ctx.stroke();
+}
 
 // Target geometry
 let TC = { x: 0, y: 0 };       // rings centre
@@ -345,43 +379,63 @@ window.addEventListener("keyup", function (e) {
 // ---------- Draw ----------
 function drawTarget() {
   const s = Math.min(1.15, Math.max(0.8, W / 390));
-  // target surround
-  ctx.fillStyle = "#2a1420";
+  // target surround: deep plum disc with a soft shadow and rim light
+  ctx.save();
+  ctx.shadowColor = "rgba(0,0,0,.55)"; ctx.shadowBlur = 30; ctx.shadowOffsetY = 10;
+  const sur = G(ctx.createRadialGradient(TC.x - 40 * s, TC.y - 30 * s, 20, TC.x, TC.y, 190 * s));
+  sur.addColorStop(0, "#4a2440"); sur.addColorStop(0.7, "#33182a"); sur.addColorStop(1, "#20101c");
+  ctx.fillStyle = sur;
   ctx.beginPath(); ctx.ellipse(TC.x, TC.y, 175 * s, 175 * SQUASH * s + 26, 0, 0, Math.PI * 2); ctx.fill();
-  ctx.strokeStyle = "#59324a"; ctx.lineWidth = 3; ctx.stroke();
-  const colors = { 10: "#274b8f", 20: "#2e7d4f", 30: "#c9a227", 40: "#c25e1e", 50: "#b03050" };
+  ctx.restore();
+  ctx.strokeStyle = "#7a4468"; ctx.lineWidth = 3; ctx.stroke();
+  // [light, base] per ring value — glossy radial discs
+  const colors = { 10: ["#5b83d6", "#274b8f"], 20: ["#4cc47e", "#2e7d4f"], 30: ["#f0cd55", "#c9a227"], 40: ["#f08a3e", "#c25e1e"], 50: ["#e85d84", "#b03050"] };
   for (let i = RINGS.length - 1; i >= 0; i--) {
     const [r, pts] = RINGS[i];
     ctx.beginPath(); ctx.ellipse(TC.x, TC.y, r * s, r * SQUASH * s, 0, 0, Math.PI * 2);
-    ctx.fillStyle = colors[pts]; ctx.fill();
+    const rg2 = G(ctx.createRadialGradient(TC.x - r * s * 0.25, TC.y - r * SQUASH * s * 0.45, r * s * 0.08, TC.x, TC.y, r * s));
+    rg2.addColorStop(0, colors[pts][0]); rg2.addColorStop(1, colors[pts][1]);
+    ctx.fillStyle = rg2; ctx.fill();
     ctx.strokeStyle = "rgba(255,255,255,0.65)"; ctx.lineWidth = 2; ctx.stroke();
     if (flashRing === pts && state === "land") {
       ctx.fillStyle = "rgba(255,255,255,0.35)"; ctx.fill();
     }
-    ctx.fillStyle = "rgba(255,255,255,0.92)";
+    ctx.save();
+    ctx.shadowColor = "rgba(0,0,0,.45)"; ctx.shadowBlur = 3; ctx.shadowOffsetY = 1;
+    ctx.fillStyle = "rgba(255,255,255,0.94)";
     ctx.font = "bold " + Math.round(r * 0.34 * s) + "px system-ui"; ctx.textAlign = "center"; ctx.textBaseline = "middle";
     const ly = TC.y - (i > 0 ? (RINGS[i - 1][0] + r) / 2 : r * 0.45) * SQUASH * s - (i === 0 ? 2 : 0);
     ctx.fillText(String(pts), TC.x, i === 0 ? TC.y : ly + (RINGS[i][0] * SQUASH * s) * 0.5);
+    ctx.restore();
   }
-  // cups
+  // cups: glossy gold discs
   for (const c of cups) {
     ctx.beginPath(); ctx.arc(c.x, c.y, c.r, 0, Math.PI * 2);
-    ctx.fillStyle = (flashRing === 100 && state === "land") ? "#ffe98a" : "#ffd94d"; ctx.fill();
+    const cg = G(ctx.createRadialGradient(c.x - c.r * 0.3, c.y - c.r * 0.35, c.r * 0.2, c.x, c.y, c.r * 1.05));
+    if (flashRing === 100 && state === "land") { cg.addColorStop(0, "#fffbe0"); cg.addColorStop(1, "#ffe98a"); }
+    else { cg.addColorStop(0, "#fff0a8"); cg.addColorStop(0.55, "#ffd94d"); cg.addColorStop(1, "#dfa627"); }
+    ctx.fillStyle = cg; ctx.fill();
     ctx.strokeStyle = "#8a6d1f"; ctx.lineWidth = 2.5; ctx.stroke();
+    ctx.fillStyle = "rgba(255,255,255,0.75)";
+    ctx.beginPath(); ctx.arc(c.x - c.r * 0.32, c.y - c.r * 0.38, c.r * 0.16, 0, Math.PI * 2); ctx.fill();
     ctx.fillStyle = "#5c430a";
     ctx.font = "bold " + Math.round(c.r * 0.72) + "px system-ui"; ctx.textAlign = "center"; ctx.textBaseline = "middle";
     ctx.fillText("100", c.x, c.y + 1);
   }
 }
 function draw() {
-  const g = ctx.createLinearGradient(0, 0, 0, H);
-  g.addColorStop(0, "#1d0f18"); g.addColorStop(1, "#33182b");
+  const g = G(ctx.createLinearGradient(0, 0, 0, H));
+  g.addColorStop(0, "#2b1030"); g.addColorStop(0.5, "#1d0f24"); g.addColorStop(1, "#3d1630");
   ctx.fillStyle = g; ctx.fillRect(0, 0, W, H);
+  // carnival glow pooled behind the target
+  const glow = G(ctx.createRadialGradient(TC.x, TC.y, 20, TC.x, TC.y, W * 0.62));
+  glow.addColorStop(0, "rgba(255,120,180,0.16)"); glow.addColorStop(1, "rgba(255,120,180,0)");
+  ctx.fillStyle = glow; ctx.fillRect(0, 0, W, H);
   drawTarget();
-  // ramp + lane
+  // ramp + lane: richer wood with a centre sheen and gold side rails
   const laneHalf = W * 0.30;
-  const lg = ctx.createLinearGradient(0, lipY, 0, H);
-  lg.addColorStop(0, "#7a4a2b"); lg.addColorStop(0.25, "#96603a"); lg.addColorStop(1, "#6e4526");
+  const lg = G(ctx.createLinearGradient(0, lipY, 0, H));
+  lg.addColorStop(0, "#8a5636"); lg.addColorStop(0.25, "#a96f42"); lg.addColorStop(1, "#7c4c28");
   ctx.fillStyle = lg;
   ctx.beginPath();
   ctx.moveTo(W / 2 - laneHalf, H);
@@ -389,6 +443,16 @@ function draw() {
   ctx.lineTo(W / 2 + W * 0.185, lipY);
   ctx.lineTo(W / 2 + laneHalf, H);
   ctx.closePath(); ctx.fill();
+  ctx.fillStyle = "rgba(255,220,170,0.07)";
+  ctx.beginPath();
+  ctx.moveTo(W / 2 - laneHalf * 0.34, H);
+  ctx.lineTo(W / 2 - W * 0.062, lipY);
+  ctx.lineTo(W / 2 + W * 0.062, lipY);
+  ctx.lineTo(W / 2 + laneHalf * 0.34, H);
+  ctx.closePath(); ctx.fill();
+  ctx.strokeStyle = "#c98d54"; ctx.lineWidth = 3;
+  ctx.beginPath(); ctx.moveTo(W / 2 - laneHalf, H); ctx.lineTo(W / 2 - W * 0.185, lipY); ctx.stroke();
+  ctx.beginPath(); ctx.moveTo(W / 2 + laneHalf, H); ctx.lineTo(W / 2 + W * 0.185, lipY); ctx.stroke();
   // ramp lip highlight
   ctx.strokeStyle = "#ffb066"; ctx.lineWidth = 3;
   ctx.beginPath(); ctx.moveTo(W / 2 - W * 0.185, lipY); ctx.lineTo(W / 2 + W * 0.185, lipY); ctx.stroke();
@@ -400,7 +464,17 @@ function draw() {
     ctx.lineTo(W / 2 + i * W * 0.075, lipY);
     ctx.stroke();
   }
-  // score card
+  // score card on a frosted pill
+  if (state !== "menu") {
+    ctx.save();
+    ctx.shadowColor = "rgba(0,0,0,.4)"; ctx.shadowBlur = 12; ctx.shadowOffsetY = 3;
+    const hg = G(ctx.createLinearGradient(0, 4, 0, 4 + u * 17));
+    hg.addColorStop(0, "rgba(52,24,40,.82)"); hg.addColorStop(1, "rgba(18,8,14,.82)");
+    ctx.fillStyle = hg; rr(6, 4, W * 0.58, u * 17, 12); ctx.fill();
+    ctx.restore();
+    ctx.lineWidth = 1; ctx.strokeStyle = "rgba(255,200,225,.20)";
+    rr(6, 4, W * 0.58, u * 17, 12); ctx.stroke();
+  }
   ctx.textAlign = "left"; ctx.textBaseline = "middle";
   ctx.font = "bold " + Math.round(u * 4.6) + "px system-ui, sans-serif";
   ctx.fillStyle = "#ffe3ef";
@@ -434,12 +508,22 @@ function draw() {
     const lift = ball.air ? ball.z * 0.35 : 0;
     ctx.fillStyle = "rgba(0,0,0,0.35)";
     ctx.beginPath(); ctx.ellipse(ball.x, ball.y + r * 0.6, r * 0.9, r * 0.4, 0, 0, Math.PI * 2); ctx.fill();
-    const bg2 = ctx.createRadialGradient(ball.x - r * 0.3, ball.y - lift - r * 0.35, r * 0.25, ball.x, ball.y - lift, r);
-    bg2.addColorStop(0, "#ffb0a0"); bg2.addColorStop(1, "#c23a2e");
+    const bg2 = G(ctx.createRadialGradient(ball.x - r * 0.3, ball.y - lift - r * 0.35, r * 0.25, ball.x, ball.y - lift, r * 1.08));
+    bg2.addColorStop(0, "#ffc4b2"); bg2.addColorStop(0.45, "#e85a41"); bg2.addColorStop(1, "#a32418");
     ctx.fillStyle = bg2;
     ctx.beginPath(); ctx.arc(ball.x, ball.y - lift, r, 0, Math.PI * 2); ctx.fill();
     ctx.strokeStyle = "rgba(90,15,10,0.6)"; ctx.lineWidth = 1.6;
     ctx.beginPath(); ctx.arc(ball.x, ball.y - lift, r * 0.62, 0.3, 2.2); ctx.stroke();
+    // specular highlight
+    ctx.fillStyle = "rgba(255,255,255,0.8)";
+    ctx.beginPath(); ctx.arc(ball.x - r * 0.34, ball.y - lift - r * 0.4, r * 0.15, 0, Math.PI * 2); ctx.fill();
+    // landing pulse ring (visual only, driven by the existing land timer)
+    if (state === "land" && lastPts > 0) {
+      const k = 1 - Math.max(0, landTimer) / 0.85;
+      ctx.strokeStyle = "rgba(255,220,130," + Math.max(0, 0.55 * (1 - k)).toFixed(3) + ")";
+      ctx.lineWidth = 3;
+      ctx.beginPath(); ctx.arc(ball.x, ball.y, r + k * 46, 0, Math.PI * 2); ctx.stroke();
+    }
   }
   if (state === "ready") {
     ctx.textAlign = "center";
@@ -452,15 +536,21 @@ function draw() {
     }
   }
   if (state === "land" && lastPts !== null) {
+    ctx.save();
     ctx.textAlign = "center";
     ctx.font = "bold " + Math.round(u * 9) + "px system-ui, sans-serif";
+    ctx.shadowColor = lastPts >= 50 ? "rgba(255,200,60,.9)" : "rgba(0,0,0,.55)"; ctx.shadowBlur = lastPts >= 50 ? 18 : 7;
     ctx.fillStyle = lastPts >= 50 ? "#ffd94d" : lastPts > 0 ? "#b6ff7a" : "#ff8a7a";
     ctx.fillText(lastPts > 0 ? "+" + lastPts : "MISS", W / 2, H * 0.60);
+    ctx.restore();
   }
   if (state === "menu" || state === "over") {
-    ctx.fillStyle = "rgba(8,3,6,0.84)"; ctx.fillRect(0, 0, W, H);
+    ctx.fillStyle = "rgba(8,3,6,0.55)"; ctx.fillRect(0, 0, W, H);
+    glassPanel(W * 0.05, H * 0.19, W * 0.90, H * 0.54, 22);
     ctx.textAlign = "center";
-    ctx.fillStyle = "#ff8fb8";
+    const tg = G(ctx.createLinearGradient(0, H * 0.25, 0, H * 0.34));
+    tg.addColorStop(0, "#ffffff"); tg.addColorStop(0.55, "#ffb3cd"); tg.addColorStop(1, "#ff6fa5");
+    ctx.fillStyle = tg;
     ctx.font = "bold " + Math.round(u * 9.5) + "px system-ui, sans-serif";
     ctx.fillText("🎳 SKEE-BALL", W / 2, H * 0.30);
     ctx.fillStyle = "#ffe3ef";

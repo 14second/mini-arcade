@@ -10,7 +10,10 @@
 <style>
   * { margin:0; padding:0; box-sizing:border-box; }
   html, body {
-    width:100%; height:100%; overflow:hidden; background:#0e2233;
+    width:100%; height:100%; overflow:hidden;
+    background:
+      radial-gradient(120% 90% at 50% 0%, #24466b 0%, rgba(36,70,107,0) 55%),
+      linear-gradient(180deg, #132c47 0%, #0e2233 60%, #081a2c 100%);
     font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
     touch-action:none; user-select:none; -webkit-user-select:none;
     -webkit-tap-highlight-color: transparent;
@@ -19,7 +22,10 @@
   #muteBtn {
     position:fixed; top:10px; right:10px; z-index:10;
     width:48px; height:48px; border-radius:12px;
-    border:2px solid rgba(170,210,255,.5); background:rgba(8,20,34,.62);
+    border:1.5px solid rgba(170,210,255,.55);
+    background:linear-gradient(180deg, rgba(52,88,128,.85), rgba(10,26,44,.85));
+    box-shadow:0 8px 20px rgba(0,0,0,.4), inset 0 1px 0 rgba(255,255,255,.25);
+    backdrop-filter:blur(6px); -webkit-backdrop-filter:blur(6px);
     color:#fff; font-size:22px; line-height:1; cursor:pointer;
     touch-action:none; user-select:none; -webkit-user-select:none;
     display:flex; align-items:center; justify-content:center; padding:0;
@@ -27,11 +33,15 @@
   .modeBtn {
     position:fixed; left:50%; transform:translateX(-50%); z-index:10;
     width:min(300px, 80vw); height:54px; border-radius:14px;
-    border:2px solid rgba(150,200,255,.6); background:rgba(10,24,42,.94);
+    border:1.5px solid rgba(150,200,255,.6);
+    background:linear-gradient(180deg, rgba(44,80,122,.97), rgba(11,28,50,.97));
+    box-shadow:0 12px 28px rgba(0,0,0,.5), inset 0 1px 0 rgba(255,255,255,.22);
     color:#eaf4ff; font-size:18px; font-weight:700; cursor:pointer;
+    text-shadow:0 1px 3px rgba(0,0,0,.45);
     touch-action:none; user-select:none; -webkit-user-select:none;
     display:none;
   }
+  .modeBtn:active { filter:brightness(1.3); }
   #btn1 { top:56%; } #btn2 { top:calc(56% + 64px); }
   #btn3 { top:calc(56% + 128px); } #btn4 { top:calc(56% + 192px); }
 </style>
@@ -389,18 +399,60 @@ function rr(x, y, w, h, r) {
   ctx.arcTo(x, y + h, x, y, r); ctx.arcTo(x, y, x + w, y, r);
   ctx.closePath();
 }
+// ---------- safe gradient wrappers (visual only) ----------
+// A plain-object canvas stub (jsdom probes) returns gradients with no
+// addColorStop; guard every stop so such a stub can never throw.
+// Real browsers are unaffected.
+function patchGrad(g, stops) {
+  if (!g) return null;
+  if (typeof g.addColorStop !== "function") {
+    try { g.addColorStop = function () {}; } catch (e) {}
+  }
+  if (typeof g.addColorStop !== "function") return null;
+  for (const s of stops) { try { g.addColorStop(s[0], s[1]); } catch (e) {} }
+  return g;
+}
+function gradL(x0, y0, x1, y1, stops) {
+  try { return patchGrad(ctx.createLinearGradient(x0, y0, x1, y1), stops) || stops[stops.length - 1][1]; }
+  catch (e) { return stops[stops.length - 1][1]; }
+}
+function gradR(x0, y0, r0, x1, y1, r1, stops) {
+  try { return patchGrad(ctx.createRadialGradient(x0, y0, r0, x1, y1, r1), stops) || stops[stops.length - 1][1]; }
+  catch (e) { return stops[stops.length - 1][1]; }
+}
+// glossy suit shading per corner: [highlight, base, shade] (visual only;
+// CORNERS[i].color stays the canonical colour everywhere else)
+const SUITS = [
+  ["#aee6ff", "#59c8ff", "#2a86c8"],
+  ["#ffc2cf", "#ff5d7a", "#d63a58"],
+  ["#d2f7ae", "#8be04e", "#57a825"],
+  ["#ffe0ae", "#ffb84d", "#e08a1e"]
+];
 function drawPlayer(p) {
   const bobY = p.alive ? Math.sin(p.bob) * 2 : 0;
+  // soft contact shadow on the snow
+  ctx.fillStyle = "rgba(24,52,80,.20)";
+  ctx.beginPath(); ctx.ellipse(p.x, p.y + HIT_R + 3, HIT_R * 0.95, 5.5, 0, 0, Math.PI * 2); ctx.fill();
   if (!p.alive) {
     ctx.font = "40px system-ui"; ctx.textAlign = "center"; ctx.textBaseline = "middle";
     ctx.fillText("⛄", p.x, p.y);
     return;
   }
-  // body: snow-suit circle with a white snowball belly
-  ctx.fillStyle = p.flash > 0 ? "#ffffff" : CORNERS[p.i].color;
+  // body: glossy snow-suit sphere with a white snowball belly
+  if (p.flash > 0) {
+    ctx.fillStyle = "#ffffff";
+  } else {
+    const S = SUITS[p.i];
+    ctx.fillStyle = gradR(p.x - 7, p.y + bobY - 9, 4, p.x, p.y + bobY, HIT_R * 1.35,
+      [[0, S[0]], [0.55, S[1]], [1, S[2]]]);
+  }
   ctx.beginPath(); ctx.arc(p.x, p.y + bobY, HIT_R, 0, Math.PI * 2); ctx.fill();
-  ctx.fillStyle = "#ffffff";
+  ctx.fillStyle = gradR(p.x - 4, p.y + bobY, 2, p.x, p.y + bobY + 4, HIT_R * 0.8,
+    [[0, "#ffffff"], [1, "#dceefb"]]);
   ctx.beginPath(); ctx.arc(p.x, p.y + bobY + 4, HIT_R * 0.58, 0, Math.PI * 2); ctx.fill();
+  // gloss highlight
+  ctx.fillStyle = "rgba(255,255,255,.55)";
+  ctx.beginPath(); ctx.ellipse(p.x - 8, p.y + bobY - 11, 5.5, 3.4, -0.5, 0, Math.PI * 2); ctx.fill();
   ctx.fillStyle = "#22303c";
   ctx.beginPath(); ctx.arc(p.x - 6, p.y + bobY - 4, 2.4, 0, Math.PI * 2); ctx.fill();
   ctx.beginPath(); ctx.arc(p.x + 6, p.y + bobY - 4, 2.4, 0, Math.PI * 2); ctx.fill();
@@ -413,23 +465,47 @@ function drawPlayer(p) {
 }
 function draw() {
   ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
-  ctx.fillStyle = "#0e2233"; ctx.fillRect(0, 0, W, H);
+  // layered night-sky backdrop with a soft glow pooling over the arena
+  ctx.fillStyle = gradL(0, 0, 0, Math.max(1, H), [[0, "#1d3d61"], [0.55, "#102a44"], [1, "#081a2c"]]);
+  ctx.fillRect(0, 0, W, H);
+  ctx.fillStyle = gradR(W / 2, H * 0.32, 30, W / 2, H * 0.32, Math.max(W, H) * 0.62,
+    [[0, "rgba(140,200,255,.28)"], [1, "rgba(140,200,255,0)"]]);
+  ctx.fillRect(0, 0, W, H);
   ctx.setTransform(DPR * scaleCss, 0, 0, DPR * scaleCss, DPR * oxCss, DPR * oyCss);
 
-  // arena snowfield
-  ctx.fillStyle = "#eaf4fb"; rr(ARENA.x, ARENA.y, ARENA.s, ARENA.s, 18); ctx.fill();
+  // arena snowfield: gradient snow on a soft drop shadow, with sparkles
+  ctx.save();
+  ctx.shadowColor = "rgba(0,0,0,.5)"; ctx.shadowBlur = 30; ctx.shadowOffsetY = 12;
+  ctx.fillStyle = gradL(ARENA.x, ARENA.y, ARENA.x, ARENA.y + ARENA.s,
+    [[0, "#ffffff"], [0.5, "#eaf4fb"], [1, "#d3e7f5"]]);
+  rr(ARENA.x, ARENA.y, ARENA.s, ARENA.s, 18); ctx.fill();
+  ctx.restore();
+  ctx.strokeStyle = "rgba(255,255,255,.65)"; ctx.lineWidth = 1.5;
+  rr(ARENA.x, ARENA.y, ARENA.s, ARENA.s, 18); ctx.stroke();
+  ctx.fillStyle = "rgba(255,255,255,.9)";
+  for (let i = 0; i < 42; i++) {
+    const sx = ARENA.x + 14 + ((i * 67) % 372), sy = ARENA.y + 14 + ((i * 113) % 372);
+    ctx.globalAlpha = 0.25 + 0.45 * Math.abs(Math.sin(i * 1.7));
+    ctx.beginPath(); ctx.arc(sx, sy, 1.4, 0, Math.PI * 2); ctx.fill();
+  }
+  ctx.globalAlpha = 1;
   ctx.strokeStyle = "rgba(90,150,200,.45)"; ctx.lineWidth = 3;
   ctx.setLineDash([8, 10]);
   ctx.beginPath(); ctx.moveTo(ARENA.x + ARENA.s / 2, ARENA.y + 8); ctx.lineTo(ARENA.x + ARENA.s / 2, ARENA.y + ARENA.s - 8); ctx.stroke();
   ctx.beginPath(); ctx.moveTo(ARENA.x + 8, ARENA.y + ARENA.s / 2); ctx.lineTo(ARENA.x + ARENA.s - 8, ARENA.y + ARENA.s / 2); ctx.stroke();
   ctx.setLineDash([]);
-  ctx.fillStyle = "rgba(120,180,230,.25)";
+  ctx.fillStyle = gradR(VW / 2, ARENA.y + ARENA.s / 2, 4, VW / 2, ARENA.y + ARENA.s / 2, 36,
+    [[0, "rgba(150,200,245,.4)"], [1, "rgba(120,180,230,.12)"]]);
   ctx.beginPath(); ctx.arc(VW / 2, ARENA.y + ARENA.s / 2, 34, 0, Math.PI * 2); ctx.fill();
 
   // header
   ctx.textAlign = "center"; ctx.textBaseline = "middle";
-  ctx.fillStyle = "#bfe2ff"; ctx.font = "bold 30px system-ui, sans-serif";
+  ctx.save();
+  ctx.shadowColor = "rgba(90,170,255,.45)"; ctx.shadowBlur = 14;
+  ctx.fillStyle = gradL(0, 22, 0, 58, [[0, "#ffffff"], [0.6, "#cfeaff"], [1, "#8fc6f5"]]);
+  ctx.font = "bold 30px system-ui, sans-serif";
   ctx.fillText("❄️ SNOWBALL SHOWDOWN", VW / 2, 40);
+  ctx.restore();
   ctx.font = "15px system-ui, sans-serif"; ctx.fillStyle = "#8fb8d8";
   if (state === "menu") {
     ctx.fillText("Drag in your corner to aim — let go to throw!", VW / 2, 74);
@@ -445,35 +521,58 @@ function draw() {
 
   if (state !== "menu") {
     for (const p of players) drawPlayer(p);
-    // aim guides
+    // aim guides (soft glow under the dashed line)
     for (const a of aims.values()) {
       const p = players[a.player];
       if (!p.alive) continue;
       const dx = a.x - p.x, dy = a.y - p.y, len = Math.hypot(dx, dy);
-      ctx.strokeStyle = CORNERS[p.i].color; ctx.lineWidth = 3; ctx.setLineDash([6, 7]);
-      ctx.beginPath(); ctx.moveTo(p.x, p.y);
-      ctx.lineTo(p.x + dx * Math.min(1, 130 / Math.max(1, len)), p.y + dy * Math.min(1, 130 / Math.max(1, len)));
+      const ex = p.x + dx * Math.min(1, 130 / Math.max(1, len)), ey = p.y + dy * Math.min(1, 130 / Math.max(1, len));
+      ctx.strokeStyle = CORNERS[p.i].color; ctx.globalAlpha = 0.22; ctx.lineWidth = 8; ctx.lineCap = "round";
+      ctx.beginPath(); ctx.moveTo(p.x, p.y); ctx.lineTo(ex, ey); ctx.stroke();
+      ctx.globalAlpha = 1;
+      ctx.lineWidth = 3; ctx.setLineDash([6, 7]);
+      ctx.beginPath(); ctx.moveTo(p.x, p.y); ctx.lineTo(ex, ey);
       ctx.stroke(); ctx.setLineDash([]);
       if (len >= 24) { ctx.fillStyle = CORNERS[p.i].color; ctx.font = "bold 14px system-ui"; ctx.fillText("THROW!", p.x + dx * 0.4, p.y + dy * 0.4 - 16); }
     }
-    // snowballs
+    // snowballs: glossy spheres with a soft ground shadow
     for (const b of balls) {
-      ctx.fillStyle = "#ffffff"; ctx.beginPath(); ctx.arc(b.x, b.y, BALL_R, 0, Math.PI * 2); ctx.fill();
+      ctx.fillStyle = "rgba(24,52,80,.16)";
+      ctx.beginPath(); ctx.ellipse(b.x, b.y + 4, BALL_R * 0.9, 3, 0, 0, Math.PI * 2); ctx.fill();
+      ctx.fillStyle = gradR(b.x - 2, b.y - 2, 1, b.x, b.y, BALL_R * 1.45,
+        [[0, "#ffffff"], [0.7, "#f2f9ff"], [1, "#c3def2"]]);
+      ctx.beginPath(); ctx.arc(b.x, b.y, BALL_R, 0, Math.PI * 2); ctx.fill();
       ctx.strokeStyle = "rgba(120,180,230,.8)"; ctx.lineWidth = 1.5; ctx.stroke();
     }
     for (const s of splats) {
+      ctx.fillStyle = "rgba(255,255,255,.9)";
+      for (let k = 0; k < 5; k++) {
+        const ang = k * 1.256 + s.x * 0.1;
+        ctx.beginPath(); ctx.arc(s.x + Math.cos(ang) * 7, s.y + Math.sin(ang) * 7, 2.2, 0, Math.PI * 2); ctx.fill();
+      }
       ctx.fillStyle = "rgba(255,255,255,.85)"; ctx.font = "16px system-ui";
       ctx.fillText("💥", s.x, s.y);
     }
     if (state === "roundOver" || state === "matchOver") {
-      ctx.fillStyle = "rgba(6,16,28,.78)"; ctx.fillRect(0, ARENA.y, VW, ARENA.s);
+      ctx.fillStyle = "rgba(6,16,28,.55)"; ctx.fillRect(0, ARENA.y, VW, ARENA.s);
+      // glass banner panel
+      ctx.save();
+      ctx.shadowColor = "rgba(0,0,0,.5)"; ctx.shadowBlur = 26; ctx.shadowOffsetY = 10;
+      ctx.fillStyle = gradL(0, ARENA.y + ARENA.s / 2 - 58, 0, ARENA.y + ARENA.s / 2 + 58,
+        [[0, "rgba(30,58,90,.92)"], [1, "rgba(8,20,36,.94)"]]);
+      rr(VW / 2 - 176, ARENA.y + ARENA.s / 2 - 58, 352, 116, 20); ctx.fill();
+      ctx.restore();
+      ctx.lineWidth = 1.5; ctx.strokeStyle = "rgba(255,255,255,.28)";
+      rr(VW / 2 - 176, ARENA.y + ARENA.s / 2 - 58, 352, 116, 20); ctx.stroke();
       ctx.fillStyle = "#ffffff"; ctx.font = "bold 27px system-ui, sans-serif";
       ctx.fillText(bannerText, VW / 2, ARENA.y + ARENA.s / 2 - 14);
       ctx.font = "16px system-ui, sans-serif"; ctx.fillStyle = "#bfe2ff";
       ctx.fillText(state === "matchOver" ? "Tap for the menu" : "Next round coming up…", VW / 2, ARENA.y + ARENA.s / 2 + 24);
     }
-    // footer hint
-    ctx.fillStyle = "#8fb8d8"; ctx.font = "14px system-ui, sans-serif";
+    // footer hint on a frosted pill
+    ctx.fillStyle = "rgba(8,22,38,.5)"; rr(VW / 2 - 176, 540, 352, 32, 16); ctx.fill();
+    ctx.lineWidth = 1; ctx.strokeStyle = "rgba(255,255,255,.18)"; rr(VW / 2 - 176, 540, 352, 32, 16); ctx.stroke();
+    ctx.fillStyle = "#a8cdea"; ctx.font = "14px system-ui, sans-serif";
     ctx.fillText("Your corner = your thrower. Drag anywhere in it to aim.", VW / 2, 556);
   }
 }

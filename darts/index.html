@@ -10,7 +10,11 @@
 <style>
   * { margin:0; padding:0; box-sizing:border-box; }
   html, body {
-    width:100%; height:100%; overflow:hidden; background:#100c0a;
+    width:100%; height:100%; overflow:hidden;
+    background:
+      radial-gradient(120% 90% at 50% 0%, #4a2c17 0%, rgba(74,44,23,0) 55%),
+      linear-gradient(180deg, #241610 0%, #100c0a 60%, #080503 100%);
+    background-color:#100c0a;
     font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
     touch-action:none; user-select:none; -webkit-user-select:none;
     -webkit-tap-highlight-color: transparent;
@@ -19,7 +23,10 @@
   #muteBtn {
     position:fixed; top:10px; right:10px; z-index:10;
     width:48px; height:48px; border-radius:12px;
-    border:2px solid rgba(255,190,140,.5); background:rgba(20,12,6,.62);
+    border:2px solid rgba(255,190,140,.45);
+    background:linear-gradient(180deg, rgba(84,54,28,.78), rgba(26,15,7,.78));
+    backdrop-filter:blur(6px); -webkit-backdrop-filter:blur(6px);
+    box-shadow:0 6px 18px rgba(0,0,0,.45), inset 0 1px 0 rgba(255,255,255,.22);
     color:#fff; font-size:22px; line-height:1; cursor:pointer;
     touch-action:none; user-select:none; -webkit-user-select:none;
     display:flex; align-items:center; justify-content:center; padding:0;
@@ -74,6 +81,33 @@ const canvas = document.getElementById("game");
 const ctx = canvas.getContext("2d");
 let W = 0, H = 0, DPR = 1, u = 4;
 function clamp(v, a, b) { return v < a ? a : (v > b ? b : v); }
+
+// ---------- visual helpers (restyle) ----------
+// Safe gradient wrapper: a canvas stub that returns a plain object for
+// create*Gradient must not be able to throw on addColorStop.
+function G(g) { return (g && typeof g.addColorStop === "function") ? g : { addColorStop: function () {} }; }
+function rr(x, y, w, h, r) {
+  ctx.beginPath();
+  ctx.moveTo(x + r, y);
+  ctx.arcTo(x + w, y, x + w, y + h, r);
+  ctx.arcTo(x + w, y + h, x, y + h, r);
+  ctx.arcTo(x, y + h, x, y, r);
+  ctx.arcTo(x, y, x + w, y, r);
+  ctx.closePath();
+}
+// Glass panel look for the menu / game-over card.
+function glassPanel(x, y, w, h, r) {
+  ctx.save();
+  ctx.shadowColor = "rgba(5,2,0,.6)"; ctx.shadowBlur = 30; ctx.shadowOffsetY = 10;
+  const g = G(ctx.createLinearGradient(0, y, 0, y + h));
+  g.addColorStop(0, "rgba(52,34,20,.90)"); g.addColorStop(1, "rgba(18,10,5,.92)");
+  ctx.fillStyle = g; rr(x, y, w, h, r); ctx.fill();
+  ctx.restore();
+  ctx.lineWidth = 1.5; ctx.strokeStyle = "rgba(255,205,150,.22)";
+  rr(x, y, w, h, r); ctx.stroke();
+  ctx.strokeStyle = "rgba(255,255,255,.10)"; ctx.lineWidth = 1;
+  ctx.beginPath(); ctx.moveTo(x + r, y + 1); ctx.lineTo(x + w - r, y + 1); ctx.stroke();
+}
 
 // Board geometry (fractions of board radius R)
 const SEGMENTS = [20, 1, 18, 4, 13, 6, 10, 15, 2, 17, 3, 19, 7, 16, 8, 11, 14, 9, 12, 5];
@@ -315,10 +349,15 @@ function keyAim(dt) {
 const SEG_COLORS = i => (i % 2 === 0 ? "#f2e3c2" : "#23232a");
 function drawBoard() {
   const { x: cx, y: cy, R } = BC;
-  // surround + number ring
-  ctx.fillStyle = "#1a1512";
+  // surround + number ring: warm wood cabinet with a soft drop shadow
+  ctx.save();
+  ctx.shadowColor = "rgba(0,0,0,.55)"; ctx.shadowBlur = 34; ctx.shadowOffsetY = 10;
+  const wood = G(ctx.createRadialGradient(cx - R * 0.3, cy - R * 0.35, R * 0.3, cx, cy, R * 1.2));
+  wood.addColorStop(0, "#503722"); wood.addColorStop(0.7, "#2e1e11"); wood.addColorStop(1, "#1c110a");
+  ctx.fillStyle = wood;
   ctx.beginPath(); ctx.arc(cx, cy, R * 1.16, 0, Math.PI * 2); ctx.fill();
-  ctx.strokeStyle = "#3d2c1c"; ctx.lineWidth = 3; ctx.stroke();
+  ctx.restore();
+  ctx.strokeStyle = "#6b4a2a"; ctx.lineWidth = 3; ctx.stroke();
   // segments
   for (let i = 0; i < 20; i++) {
     const a0 = (-90 + i * 18 - 9) * Math.PI / 180, a1 = (-90 + i * 18 + 9) * Math.PI / 180;
@@ -333,38 +372,61 @@ function drawBoard() {
     ctx.arc(cx, cy, R * RING.trbOut, a0, a1);
     ctx.arc(cx, cy, R * RING.trbIn, a1, a0, true);
     ctx.closePath();
-    ctx.fillStyle = i % 2 === 0 ? "#c22f3d" : "#1d7a46"; ctx.fill();
+    ctx.fillStyle = i % 2 === 0 ? "#d8344a" : "#1f9d57"; ctx.fill();
     // double band
     ctx.beginPath();
     ctx.arc(cx, cy, R, a0, a1);
     ctx.arc(cx, cy, R * RING.dblIn, a1, a0, true);
     ctx.closePath();
-    ctx.fillStyle = i % 2 === 0 ? "#c22f3d" : "#1d7a46"; ctx.fill();
+    ctx.fillStyle = i % 2 === 0 ? "#d8344a" : "#1f9d57"; ctx.fill();
     // number
     const na = (-90 + i * 18) * Math.PI / 180;
     ctx.fillStyle = "#e8dcc2";
     ctx.font = "bold " + Math.round(R * 0.105) + "px system-ui"; ctx.textAlign = "center"; ctx.textBaseline = "middle";
     ctx.fillText(String(SEGMENTS[i]), cx + Math.cos(na) * R * 1.085, cy + Math.sin(na) * R * 1.085);
   }
+  // soft top light + lower shade across the whole board face (depth)
+  ctx.save();
+  ctx.beginPath(); ctx.arc(cx, cy, R, 0, Math.PI * 2); ctx.clip();
+  const light = G(ctx.createRadialGradient(cx - R * 0.45, cy - R * 0.5, R * 0.15, cx, cy, R * 1.25));
+  light.addColorStop(0, "rgba(255,246,220,0.13)"); light.addColorStop(0.55, "rgba(255,246,220,0)");
+  light.addColorStop(1, "rgba(10,4,0,0.20)");
+  ctx.fillStyle = light; ctx.fillRect(cx - R, cy - R, R * 2, R * 2);
+  ctx.restore();
   // wire rings
-  ctx.strokeStyle = "rgba(200,200,210,0.5)"; ctx.lineWidth = 1.2;
-  for (const rr of [RING.dblIn, RING.trbOut, RING.trbIn, RING.bullOut]) {
-    ctx.beginPath(); ctx.arc(cx, cy, R * rr, 0, Math.PI * 2); ctx.stroke();
+  ctx.strokeStyle = "rgba(225,230,240,0.62)"; ctx.lineWidth = 1.3;
+  for (const rr2 of [RING.dblIn, RING.trbOut, RING.trbIn, RING.bullOut]) {
+    ctx.beginPath(); ctx.arc(cx, cy, R * rr2, 0, Math.PI * 2); ctx.stroke();
   }
-  // bulls
-  ctx.beginPath(); ctx.arc(cx, cy, R * RING.bullOut, 0, Math.PI * 2); ctx.fillStyle = "#1d7a46"; ctx.fill();
-  ctx.beginPath(); ctx.arc(cx, cy, R * RING.bullIn, 0, Math.PI * 2); ctx.fillStyle = "#c22f3d"; ctx.fill();
+  // bulls: glossy radial discs with a highlight
+  const bo = G(ctx.createRadialGradient(cx - R * 0.03, cy - R * 0.04, R * 0.01, cx, cy, R * RING.bullOut));
+  bo.addColorStop(0, "#35c173"); bo.addColorStop(1, "#17703f");
+  ctx.beginPath(); ctx.arc(cx, cy, R * RING.bullOut, 0, Math.PI * 2); ctx.fillStyle = bo; ctx.fill();
+  const bi = G(ctx.createRadialGradient(cx - R * 0.02, cy - R * 0.025, R * 0.008, cx, cy, R * RING.bullIn * 1.15));
+  bi.addColorStop(0, "#ff7d8f"); bi.addColorStop(1, "#c22438");
+  ctx.beginPath(); ctx.arc(cx, cy, R * RING.bullIn, 0, Math.PI * 2); ctx.fillStyle = bi; ctx.fill();
+  ctx.fillStyle = "rgba(255,255,255,0.5)";
+  ctx.beginPath(); ctx.arc(cx - R * 0.018, cy - R * 0.022, R * 0.012, 0, Math.PI * 2); ctx.fill();
 }
 function drawDart(x, y, scale, stuck) {
   ctx.save();
   ctx.translate(x, y); ctx.scale(scale, scale);
-  // shaft
-  ctx.strokeStyle = stuck ? "#cfd6e4" : "#9aa4bb"; ctx.lineWidth = 3;
+  // metallic barrel with a soft drop shadow
+  ctx.save();
+  ctx.shadowColor = "rgba(0,0,0,.45)"; ctx.shadowBlur = 5; ctx.shadowOffsetY = 2;
+  const shaft = G(ctx.createLinearGradient(6, 8, 0, 0));
+  shaft.addColorStop(0, stuck ? "#f2f6fd" : "#aeb9cf"); shaft.addColorStop(1, stuck ? "#8d99b5" : "#77839c");
+  ctx.strokeStyle = shaft; ctx.lineWidth = 3;
   ctx.beginPath(); ctx.moveTo(6, 8); ctx.lineTo(0, 0); ctx.stroke();
-  // flights
-  ctx.fillStyle = "#ff5d5d";
+  ctx.restore();
+  // glossy flights
+  const f1 = G(ctx.createLinearGradient(6, 3, 15, 12));
+  f1.addColorStop(0, "#ff8a7a"); f1.addColorStop(1, "#d92c2c");
+  ctx.fillStyle = f1;
   ctx.beginPath(); ctx.moveTo(6, 8); ctx.lineTo(15, 3); ctx.lineTo(12, 12); ctx.closePath(); ctx.fill();
-  ctx.fillStyle = "#ffd94d";
+  const f2 = G(ctx.createLinearGradient(3, 16, 12, 8));
+  f2.addColorStop(0, "#ffe98a"); f2.addColorStop(1, "#f0a51e");
+  ctx.fillStyle = f2;
   ctx.beginPath(); ctx.moveTo(6, 8); ctx.lineTo(3, 16); ctx.lineTo(12, 12); ctx.closePath(); ctx.fill();
   // point shadow
   ctx.fillStyle = "rgba(0,0,0,0.35)";
@@ -372,17 +434,31 @@ function drawDart(x, y, scale, stuck) {
   ctx.restore();
 }
 function draw() {
-  const g = ctx.createLinearGradient(0, 0, 0, H);
-  g.addColorStop(0, "#241611"); g.addColorStop(1, "#120b06");
+  const g = G(ctx.createLinearGradient(0, 0, 0, H));
+  g.addColorStop(0, "#2e1a10"); g.addColorStop(0.55, "#1a0e07"); g.addColorStop(1, "#0c0502");
   ctx.fillStyle = g; ctx.fillRect(0, 0, W, H);
   // wall glow behind board
-  const rg = ctx.createRadialGradient(BC.x, BC.y, BC.R * 0.3, BC.x, BC.y, BC.R * 1.7);
-  rg.addColorStop(0, "rgba(255,190,110,0.20)"); rg.addColorStop(1, "rgba(0,0,0,0)");
+  const rg = G(ctx.createRadialGradient(BC.x, BC.y, BC.R * 0.3, BC.x, BC.y, BC.R * 1.7));
+  rg.addColorStop(0, "rgba(255,190,110,0.24)"); rg.addColorStop(1, "rgba(0,0,0,0)");
   ctx.fillStyle = rg; ctx.fillRect(0, 0, W, H);
   drawBoard();
   // stuck darts
   for (const d of darts) drawDart(d.x, d.y, 1, true);
-  // header
+  // gentle vignette for depth
+  const vg = G(ctx.createRadialGradient(W / 2, H * 0.42, H * 0.30, W / 2, H * 0.42, H * 0.85));
+  vg.addColorStop(0, "rgba(0,0,0,0)"); vg.addColorStop(1, "rgba(0,0,0,0.32)");
+  ctx.fillStyle = vg; ctx.fillRect(0, 0, W, H);
+  // header on a frosted pill
+  if (state !== "menu") {
+    ctx.save();
+    ctx.shadowColor = "rgba(0,0,0,.4)"; ctx.shadowBlur = 12; ctx.shadowOffsetY = 3;
+    const hg = G(ctx.createLinearGradient(0, 4, 0, 4 + u * 11.5));
+    hg.addColorStop(0, "rgba(46,30,17,.82)"); hg.addColorStop(1, "rgba(16,9,4,.82)");
+    ctx.fillStyle = hg; rr(6, 4, W * 0.60, u * 11.5, 12); ctx.fill();
+    ctx.restore();
+    ctx.lineWidth = 1; ctx.strokeStyle = "rgba(255,215,170,.20)";
+    rr(6, 4, W * 0.60, u * 11.5, 12); ctx.stroke();
+  }
   ctx.textAlign = "left"; ctx.textBaseline = "middle";
   ctx.font = "bold " + Math.round(u * 4.8) + "px system-ui, sans-serif";
   ctx.fillStyle = "#f5e6cc";
@@ -392,12 +468,16 @@ function draw() {
     ctx.fillStyle = "#b8a888";
     ctx.fillText("Dart " + Math.min(10, darts.length + 1) + " of 10 · Best: " + best, 12, 24 + u * 5.4);
   }
-  // last result
+  // last result (glowing)
   if (lastRes && resultTimer > 0 && state !== "over") {
+    ctx.save();
     ctx.textAlign = "center";
     ctx.font = "bold " + Math.round(u * 7.6) + "px system-ui, sans-serif";
+    ctx.shadowColor = lastRes.score >= 40 ? "rgba(255,200,60,.85)" : "rgba(0,0,0,.6)";
+    ctx.shadowBlur = lastRes.score >= 40 ? 16 : 6;
     ctx.fillStyle = lastRes.score >= 40 ? "#ffd94d" : lastRes.score === 0 ? "#ff7a6b" : "#f5e6cc";
     ctx.fillText(lastRes.label + "  +" + lastRes.score, W / 2, H * 0.795);
+    ctx.restore();
   }
   // aim + wobble
   if (state === "aim") {
@@ -415,12 +495,18 @@ function draw() {
     ctx.moveTo(p.x, p.y - 15); ctx.lineTo(p.x, p.y - 5);
     ctx.moveTo(p.x, p.y + 5); ctx.lineTo(p.x, p.y + 15);
     ctx.stroke();
-    // steady meter
+    // steady meter: rounded glass track, gradient fill, gloss strip
     const mw = W * 0.62, mx = (W - mw) / 2, my = H * 0.885;
-    ctx.fillStyle = "rgba(0,0,0,0.45)"; ctx.fillRect(mx - 3, my - 3, mw + 6, u * 4.6 + 6);
+    ctx.fillStyle = "rgba(10,5,2,0.55)"; rr(mx - 3, my - 3, mw + 6, u * 4.6 + 6, 8); ctx.fill();
+    ctx.strokeStyle = "rgba(255,255,255,.16)"; ctx.lineWidth = 1; rr(mx - 3, my - 3, mw + 6, u * 4.6 + 6, 8); ctx.stroke();
     const frac = clamp(1 - (p.amp - BC.R * 0.03) / (BC.R * 0.16 - BC.R * 0.03), 0, 1);
-    ctx.fillStyle = holding && holdT > 2.2 ? "#ff7a6b" : "#7be495";
-    ctx.fillRect(mx, my, mw * frac, u * 4.6);
+    if (frac > 0.01) {
+      const mg = G(ctx.createLinearGradient(mx, 0, mx + mw, 0));
+      if (holding && holdT > 2.2) { mg.addColorStop(0, "#ff9a7a"); mg.addColorStop(1, "#f04438"); }
+      else { mg.addColorStop(0, "#a5f2b8"); mg.addColorStop(1, "#3ecf6e"); }
+      ctx.fillStyle = mg; rr(mx, my, Math.max(u * 2.2, mw * frac), u * 4.6, u * 2.3); ctx.fill();
+      ctx.fillStyle = "rgba(255,255,255,.22)"; rr(mx + 2, my + 1.5, Math.max(0, mw * frac - 4), u * 1.6, u * 0.8); ctx.fill();
+    }
     ctx.fillStyle = "rgba(255,255,255,0.85)";
     ctx.textAlign = "center"; ctx.font = Math.round(u * 3.8) + "px system-ui, sans-serif";
     ctx.fillText(holding ? (holdT > 2.2 ? "ARM TIRED — THROW!" : "STEADY… release to throw") : "Drag to aim — HOLD to steady", W / 2, my - u * 4.6);
@@ -431,10 +517,13 @@ function draw() {
     drawDart(x, y, 1.6 - t * 0.6, false);
   }
   if (state === "menu" || state === "over") {
-    ctx.fillStyle = "rgba(6,3,2,0.82)";
-    ctx.fillRect(0, H * 0.60, W, H * 0.40);
+    ctx.fillStyle = "rgba(6,3,2,0.45)";
+    ctx.fillRect(0, H * 0.575, W, H * 0.425);
+    glassPanel(W * 0.04, H * 0.585, W * 0.92, H * 0.395, 20);
     ctx.textAlign = "center";
-    ctx.fillStyle = "#ffb02e";
+    const tg = G(ctx.createLinearGradient(0, H * 0.625, 0, H * 0.70));
+    tg.addColorStop(0, "#fff3d0"); tg.addColorStop(0.55, "#ffb02e"); tg.addColorStop(1, "#f28c28");
+    ctx.fillStyle = tg;
     ctx.font = "bold " + Math.round(u * 10) + "px system-ui, sans-serif";
     ctx.fillText("🎯 DARTS", W / 2, H * 0.665);
     ctx.fillStyle = "#f5e6cc";

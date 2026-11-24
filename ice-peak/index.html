@@ -9,17 +9,28 @@
 <title>Ice Peak</title>
 <style>
   * { margin:0; padding:0; box-sizing:border-box; }
-  html, body { width:100%; height:100%; overflow:hidden; background:#bfe8f5;
+  html, body { width:100%; height:100%; overflow:hidden;
+    background:
+      radial-gradient(120% 90% at 50% 0%, #e8f8ff 0%, rgba(232,248,255,0) 55%),
+      linear-gradient(180deg, #bfe8f5 0%, #7cc3e2 60%, #4a90b8 100%);
     font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
     touch-action:none; user-select:none; -webkit-user-select:none; -webkit-tap-highlight-color: transparent; }
   canvas { position:fixed; inset:0; display:block; touch-action:none; }
-  #muteBtn { position:fixed; top:10px; right:10px; z-index:10; width:48px; height:48px; border-radius:12px;
-    border:2px solid rgba(255,255,255,.7); background:rgba(40,90,130,.45); color:#fff; font-size:22px;
+  #muteBtn { position:fixed; top:10px; right:10px; z-index:10; width:48px; height:48px; border-radius:14px;
+    border:1px solid rgba(255,255,255,.75); background:linear-gradient(180deg, rgba(90,160,200,.55), rgba(40,90,130,.55));
+    backdrop-filter:blur(8px); -webkit-backdrop-filter:blur(8px);
+    box-shadow:0 6px 18px rgba(20,60,90,.35), inset 0 1px 0 rgba(255,255,255,.4);
+    color:#fff; font-size:22px;
     line-height:1; cursor:pointer; display:flex; align-items:center; justify-content:center; padding:0; }
   .ctl { position:fixed; bottom:18px; z-index:10; width:64px; height:64px; border-radius:50%;
-    border:2px solid rgba(255,255,255,.7); background:rgba(40,90,130,.4); color:#fff; font-size:26px;
+    border:1px solid rgba(255,255,255,.75); background:linear-gradient(180deg, rgba(90,160,200,.5), rgba(40,90,130,.5));
+    backdrop-filter:blur(6px); -webkit-backdrop-filter:blur(6px);
+    box-shadow:0 6px 16px rgba(20,60,90,.35), inset 0 1px 0 rgba(255,255,255,.4);
+    color:#fff; font-size:26px;
     display:flex; align-items:center; justify-content:center; }
-  #btnL { left:16px; } #btnR { left:92px; } #btnJ { right:20px; width:76px; height:76px; background:rgba(220,90,40,.55); }
+  #btnL { left:16px; } #btnR { left:92px; } #btnJ { right:20px; width:76px; height:76px;
+    background:linear-gradient(180deg, rgba(255,130,70,.9), rgba(210,80,30,.9));
+    box-shadow:0 8px 20px rgba(210,80,30,.4), inset 0 1px 0 rgba(255,255,255,.45); }
   .ctl:active { background:rgba(255,255,255,.35); }
 </style>
 </head>
@@ -80,10 +91,15 @@ function resize() {
 }
 window.addEventListener("resize", resize); resize();
 
-let actx = null, muted = localStorage.getItem("ipMuted") === "1", musicTimer = null, musicStep = 0;
+// Guarded storage (2026-11-23 restyle robustness fix): a raw localStorage
+// read at boot throws when storage is denied (preview panes / private mode)
+// and kills the whole script — same keys, wrapped in try/catch.
+function lsGet(k) { try { return localStorage.getItem(k); } catch (e) { return null; } }
+function lsSet(k, v) { try { localStorage.setItem(k, v); } catch (e) {} }
+let actx = null, muted = lsGet("ipMuted") === "1", musicTimer = null, musicStep = 0;
 const muteBtn = document.getElementById("muteBtn");
 muteBtn.textContent = muted ? "🔇" : "🔊";
-muteBtn.addEventListener("click", () => { muted = !muted; localStorage.setItem("ipMuted", muted ? "1" : "0"); muteBtn.textContent = muted ? "🔇" : "🔊"; });
+muteBtn.addEventListener("click", () => { muted = !muted; lsSet("ipMuted", muted ? "1" : "0"); muteBtn.textContent = muted ? "🔇" : "🔊"; });
 function initAudio() {
   iosPlaybackSession();
   if (!actx || actx.state === "closed") { try { const AC = window.AudioContext || window.webkitAudioContext; if (AC) actx = new AC(); window.__maCtx = actx; window.__maActx = function () { return actx; };; } catch (e) {} }
@@ -119,7 +135,7 @@ const STAGE_LAYERS = 40;
 let state = "menu", stage = 1, lives = 3, score = 0, best = 0, stars = 0;
 let px = 0, py = 0, vy = 0, grounded = true, face = 1, invuln = 0;
 let scrollY = 0, layers = [], seals = [], starObjs = [], highestLayer = 0;
-best = parseInt(localStorage.getItem("ipBest") || "0", 10);
+best = parseInt(lsGet("ipBest") || "0", 10);
 function scrollSpeed() { return 13 + stage * 3; }
 // Layer generator: each layer has >=1 gap cell; all blocks breakable.
 function genLayer(idx) {
@@ -210,7 +226,7 @@ function update(dt) {
         lives--; sfx("hurt");
         if (lives <= 0) {
           state = "over";
-          if (score > best) { best = score; localStorage.setItem("ipBest", String(best)); }
+          if (score > best) { best = score; lsSet("ipBest", String(best)); }
         } else { startStage(); }
         return;
       }
@@ -226,7 +242,7 @@ function update(dt) {
     lives--; sfx("hurt");
     if (lives <= 0) {
       state = "over";
-      if (score > best) { best = score; localStorage.setItem("ipBest", String(best)); }
+      if (score > best) { best = score; lsSet("ipBest", String(best)); }
     } else { startStage(); }
   }
 }
@@ -259,14 +275,61 @@ canvas.addEventListener("pointerdown", () => {
   else if (state === "over") state = "menu";
 });
 
+// ---- visual-only helpers (restyle): rounded rects, glass panels, HUD pill ----
+// Decorative snowfield: fixed pseudo-random specks that drift with the scroll
+// (parallax depth only — no gameplay role).
+const SNOW = [];
+for (let i = 0; i < 46; i++) SNOW.push({ x: (i * 89) % VW, y: (i * 137) % (VH * 2), r: 1 + (i % 3) * 0.8, a: 0.25 + (i % 4) * 0.14 });
+function rr(x, y, w, h, r) {
+  ctx.beginPath(); ctx.moveTo(x + r, y);
+  ctx.arcTo(x + w, y, x + w, y + h, r); ctx.arcTo(x + w, y + h, x, y + h, r);
+  ctx.arcTo(x, y + h, x, y, r); ctx.arcTo(x, y, x + w, y, r); ctx.closePath();
+}
+function glassPanel(x, y, w, h) {
+  ctx.save();
+  ctx.shadowColor = "rgba(15,50,75,.4)"; ctx.shadowBlur = 26; ctx.shadowOffsetY = 10;
+  const g = ctx.createLinearGradient(0, y, 0, y + h);
+  g.addColorStop(0, "rgba(240,250,255,.88)"); g.addColorStop(1, "rgba(185,222,242,.92)");
+  rr(x, y, w, h, 18); ctx.fillStyle = g; ctx.fill();
+  ctx.restore();
+  rr(x, y, w, h, 18); ctx.strokeStyle = "rgba(255,255,255,.7)"; ctx.lineWidth = 1.5; ctx.stroke();
+  rr(x + 6, y + 6, w - 12, (h - 12) / 2, 12); ctx.fillStyle = "rgba(255,255,255,.35)"; ctx.fill();
+}
+function hudPill() {
+  ctx.save();
+  ctx.shadowColor = "rgba(15,50,75,.35)"; ctx.shadowBlur = 10; ctx.shadowOffsetY = 3;
+  const g = ctx.createLinearGradient(0, 6, 0, 44);
+  g.addColorStop(0, "rgba(52,110,148,.85)"); g.addColorStop(1, "rgba(28,72,102,.85)");
+  rr(6, 6, VW - 12, 38, 19); ctx.fillStyle = g; ctx.fill();
+  ctx.restore();
+  rr(6, 6, VW - 12, 38, 19); ctx.strokeStyle = "rgba(255,255,255,.4)"; ctx.lineWidth = 1; ctx.stroke();
+}
 function draw() {
   ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
-  ctx.fillStyle = "#bfe8f5"; ctx.fillRect(0, 0, W, H);
+  const pageG = ctx.createLinearGradient(0, 0, 0, H);
+  pageG.addColorStop(0, "#a5dcf2"); pageG.addColorStop(0.6, "#6db4d8"); pageG.addColorStop(1, "#4789ad");
+  ctx.fillStyle = pageG; ctx.fillRect(0, 0, W, H);
   ctx.setTransform(scale, 0, 0, scale, ox, oy);
-  ctx.fillStyle = "#8fd0ea"; ctx.fillRect(0, 0, VW, VH);
+  // sky gradient + distant ridge silhouettes + drifting snow (depth only)
+  const skyG = ctx.createLinearGradient(0, 0, 0, VH);
+  skyG.addColorStop(0, "#cdeefb"); skyG.addColorStop(0.5, "#8fd0ea"); skyG.addColorStop(1, "#a8dcf2");
+  ctx.fillStyle = skyG; ctx.fillRect(0, 0, VW, VH);
+  ctx.fillStyle = "rgba(255,255,255,.35)";
+  ctx.beginPath(); ctx.moveTo(0, 330); ctx.lineTo(90, 210); ctx.lineTo(180, 330); ctx.lineTo(265, 235); ctx.lineTo(350, 330); ctx.lineTo(420, 265); ctx.lineTo(420, VH); ctx.lineTo(0, VH); ctx.closePath(); ctx.fill();
+  ctx.fillStyle = "rgba(140,195,228,.45)";
+  ctx.beginPath(); ctx.moveTo(0, 430); ctx.lineTo(70, 330); ctx.lineTo(150, 430); ctx.lineTo(240, 345); ctx.lineTo(330, 430); ctx.lineTo(420, 360); ctx.lineTo(420, VH); ctx.lineTo(0, VH); ctx.closePath(); ctx.fill();
+  for (const s of SNOW) {
+    const sy = ((s.y + scrollY * 0.35) % (VH + 20)) - 10;
+    ctx.fillStyle = "rgba(255,255,255," + s.a + ")";
+    ctx.beginPath(); ctx.arc(s.x, sy, s.r, 0, Math.PI * 2); ctx.fill();
+  }
   if (state === "menu") {
-    ctx.fillStyle = "#1d3a4a"; ctx.textAlign = "center";
+    glassPanel(20, 84, VW - 40, 368);
+    const tg = ctx.createLinearGradient(0, 98, 0, 144);
+    tg.addColorStop(0, "#2a6a8f"); tg.addColorStop(1, "#14425e");
+    ctx.fillStyle = tg; ctx.textAlign = "center";
     ctx.font = "bold 42px system-ui"; ctx.fillText("🧊 Ice Peak", VW / 2, 130);
+    ctx.fillStyle = "#1d3a4a";
     ctx.font = "20px system-ui"; ctx.fillText("Climb the ice, bonk the blocks,", VW / 2, 190);
     ctx.fillText("reach the summit banner!", VW / 2, 220);
     ctx.font = "18px system-ui"; ctx.fillText("Best: " + best, VW / 2, 270);
@@ -281,16 +344,26 @@ function draw() {
     for (let c = 0; c < COLS; c++) {
       if (!L.blocks[c]) continue;
       const x = c * CELL;
-      ctx.fillStyle = "#d8f2fc"; ctx.fillRect(x, top, CELL - 2, 26);
-      ctx.fillStyle = "#9fd8ef"; ctx.fillRect(x, top, CELL - 2, 8);
+      ctx.fillStyle = "rgba(70,130,165,.30)"; rr(x + 2, top + 5, CELL - 2, 26, 7); ctx.fill();
+      const ig = ctx.createLinearGradient(0, top, 0, top + 26);
+      ig.addColorStop(0, "#f4fcff"); ig.addColorStop(0.45, "#d8f2fc"); ig.addColorStop(1, "#a5d8f2");
+      ctx.fillStyle = ig; rr(x, top, CELL - 2, 26, 7); ctx.fill();
+      ctx.fillStyle = "rgba(255,255,255,.85)"; rr(x + 4, top + 3, CELL - 10, 6, 3); ctx.fill();
+      ctx.fillStyle = "rgba(110,180,220,.5)"; ctx.fillRect(x + 8, top + 20, CELL - 18, 2);
     }
     if (L.star >= 0) {
+      ctx.save(); ctx.shadowColor = "rgba(255,217,59,.9)"; ctx.shadowBlur = 14;
       ctx.fillStyle = "#ffd93b"; ctx.font = "24px system-ui"; ctx.textAlign = "center";
       ctx.fillText("⭐", L.star * CELL + 30, top - 10);
+      ctx.restore();
     }
     if (L.seal >= 0 && L.sealX !== undefined) {
-      ctx.fillStyle = "#f0f0f0"; ctx.fillRect(L.sealX, top - 30, 36, 30);
+      ctx.fillStyle = "rgba(70,130,165,.30)"; ctx.beginPath(); ctx.ellipse(L.sealX + 18, top - 1, 17, 4, 0, 0, Math.PI * 2); ctx.fill();
+      const sg = ctx.createRadialGradient(L.sealX + 12, top - 22, 3, L.sealX + 18, top - 15, 24);
+      sg.addColorStop(0, "#ffffff"); sg.addColorStop(1, "#cfd8de");
+      ctx.fillStyle = sg; rr(L.sealX, top - 30, 36, 30, 10); ctx.fill();
       ctx.fillStyle = "#000"; ctx.fillRect(L.sealX + 24, top - 22, 4, 4);
+      ctx.fillStyle = "rgba(255,255,255,.9)"; ctx.fillRect(L.sealX + 25, top - 21, 1.5, 1.5);
       ctx.fillStyle = "#333"; ctx.fillRect(L.sealX + 2, top - 6, 32, 6);
     }
     if (L.idx === STAGE_LAYERS - 1) {
@@ -302,24 +375,38 @@ function draw() {
   }
   // player
   if (!(invuln > 0 && Math.floor(invuln * 10) % 2 === 0)) {
-    ctx.fillStyle = "#e8722a"; ctx.fillRect(px, py, 30, 44);
+    ctx.fillStyle = "rgba(40,90,130,.30)"; ctx.beginPath(); ctx.ellipse(px + 15, py + 45, 14, 4, 0, 0, Math.PI * 2); ctx.fill();
+    const pg = ctx.createLinearGradient(0, py, 0, py + 44);
+    pg.addColorStop(0, "#ff9a4d"); pg.addColorStop(0.55, "#e8722a"); pg.addColorStop(1, "#c85a1a");
+    ctx.fillStyle = pg; rr(px, py, 30, 44, 8); ctx.fill();
+    ctx.fillStyle = "rgba(255,255,255,.35)"; rr(px + 4, py + 4, 22, 10, 5); ctx.fill();
     ctx.fillStyle = "#fff"; ctx.fillRect(px + (face > 0 ? 17 : 5), py + 8, 8, 8);
     ctx.fillStyle = "#000"; ctx.fillRect(px + (face > 0 ? 20 : 8), py + 11, 4, 4);
     ctx.fillStyle = "#7a3a1e"; ctx.fillRect(px + 4, py + 34, 22, 10);
   }
-  // progress bar
+  // progress bar (frosted track, glowing gradient fill)
   const prog = Math.min(1, highestLayer / (STAGE_LAYERS - 1));
-  ctx.fillStyle = "rgba(40,90,130,.5)"; ctx.fillRect(0, 44, VW, 8);
-  ctx.fillStyle = "#ffd93b"; ctx.fillRect(0, 44, VW * prog, 8);
-  ctx.fillStyle = "rgba(40,90,130,.55)"; ctx.fillRect(0, 0, VW, 44);
+  ctx.fillStyle = "rgba(28,72,102,.45)"; rr(8, 47, VW - 16, 7, 3.5); ctx.fill();
+  if (prog > 0) {
+    const prg = ctx.createLinearGradient(8, 0, VW - 8, 0);
+    prg.addColorStop(0, "#ffe066"); prg.addColorStop(1, "#ffb84d");
+    ctx.save(); ctx.shadowColor = "rgba(255,200,60,.7)"; ctx.shadowBlur = 6;
+    ctx.fillStyle = prg; rr(8, 47, (VW - 16) * prog, 7, 3.5); ctx.fill();
+    ctx.restore();
+  }
+  hudPill();
   ctx.fillStyle = "#fff"; ctx.font = "bold 18px system-ui"; ctx.textAlign = "left";
   ctx.fillText("Stage " + stage, 12, 28);
   ctx.textAlign = "center"; ctx.fillText("⭐ " + stars + "  ❤️ " + lives, VW / 2, 28);
   ctx.textAlign = "right"; ctx.fillText(score + " pts", VW - 12, 28);
   if (state === "over") {
-    ctx.fillStyle = "rgba(0,0,0,.6)"; ctx.fillRect(0, 0, VW, VH);
-    ctx.fillStyle = "#fff"; ctx.textAlign = "center";
+    ctx.fillStyle = "rgba(10,35,55,.55)"; ctx.fillRect(0, 0, VW, VH);
+    glassPanel(VW / 2 - 175, VH / 2 - 95, 350, 190);
+    const og = ctx.createLinearGradient(0, VH / 2 - 62, 0, VH / 2 - 16);
+    og.addColorStop(0, "#2a6a8f"); og.addColorStop(1, "#14425e");
+    ctx.fillStyle = og; ctx.textAlign = "center";
     ctx.font = "bold 38px system-ui"; ctx.fillText("Slipped off!", VW / 2, VH / 2 - 20);
+    ctx.fillStyle = "#1d3a4a";
     ctx.font = "20px system-ui";
     ctx.fillText("Score: " + score + "  •  Best: " + best, VW / 2, VH / 2 + 20);
     ctx.fillText("Tap to return to menu", VW / 2, VH / 2 + 60);

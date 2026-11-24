@@ -9,18 +9,29 @@
 <title>Pill Panic</title>
 <style>
   * { margin:0; padding:0; box-sizing:border-box; }
-  html, body { width:100%; height:100%; overflow:hidden; background:#123a4a;
+  html, body { width:100%; height:100%; overflow:hidden;
+    background:
+      radial-gradient(120% 90% at 50% 0%, #1e5a72 0%, rgba(30,90,114,0) 55%),
+      linear-gradient(180deg, #16455a 0%, #0d2c3a 60%, #071c26 100%);
     font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
     touch-action:none; user-select:none; -webkit-user-select:none; -webkit-tap-highlight-color: transparent; }
   canvas { position:fixed; inset:0; display:block; touch-action:none; }
-  #muteBtn { position:fixed; top:10px; right:10px; z-index:10; width:48px; height:48px; border-radius:12px;
-    border:2px solid rgba(255,255,255,.55); background:rgba(8,30,40,.55); color:#fff; font-size:22px;
+  #muteBtn { position:fixed; top:10px; right:10px; z-index:10; width:48px; height:48px; border-radius:14px;
+    border:1px solid rgba(160,230,255,.5); background:linear-gradient(180deg, rgba(30,90,114,.72), rgba(8,30,40,.72));
+    backdrop-filter:blur(8px); -webkit-backdrop-filter:blur(8px);
+    box-shadow:0 6px 18px rgba(0,0,0,.4), inset 0 1px 0 rgba(255,255,255,.25);
+    color:#fff; font-size:22px;
     line-height:1; cursor:pointer; display:flex; align-items:center; justify-content:center; padding:0; }
   .ctl { position:fixed; z-index:10; width:58px; height:58px; border-radius:50%;
-    border:2px solid rgba(255,255,255,.6); background:rgba(8,30,40,.5); color:#fff; font-size:24px;
+    border:1px solid rgba(160,230,255,.55); background:linear-gradient(180deg, rgba(30,90,114,.62), rgba(8,30,40,.62));
+    backdrop-filter:blur(6px); -webkit-backdrop-filter:blur(6px);
+    box-shadow:0 6px 16px rgba(0,0,0,.38), inset 0 1px 0 rgba(255,255,255,.25);
+    color:#fff; font-size:24px;
     display:flex; align-items:center; justify-content:center; }
   #btnL { left:16px; bottom:92px; } #btnR { left:86px; bottom:92px; } #btnD { left:156px; bottom:92px; }
-  #btnT { right:20px; bottom:92px; width:72px; height:72px; background:rgba(60,160,200,.55); }
+  #btnT { right:20px; bottom:92px; width:72px; height:72px;
+    background:linear-gradient(180deg, rgba(90,200,240,.85), rgba(40,130,180,.85));
+    box-shadow:0 8px 20px rgba(40,130,180,.4), inset 0 1px 0 rgba(255,255,255,.4); }
   .ctl:active { background:rgba(255,255,255,.35); }
 </style>
 </head>
@@ -82,10 +93,15 @@ function resize() {
 }
 window.addEventListener("resize", resize); resize();
 
-let actx = null, muted = localStorage.getItem("ppMuted") === "1", musicTimer = null, musicStep = 0;
+// Guarded storage (2026-11-23 restyle robustness fix): a raw localStorage
+// read at boot throws when storage is denied (preview panes / private mode)
+// and kills the whole script — same keys, wrapped in try/catch.
+function lsGet(k) { try { return localStorage.getItem(k); } catch (e) { return null; } }
+function lsSet(k, v) { try { localStorage.setItem(k, v); } catch (e) {} }
+let actx = null, muted = lsGet("ppMuted") === "1", musicTimer = null, musicStep = 0;
 const muteBtn = document.getElementById("muteBtn");
 muteBtn.textContent = muted ? "🔇" : "🔊";
-muteBtn.addEventListener("click", () => { muted = !muted; localStorage.setItem("ppMuted", muted ? "1" : "0"); muteBtn.textContent = muted ? "🔇" : "🔊"; });
+muteBtn.addEventListener("click", () => { muted = !muted; lsSet("ppMuted", muted ? "1" : "0"); muteBtn.textContent = muted ? "🔇" : "🔊"; });
 function initAudio() {
   iosPlaybackSession();
   if (!actx || actx.state === "closed") { try { const AC = window.AudioContext || window.webkitAudioContext; if (AC) actx = new AC(); window.__maCtx = actx; window.__maActx = function () { return actx; };; } catch (e) {} }
@@ -121,7 +137,7 @@ function startMusic() {
 const COLORS = ["#e23b3b", "#2f7de1", "#f2c200"];
 let state = "menu", grid = [], bugs = 0, level = 1, score = 0, best = 0;
 let cap = null, fallTimer = 0, flash = null, flashTimer = 0;
-best = parseInt(localStorage.getItem("ppBest") || "0", 10);
+best = parseInt(lsGet("ppBest") || "0", 10);
 function emptyGrid() { return Array.from({ length: ROWS }, () => Array(COLS).fill(null)); }
 function startLevel() {
   grid = emptyGrid(); bugs = 0;
@@ -139,7 +155,7 @@ function spawnCapsule() {
   cap = { x: 3, y: 0, dx: 1, dy: 0, c1: Math.floor(Math.random() * 3), c2: Math.floor(Math.random() * 3) };
   if (grid[0][3] || grid[0][4]) { // stack reached the top: genuine game over
     state = "over"; sfx("lose");
-    if (score > best) { best = score; localStorage.setItem("ppBest", String(best)); }
+    if (score > best) { best = score; lsSet("ppBest", String(best)); }
     cap = null;
   }
   fallTimer = 0;
@@ -251,13 +267,59 @@ canvas.addEventListener("pointerdown", () => {
   else if (state === "over") state = "menu";
 });
 
+// ---- visual-only helpers (restyle): rounded rects, glass panels, HUD pill ----
+// Glossy capsule half: base color + top sheen + bottom shade, same footprint
+// as the old flat square (x+2, y+2, CELL-6) — visuals only.
+function pillHalf(x, y, color) {
+  ctx.fillStyle = color; rr(x + 2, y + 2, CELL - 6, CELL - 6, 9); ctx.fill();
+  const g = ctx.createLinearGradient(0, y + 2, 0, y + CELL - 4);
+  g.addColorStop(0, "rgba(255,255,255,.5)"); g.addColorStop(0.45, "rgba(255,255,255,.06)"); g.addColorStop(1, "rgba(0,0,0,.20)");
+  ctx.fillStyle = g; rr(x + 2, y + 2, CELL - 6, CELL - 6, 9); ctx.fill();
+  ctx.fillStyle = "rgba(255,255,255,.55)"; rr(x + 7, y + 6, CELL - 16, 7, 3.5); ctx.fill();
+}
+function rr(x, y, w, h, r) {
+  ctx.beginPath(); ctx.moveTo(x + r, y);
+  ctx.arcTo(x + w, y, x + w, y + h, r); ctx.arcTo(x + w, y + h, x, y + h, r);
+  ctx.arcTo(x, y + h, x, y, r); ctx.arcTo(x, y, x + w, y, r); ctx.closePath();
+}
+function glassPanel(x, y, w, h) {
+  ctx.save();
+  ctx.shadowColor = "rgba(0,0,0,.45)"; ctx.shadowBlur = 26; ctx.shadowOffsetY = 10;
+  const g = ctx.createLinearGradient(0, y, 0, y + h);
+  g.addColorStop(0, "rgba(24,74,96,.88)"); g.addColorStop(1, "rgba(7,28,38,.92)");
+  rr(x, y, w, h, 18); ctx.fillStyle = g; ctx.fill();
+  ctx.restore();
+  rr(x, y, w, h, 18); ctx.strokeStyle = "rgba(160,230,255,.35)"; ctx.lineWidth = 1.5; ctx.stroke();
+  rr(x + 6, y + 6, w - 12, (h - 12) / 2, 12); ctx.fillStyle = "rgba(255,255,255,.05)"; ctx.fill();
+}
+function hudPill() {
+  ctx.save();
+  ctx.shadowColor = "rgba(0,0,0,.35)"; ctx.shadowBlur = 10; ctx.shadowOffsetY = 3;
+  const g = ctx.createLinearGradient(0, 6, 0, 44);
+  g.addColorStop(0, "rgba(16,58,76,.88)"); g.addColorStop(1, "rgba(8,30,40,.88)");
+  rr(6, 6, VW - 12, 38, 19); ctx.fillStyle = g; ctx.fill();
+  ctx.restore();
+  rr(6, 6, VW - 12, 38, 19); ctx.strokeStyle = "rgba(160,230,255,.30)"; ctx.lineWidth = 1; ctx.stroke();
+}
 function draw() {
   ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
-  ctx.fillStyle = "#123a4a"; ctx.fillRect(0, 0, W, H);
+  const pageG = ctx.createLinearGradient(0, 0, 0, H);
+  pageG.addColorStop(0, "#16455a"); pageG.addColorStop(0.6, "#0d2c3a"); pageG.addColorStop(1, "#071c26");
+  ctx.fillStyle = pageG; ctx.fillRect(0, 0, W, H);
   ctx.setTransform(scale, 0, 0, scale, ox, oy);
+  const bgG = ctx.createLinearGradient(0, 0, 0, VH);
+  bgG.addColorStop(0, "#174a5e"); bgG.addColorStop(0.55, "#123a4a"); bgG.addColorStop(1, "#0a2432");
+  ctx.fillStyle = bgG; ctx.fillRect(0, 0, VW, VH);
+  const glow = ctx.createRadialGradient(VW / 2, OY + ROWS * CELL / 2, 40, VW / 2, OY + ROWS * CELL / 2, 380);
+  glow.addColorStop(0, "rgba(110,210,245,.14)"); glow.addColorStop(1, "rgba(110,210,245,0)");
+  ctx.fillStyle = glow; ctx.fillRect(0, 0, VW, VH);
   if (state === "menu") {
-    ctx.fillStyle = "#fff"; ctx.textAlign = "center";
+    glassPanel(20, 84, VW - 40, 368);
+    const tg = ctx.createLinearGradient(0, 98, 0, 144);
+    tg.addColorStop(0, "#ffffff"); tg.addColorStop(1, "#9fdcf5");
+    ctx.fillStyle = tg; ctx.textAlign = "center";
     ctx.font = "bold 42px system-ui"; ctx.fillText("💊 Pill Panic", VW / 2, 130);
+    ctx.fillStyle = "#fff";
     ctx.font = "20px system-ui"; ctx.fillText("Drop the capsules, match four,", VW / 2, 190);
     ctx.fillText("clear every bug in the bottle!", VW / 2, 220);
     ctx.font = "18px system-ui"; ctx.fillText("Best: " + best, VW / 2, 270);
@@ -265,35 +327,56 @@ function draw() {
     ctx.font = "bold 22px system-ui"; ctx.fillText("Tap to start", VW / 2, 420);
     return;
   }
-  ctx.fillStyle = "#0a2530"; ctx.fillRect(OX - 6, OY - 6, COLS * CELL + 12, ROWS * CELL + 12);
+  // the bottle: glass jar with soft shadow, light rim and a top sheen band
+  ctx.save();
+  ctx.shadowColor = "rgba(0,0,0,.5)"; ctx.shadowBlur = 24; ctx.shadowOffsetY = 8;
+  const jarG = ctx.createLinearGradient(0, OY - 8, 0, OY + ROWS * CELL + 8);
+  jarG.addColorStop(0, "#0d3242"); jarG.addColorStop(1, "#071e29");
+  ctx.fillStyle = jarG; rr(OX - 8, OY - 8, COLS * CELL + 16, ROWS * CELL + 16, 14); ctx.fill();
+  ctx.restore();
+  rr(OX - 8, OY - 8, COLS * CELL + 16, ROWS * CELL + 16, 14);
+  ctx.strokeStyle = "rgba(170,230,250,.4)"; ctx.lineWidth = 2; ctx.stroke();
+  ctx.fillStyle = "rgba(255,255,255,.06)"; rr(OX - 2, OY - 2, COLS * CELL + 4, 26, 10); ctx.fill();
   for (let r = 0; r < ROWS; r++) for (let c = 0; c < COLS; c++) {
     const cell = grid[r][c], x = OX + c * CELL, y = OY + r * CELL;
-    ctx.fillStyle = "#0e3542"; ctx.fillRect(x, y, CELL - 2, CELL - 2);
+    const cg = ctx.createLinearGradient(0, y, 0, y + CELL - 2);
+    cg.addColorStop(0, "#114050"); cg.addColorStop(1, "#0b2c39");
+    ctx.fillStyle = cg; rr(x, y, CELL - 2, CELL - 2, 6); ctx.fill();
     if (cell) {
-      ctx.fillStyle = COLORS[cell.color];
       if (cell.bug) {
+        const bg2 = ctx.createRadialGradient(x + 14, y + 13, 3, x + 19, y + 19, 17);
+        bg2.addColorStop(0, "#ffffff"); bg2.addColorStop(0.25, COLORS[cell.color]); bg2.addColorStop(1, COLORS[cell.color]);
+        // (white core is only the gradient's light source tint — redraw base first)
+        ctx.fillStyle = COLORS[cell.color];
         ctx.beginPath(); ctx.arc(x + 19, y + 19, 15, 0, Math.PI * 2); ctx.fill();
+        ctx.fillStyle = bg2; ctx.globalAlpha = 0.55;
+        ctx.beginPath(); ctx.arc(x + 19, y + 19, 15, 0, Math.PI * 2); ctx.fill();
+        ctx.globalAlpha = 1;
         ctx.fillStyle = "#fff"; ctx.fillRect(x + 12, y + 13, 5, 5); ctx.fillRect(x + 22, y + 13, 5, 5);
         ctx.fillStyle = "#000"; ctx.fillRect(x + 14, y + 15, 2, 2); ctx.fillRect(x + 24, y + 15, 2, 2);
-      } else { ctx.fillRect(x + 2, y + 2, CELL - 6, CELL - 6); ctx.fillStyle = "rgba(255,255,255,.35)"; ctx.fillRect(x + 6, y + 6, CELL - 14, 8); }
+        ctx.fillStyle = "rgba(255,255,255,.8)"; ctx.beginPath(); ctx.arc(x + 13, y + 11, 2.5, 0, Math.PI * 2); ctx.fill();
+      } else pillHalf(x, y, COLORS[cell.color]);
     }
   }
   if (cap) {
     for (const p of capCells(cap)) {
       const x = OX + p.x * CELL, y = OY + p.y * CELL;
-      ctx.fillStyle = COLORS[p.color]; ctx.fillRect(x + 2, y + 2, CELL - 6, CELL - 6);
-      ctx.fillStyle = "rgba(255,255,255,.35)"; ctx.fillRect(x + 6, y + 6, CELL - 14, 8);
+      pillHalf(x, y, COLORS[p.color]);
     }
   }
-  ctx.fillStyle = "rgba(8,30,40,.75)"; ctx.fillRect(0, 0, VW, 44);
+  hudPill();
   ctx.fillStyle = "#fff"; ctx.font = "bold 18px system-ui"; ctx.textAlign = "left";
   ctx.fillText("Level " + level, 12, 28);
   ctx.textAlign = "center"; ctx.fillText("🦠 " + bugs + " left", VW / 2, 28);
   ctx.textAlign = "right"; ctx.fillText(score + " pts", VW - 12, 28);
   if (state === "over") {
-    ctx.fillStyle = "rgba(0,0,0,.6)"; ctx.fillRect(0, 0, VW, VH);
-    ctx.fillStyle = "#fff"; ctx.textAlign = "center";
+    ctx.fillStyle = "rgba(4,16,22,.55)"; ctx.fillRect(0, 0, VW, VH);
+    glassPanel(VW / 2 - 175, VH / 2 - 95, 350, 190);
+    const og = ctx.createLinearGradient(0, VH / 2 - 62, 0, VH / 2 - 16);
+    og.addColorStop(0, "#ffffff"); og.addColorStop(1, "#9fdcf5");
+    ctx.fillStyle = og; ctx.textAlign = "center";
     ctx.font = "bold 38px system-ui"; ctx.fillText("Bottle full!", VW / 2, VH / 2 - 20);
+    ctx.fillStyle = "#fff";
     ctx.font = "20px system-ui";
     ctx.fillText("Score: " + score + "  •  Best: " + best, VW / 2, VH / 2 + 20);
     ctx.fillText("Tap to return to menu", VW / 2, VH / 2 + 60);

@@ -10,7 +10,11 @@
 <style>
   * { margin:0; padding:0; box-sizing:border-box; }
   html, body {
-    width:100%; height:100%; overflow:hidden; background:#120d08;
+    width:100%; height:100%; overflow:hidden;
+    background:
+      radial-gradient(120% 90% at 50% 0%, #5a3d16 0%, rgba(90,61,22,0) 55%),
+      linear-gradient(180deg, #2e2010 0%, #120d08 60%, #080503 100%);
+    background-color:#120d08;
     font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
     touch-action:none; user-select:none; -webkit-user-select:none;
     -webkit-tap-highlight-color: transparent;
@@ -19,7 +23,10 @@
   #muteBtn {
     position:fixed; top:10px; right:10px; z-index:10;
     width:48px; height:48px; border-radius:12px;
-    border:2px solid rgba(255,190,120,.5); background:rgba(22,14,6,.62);
+    border:2px solid rgba(255,190,120,.45);
+    background:linear-gradient(180deg, rgba(96,62,26,.78), rgba(28,17,7,.78));
+    backdrop-filter:blur(6px); -webkit-backdrop-filter:blur(6px);
+    box-shadow:0 6px 18px rgba(0,0,0,.45), inset 0 1px 0 rgba(255,255,255,.22);
     color:#fff; font-size:22px; line-height:1; cursor:pointer;
     touch-action:none; user-select:none; -webkit-user-select:none;
     display:flex; align-items:center; justify-content:center; padding:0;
@@ -77,6 +84,33 @@ const ctx = canvas.getContext("2d");
 let W = 0, H = 0, DPR = 1, u = 4;
 function clamp(v, a, b) { return v < a ? a : (v > b ? b : v); }
 function lerp(a, b, t) { return a + (b - a) * t; }
+
+// ---------- visual helpers (restyle) ----------
+// Safe gradient wrapper: a canvas stub that returns a plain object for
+// create*Gradient must not be able to throw on addColorStop.
+function G(g) { return (g && typeof g.addColorStop === "function") ? g : { addColorStop: function () {} }; }
+function rr(x, y, w, h, r) {
+  ctx.beginPath();
+  ctx.moveTo(x + r, y);
+  ctx.arcTo(x + w, y, x + w, y + h, r);
+  ctx.arcTo(x + w, y + h, x, y + h, r);
+  ctx.arcTo(x, y + h, x, y, r);
+  ctx.arcTo(x, y, x + w, y, r);
+  ctx.closePath();
+}
+// Glass panel look for the menu / game-over card.
+function glassPanel(x, y, w, h, r) {
+  ctx.save();
+  ctx.shadowColor = "rgba(5,3,0,.6)"; ctx.shadowBlur = 30; ctx.shadowOffsetY = 10;
+  const g = G(ctx.createLinearGradient(0, y, 0, y + h));
+  g.addColorStop(0, "rgba(54,36,16,.90)"); g.addColorStop(1, "rgba(20,12,4,.92)");
+  ctx.fillStyle = g; rr(x, y, w, h, r); ctx.fill();
+  ctx.restore();
+  ctx.lineWidth = 1.5; ctx.strokeStyle = "rgba(255,205,150,.22)";
+  rr(x, y, w, h, r); ctx.stroke();
+  ctx.strokeStyle = "rgba(255,255,255,.10)"; ctx.lineWidth = 1;
+  ctx.beginPath(); ctx.moveTo(x + r, y + 1); ctx.lineTo(x + w - r, y + 1); ctx.stroke();
+}
 
 let hoopX = 0, rimY = 0, rimHalf = 20, boardW = 0, boardH = 0;
 let startY = 0, ballR0 = 30;
@@ -323,10 +357,13 @@ window.addEventListener("keydown", function (e) {
 function drawBall(x, y, r) {
   ctx.fillStyle = "rgba(0,0,0,0.3)";
   ctx.beginPath(); ctx.ellipse(x + 2, y + r * 0.75, r * 0.9, r * 0.35, 0, 0, Math.PI * 2); ctx.fill();
-  const g = ctx.createRadialGradient(x - r * 0.3, y - r * 0.35, r * 0.25, x, y, r);
-  g.addColorStop(0, "#ffb066"); g.addColorStop(1, "#d96a1e");
+  const g = G(ctx.createRadialGradient(x - r * 0.3, y - r * 0.35, r * 0.25, x, y, r * 1.08));
+  g.addColorStop(0, "#ffc07d"); g.addColorStop(0.5, "#f58a35"); g.addColorStop(1, "#cf5f14");
   ctx.fillStyle = g;
   ctx.beginPath(); ctx.arc(x, y, r, 0, Math.PI * 2); ctx.fill();
+  // specular highlight
+  ctx.fillStyle = "rgba(255,255,255,0.55)";
+  ctx.beginPath(); ctx.arc(x - r * 0.36, y - r * 0.42, r * 0.13, 0, Math.PI * 2); ctx.fill();
   ctx.strokeStyle = "rgba(80,35,5,0.75)"; ctx.lineWidth = Math.max(1.2, r * 0.07);
   ctx.beginPath(); ctx.arc(x, y, r, 0, Math.PI * 2); ctx.stroke();
   ctx.beginPath(); ctx.moveTo(x - r, y); ctx.lineTo(x + r, y); ctx.stroke();
@@ -336,12 +373,21 @@ function drawBall(x, y, r) {
 }
 function drawHoop() {
   const bw = boardW, bh = boardH, bx = hoopX - bw / 2, by = rimY - bh - H * 0.028;
-  // pole
-  ctx.fillStyle = "#39404f";
+  // pole: brushed-metal gradient
+  const pole = G(ctx.createLinearGradient(hoopX - 4, 0, hoopX + 4, 0));
+  pole.addColorStop(0, "#596274"); pole.addColorStop(0.5, "#2c313d"); pole.addColorStop(1, "#596274");
+  ctx.fillStyle = pole;
   ctx.fillRect(hoopX - 4, 0, 8, by);
-  // backboard
-  ctx.fillStyle = "rgba(235,242,250,0.92)";
+  // backboard: glass with a vertical light falloff and a top gloss line
+  ctx.save();
+  ctx.shadowColor = "rgba(0,0,0,.4)"; ctx.shadowBlur = 16; ctx.shadowOffsetY = 5;
+  const glass = G(ctx.createLinearGradient(0, by, 0, by + bh));
+  glass.addColorStop(0, "rgba(255,255,255,0.97)"); glass.addColorStop(1, "rgba(198,216,238,0.88)");
+  ctx.fillStyle = glass;
   ctx.fillRect(bx, by, bw, bh);
+  ctx.restore();
+  ctx.strokeStyle = "rgba(255,255,255,.55)"; ctx.lineWidth = 1;
+  ctx.beginPath(); ctx.moveTo(bx + 4, by + 1.5); ctx.lineTo(bx + bw - 4, by + 1.5); ctx.stroke();
   ctx.strokeStyle = "#d96a1e"; ctx.lineWidth = 3;
   ctx.strokeRect(bx + 3, by + 3, bw - 6, bh - 6);
   ctx.strokeRect(hoopX - rimHalf * 1.15, by + bh * 0.42, rimHalf * 2.3, bh * 0.5);
@@ -354,22 +400,47 @@ function drawHoop() {
     ctx.beginPath(); ctx.moveTo(fx, netTop); ctx.lineTo(tx, netBot); ctx.stroke();
     ctx.beginPath(); ctx.moveTo(fx, netTop); ctx.lineTo(hoopX - (fx - hoopX) * 0.55, netBot); ctx.stroke();
   }
-  // rim
+  // rim (soft red glow)
+  ctx.save();
+  ctx.shadowColor = "rgba(226,72,61,.55)"; ctx.shadowBlur = 7;
   ctx.strokeStyle = "#e2483d"; ctx.lineWidth = Math.max(3, u * 0.9);
   ctx.beginPath(); ctx.ellipse(hoopX, rimY, rimHalf, rimHalf * 0.30, 0, 0, Math.PI * 2); ctx.stroke();
+  ctx.restore();
 }
 function draw() {
-  const g = ctx.createLinearGradient(0, 0, 0, H);
-  g.addColorStop(0, "#241a10"); g.addColorStop(0.6, "#3a2812"); g.addColorStop(1, "#54380f");
+  const g = G(ctx.createLinearGradient(0, 0, 0, H));
+  g.addColorStop(0, "#2e2010"); g.addColorStop(0.55, "#40290f"); g.addColorStop(1, "#5f3d12");
   ctx.fillStyle = g; ctx.fillRect(0, 0, W, H);
+  // arena glow pooled behind the hoop
+  const glow = G(ctx.createRadialGradient(hoopX, rimY, 16, hoopX, rimY, W * 0.72));
+  glow.addColorStop(0, "rgba(255,190,90,0.17)"); glow.addColorStop(1, "rgba(255,190,90,0)");
+  ctx.fillStyle = glow; ctx.fillRect(0, 0, W, H);
+  // polished floor sheen below the hoop, shading toward the player
+  const floor = G(ctx.createLinearGradient(0, rimY + H * 0.1, 0, H));
+  floor.addColorStop(0, "rgba(255,190,110,0.07)"); floor.addColorStop(1, "rgba(0,0,0,0.20)");
+  ctx.fillStyle = floor; ctx.fillRect(0, rimY + H * 0.1, W, H - rimY - H * 0.1);
   // court floor lines (perspective hints)
   ctx.strokeStyle = "rgba(255,220,160,0.20)"; ctx.lineWidth = 2;
   for (let i = -2; i <= 2; i++) {
     ctx.beginPath(); ctx.moveTo(W / 2 + i * W * 0.07, rimY + H * 0.1); ctx.lineTo(W / 2 + i * W * 0.30, H); ctx.stroke();
   }
   ctx.beginPath(); ctx.ellipse(hoopX, rimY + H * 0.16, W * 0.30, H * 0.035, 0, 0, Math.PI * 2); ctx.stroke();
+  // gentle vignette for depth
+  const vg = G(ctx.createRadialGradient(W / 2, H * 0.42, H * 0.32, W / 2, H * 0.42, H * 0.9));
+  vg.addColorStop(0, "rgba(0,0,0,0)"); vg.addColorStop(1, "rgba(0,0,0,0.26)");
+  ctx.fillStyle = vg; ctx.fillRect(0, 0, W, H);
   drawHoop();
-  // header
+  // header on a frosted pill
+  if (state !== "menu") {
+    ctx.save();
+    ctx.shadowColor = "rgba(0,0,0,.4)"; ctx.shadowBlur = 12; ctx.shadowOffsetY = 3;
+    const hg = G(ctx.createLinearGradient(0, 4, 0, 4 + u * 11.5));
+    hg.addColorStop(0, "rgba(48,32,14,.82)"); hg.addColorStop(1, "rgba(18,11,4,.82)");
+    ctx.fillStyle = hg; rr(6, 4, W - 68, u * 11.5, 12); ctx.fill();
+    ctx.restore();
+    ctx.lineWidth = 1; ctx.strokeStyle = "rgba(255,215,170,.20)";
+    rr(6, 4, W - 68, u * 11.5, 12); ctx.stroke();
+  }
   ctx.textAlign = "left"; ctx.textBaseline = "middle";
   ctx.font = "bold " + Math.round(u * 4.2) + "px system-ui, sans-serif";
   ctx.fillStyle = "#ffd9a0";
@@ -399,11 +470,15 @@ function draw() {
       drawBall(flight.ex + (flight.res.kind === "wide" ? 10 : 0), flight.ey + drop, ballR0 * 0.44);
     }
   }
-  // aim marker
+  // aim marker (glowing)
   if (state === "aim") {
     const mx = hoopX + aimNow() * W * 0.30;
+    ctx.save();
+    ctx.shadowColor = "rgba(255,209,102,.8)"; ctx.shadowBlur = 10;
     ctx.strokeStyle = "#ffd166"; ctx.lineWidth = 3;
     ctx.beginPath(); ctx.arc(mx, rimY, rimHalf + 9, 0, Math.PI * 2); ctx.stroke();
+    ctx.restore();
+    ctx.strokeStyle = "#ffd166"; ctx.lineWidth = 3;
     ctx.beginPath(); ctx.moveTo(mx, rimY - rimHalf - 18); ctx.lineTo(mx, rimY - rimHalf - 4); ctx.stroke();
     ctx.beginPath(); ctx.moveTo(mx, rimY + rimHalf + 4); ctx.lineTo(mx, rimY + rimHalf + 18); ctx.stroke();
     ctx.fillStyle = "rgba(255,255,255,0.85)";
@@ -413,10 +488,13 @@ function draw() {
   // power meter
   if (state === "power" || state === "aim") {
     const mx = W * 0.14, my = H * 0.60, mw = W * 0.72, mh = u * 6;
-    ctx.fillStyle = "rgba(0,0,0,0.45)"; ctx.fillRect(mx - 4, my - 4, mw + 8, mh + 8);
-    const grad = ctx.createLinearGradient(mx, 0, mx + mw, 0);
+    ctx.fillStyle = "rgba(8,4,1,0.55)"; rr(mx - 4, my - 4, mw + 8, mh + 8, 9); ctx.fill();
+    ctx.strokeStyle = "rgba(255,255,255,.16)"; ctx.lineWidth = 1; rr(mx - 4, my - 4, mw + 8, mh + 8, 9); ctx.stroke();
+    const grad = G(ctx.createLinearGradient(mx, 0, mx + mw, 0));
     grad.addColorStop(0, "#4da3ff"); grad.addColorStop(0.5, "#ffd166"); grad.addColorStop(1, "#ff5d5d");
-    ctx.fillStyle = grad; ctx.fillRect(mx, my, mw, mh);
+    ctx.fillStyle = grad; rr(mx, my, mw, mh, 6); ctx.fill();
+    // gloss strip over the top half of the meter
+    ctx.fillStyle = "rgba(255,255,255,0.20)"; rr(mx + 1, my + 1, mw - 2, mh * 0.42, 5); ctx.fill();
     // ideal zone
     if (state === "power") {
       const zx = mx + mw * (ROUNDS[round].ideal - ROUNDS[round].window) / 100;
@@ -436,15 +514,21 @@ function draw() {
     }
   }
   if (state === "result") {
+    ctx.save();
     ctx.textAlign = "center";
     ctx.font = "bold " + Math.round(u * 8) + "px system-ui, sans-serif";
+    ctx.shadowColor = resultGood ? "rgba(120,230,90,.8)" : "rgba(0,0,0,.55)"; ctx.shadowBlur = resultGood ? 16 : 7;
     ctx.fillStyle = resultGood ? "#8be04e" : "#ff7a6b";
     ctx.fillText(resultText, W / 2, H * 0.56);
+    ctx.restore();
   }
   if (state === "menu" || state === "over") {
-    ctx.fillStyle = "rgba(8,5,2,0.85)"; ctx.fillRect(0, 0, W, H);
+    ctx.fillStyle = "rgba(8,5,2,0.55)"; ctx.fillRect(0, 0, W, H);
+    glassPanel(W * 0.05, H * 0.19, W * 0.90, H * 0.58, 22);
     ctx.textAlign = "center";
-    ctx.fillStyle = "#ffb066";
+    const tg = G(ctx.createLinearGradient(0, H * 0.25, 0, H * 0.34));
+    tg.addColorStop(0, "#ffffff"); tg.addColorStop(0.55, "#ffd9a0"); tg.addColorStop(1, "#ff8c3a");
+    ctx.fillStyle = tg;
     ctx.font = "bold " + Math.round(u * 9.5) + "px system-ui, sans-serif";
     ctx.fillText("🏀 FREE THROW", W / 2, H * 0.30);
     ctx.fillStyle = "#f5e9dc";

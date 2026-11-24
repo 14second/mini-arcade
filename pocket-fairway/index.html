@@ -9,12 +9,19 @@
 <title>Pocket Fairway</title>
 <style>
   * { margin:0; padding:0; box-sizing:border-box; }
-  html, body { width:100%; height:100%; overflow:hidden; background:#14401e;
+  html, body { width:100%; height:100%; overflow:hidden;
+    background:
+      radial-gradient(120% 90% at 50% 0%, #1e5c2c 0%, rgba(30,92,44,0) 55%),
+      linear-gradient(180deg, #14401e 0%, #0d3016 60%, #071c0c 100%);
     font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
     touch-action:none; user-select:none; -webkit-user-select:none; -webkit-tap-highlight-color: transparent; }
   canvas { position:fixed; inset:0; display:block; touch-action:none; }
-  #muteBtn { position:fixed; top:10px; right:10px; z-index:10; width:48px; height:48px; border-radius:12px;
-    border:2px solid rgba(255,255,255,.7); background:rgba(10,45,18,.55); color:#fff; font-size:22px;
+  #muteBtn { position:fixed; top:10px; right:10px; z-index:10; width:48px; height:48px; border-radius:14px;
+    border:1px solid rgba(255,255,255,.45);
+    background:linear-gradient(180deg, rgba(24,64,32,.68), rgba(6,28,12,.68));
+    -webkit-backdrop-filter:blur(6px); backdrop-filter:blur(6px);
+    box-shadow:0 6px 18px rgba(0,0,0,.4), inset 0 1px 0 rgba(255,255,255,.25);
+    color:#fff; font-size:22px;
     line-height:1; cursor:pointer; display:flex; align-items:center; justify-content:center; padding:0; }
 </style>
 </head>
@@ -127,8 +134,11 @@ const HOLES = [
 ];
 HOLES.forEach(h => { const d = Math.hypot(h.cup[0] - h.tee[0], h.cup[1] - h.tee[1]); h.len = Math.round(d); h.par = d < 470 ? 2 : (d < 640 ? 3 : 4); });
 let state = "menu", hole, strokes, total, results, ball, phase, aimAng, powerT, powerVal, lastPos, lastT, msg, msgT;
-let best = +(localStorage.getItem("fairway_best") || 0); // lowest total vs par diff stored as strokes total; 0 = none
-let bestDiff = localStorage.getItem("fairway_diff"); bestDiff = bestDiff === null ? null : +bestDiff;
+// guarded storage: a throwing read at startup (storage denied) must not kill the script
+let best = 0; // lowest total vs par diff stored as strokes total; 0 = none
+try { best = +(localStorage.getItem("fairway_best") || 0); } catch (e) { best = 0; }
+let bestDiff = null;
+try { const bd = localStorage.getItem("fairway_diff"); bestDiff = bd === null ? null : +bd; } catch (e) { bestDiff = null; }
 function loadHole(i) {
   hole = i; const h = HOLES[i];
   ball = { x: h.tee[0], y: h.tee[1], vx: 0, vy: 0 };
@@ -202,7 +212,7 @@ function nextHole() {
   if (hole + 1 >= HOLES.length) {
     state = "over";
     const diff = results.reduce((a, b) => a + b, 0);
-    if (bestDiff === null || diff < bestDiff) { bestDiff = diff; localStorage.setItem("fairway_diff", diff); }
+    if (bestDiff === null || diff < bestDiff) { bestDiff = diff; try { localStorage.setItem("fairway_diff", diff); } catch (e) {} }
     sfx("win");
   } else loadHole(hole + 1);
 }
@@ -223,13 +233,51 @@ function fairnessCheck() {
 }
 
 /* ---------------- draw ---------------- */
+// Visual helpers (restyle): safe gradient wrappers — if a canvas stub
+// returns a plain object without addColorStop, patch it so nothing throws.
+function gradL(x0, y0, x1, y1) {
+  const g = ctx.createLinearGradient(x0, y0, x1, y1);
+  if (g && typeof g.addColorStop !== "function") { try { g.addColorStop = function () {}; } catch (e) { return "#888888"; } }
+  return g;
+}
+function gradR(x0, y0, r0, x1, y1, r1) {
+  const g = ctx.createRadialGradient(x0, y0, r0, x1, y1, r1);
+  if (g && typeof g.addColorStop !== "function") { try { g.addColorStop = function () {}; } catch (e) { return "#888888"; } }
+  return g;
+}
+function rr(x, y, w, h, r) {
+  r = Math.min(r, w / 2, h / 2);
+  ctx.beginPath(); ctx.moveTo(x + r, y);
+  ctx.arcTo(x + w, y, x + w, y + h, r); ctx.arcTo(x + w, y + h, x, y + h, r);
+  ctx.arcTo(x, y + h, x, y, r); ctx.arcTo(x, y, x + w, y, r);
+  ctx.closePath();
+}
+function glassPanel(x, y, w, h, r) {
+  ctx.save();
+  ctx.shadowColor = "rgba(2,10,4,.5)"; ctx.shadowBlur = 30; ctx.shadowOffsetY = 10;
+  const g = gradL(0, y, 0, y + h);
+  g.addColorStop(0, "rgba(16,42,22,.90)"); g.addColorStop(1, "rgba(5,20,9,.92)");
+  ctx.fillStyle = g; rr(x, y, w, h, r); ctx.fill();
+  ctx.restore();
+  ctx.lineWidth = 1.5; ctx.strokeStyle = "rgba(255,255,255,.18)"; rr(x, y, w, h, r); ctx.stroke();
+  ctx.strokeStyle = "rgba(255,255,255,.10)"; ctx.lineWidth = 1;
+  ctx.beginPath(); ctx.moveTo(x + r, y + 1); ctx.lineTo(x + w - r, y + 1); ctx.stroke();
+}
 function draw(now) {
   ctx.setTransform(1, 0, 0, 1, 0, 0);
-  ctx.fillStyle = "#0d3016"; ctx.fillRect(0, 0, canvas.width, canvas.height);
+  const outer = gradL(0, 0, 0, canvas.height);
+  outer.addColorStop(0, "#0e3418"); outer.addColorStop(1, "#061a0b");
+  ctx.fillStyle = outer; ctx.fillRect(0, 0, canvas.width, canvas.height);
   ctx.setTransform(scale, 0, 0, scale, ox, oy);
   const h = HOLES[hole || 0];
-  ctx.fillStyle = "#1d5c2a"; ctx.fillRect(14, 70, VW - 28, VH - 88);
-  ctx.fillStyle = "#2a7a38"; ctx.fillRect(14, 70, VW - 28, (VH - 88) / 2);
+  const fairway = gradL(0, 70, 0, VH - 18);
+  fairway.addColorStop(0, "#2f8a3e"); fairway.addColorStop(0.5, "#277a35"); fairway.addColorStop(0.501, "#1f6a2d"); fairway.addColorStop(1, "#175425");
+  ctx.fillStyle = fairway; ctx.fillRect(14, 70, VW - 28, VH - 88);
+  // mow stripes across the fairway
+  ctx.fillStyle = "rgba(255,255,255,.05)";
+  for (let y = 102; y < VH - 18; y += 128) ctx.fillRect(14, y, VW - 28, 64);
+  ctx.strokeStyle = "rgba(255,255,255,.16)"; ctx.lineWidth = 1.5;
+  ctx.strokeRect(14, 70, VW - 28, VH - 88);
   // slope zones
   for (const s of h.slopes) {
     ctx.fillStyle = "rgba(255,255,255,.10)"; ctx.fillRect(s[0], s[1], s[2], s[3]);
@@ -237,19 +285,44 @@ function draw(now) {
     const arrow = s[4] === 1 ? "→" : s[4] === -1 ? "←" : s[5] === -1 ? "↑" : "↓";
     ctx.fillText(arrow + " " + arrow, s[0] + s[2] / 2, s[1] + s[3] / 2 + 6);
   }
-  for (const w of h.waters) { ctx.fillStyle = "#2b6fd4"; ctx.beginPath(); ctx.ellipse(w[0], w[1], w[2], w[3], 0, 0, 7); ctx.fill(); }
-  for (const s of h.sands) { ctx.fillStyle = "#e6cf8f"; ctx.beginPath(); ctx.ellipse(s[0], s[1], s[2], s[3], 0, 0, 7); ctx.fill(); }
+  for (const w of h.waters) {
+    const wg = gradR(w[0] - w[2] * 0.3, w[1] - w[3] * 0.3, 4, w[0], w[1], w[2]);
+    wg.addColorStop(0, "#7db8f0"); wg.addColorStop(0.55, "#2b6fd4"); wg.addColorStop(1, "#1c4f9e");
+    ctx.fillStyle = wg; ctx.beginPath(); ctx.ellipse(w[0], w[1], w[2], w[3], 0, 0, 7); ctx.fill();
+    ctx.strokeStyle = "rgba(255,255,255,.35)"; ctx.lineWidth = 1.5;
+    ctx.beginPath(); ctx.ellipse(w[0] - w[2] * 0.18, w[1] - w[3] * 0.1, w[2] * 0.45, w[3] * 0.4, 0, 3.6, 5.2); ctx.stroke();
+  }
+  for (const s of h.sands) {
+    const sg = gradR(s[0] - s[2] * 0.25, s[1] - s[3] * 0.25, 4, s[0], s[1], s[2]);
+    sg.addColorStop(0, "#f4e3ac"); sg.addColorStop(0.6, "#e6cf8f"); sg.addColorStop(1, "#c9ad67");
+    ctx.fillStyle = sg; ctx.beginPath(); ctx.ellipse(s[0], s[1], s[2], s[3], 0, 0, 7); ctx.fill();
+    ctx.fillStyle = "rgba(160,130,70,.5)";
+    for (let i = 0; i < 7; i++) { const px = s[0] + ((i * 37 + Math.round(s[0])) % Math.max(8, Math.round(s[2] * 1.2))) - s[2] * 0.6, py = s[1] + ((i * 23 + Math.round(s[1])) % Math.max(6, Math.round(s[3] * 1.1))) - s[3] * 0.55; ctx.beginPath(); ctx.arc(px, py, 1.3, 0, 7); ctx.fill(); }
+  }
   for (const t of h.trees) {
+    ctx.fillStyle = "rgba(0,0,0,.18)"; ctx.beginPath(); ctx.ellipse(t[0], t[1] + t[2] * 0.8, t[2] * 0.95, t[2] * 0.3, 0, 0, 7); ctx.fill();
     ctx.fillStyle = "#6b4a2a"; ctx.fillRect(t[0] - 3, t[1] + 4, 6, 10);
-    ctx.fillStyle = "#14532a"; ctx.beginPath(); ctx.arc(t[0], t[1], t[2], 0, 7); ctx.fill();
-    ctx.fillStyle = "#1e6b36"; ctx.beginPath(); ctx.arc(t[0] - 5, t[1] - 5, t[2] * 0.6, 0, 7); ctx.fill();
+    const canopy = gradR(t[0] - t[2] * 0.3, t[1] - t[2] * 0.35, t[2] * 0.2, t[0], t[1], t[2] * 1.25);
+    canopy.addColorStop(0, "#3f9e52"); canopy.addColorStop(0.6, "#1e6b36"); canopy.addColorStop(1, "#14532a");
+    ctx.fillStyle = canopy; ctx.beginPath(); ctx.arc(t[0], t[1], t[2], 0, 7); ctx.fill();
+    ctx.fillStyle = "rgba(190,240,180,.35)"; ctx.beginPath(); ctx.arc(t[0] - t[2] * 0.34, t[1] - t[2] * 0.4, t[2] * 0.2, 0, 7); ctx.fill();
   }
   // cup + flag
-  ctx.fillStyle = "#0a0a0a"; ctx.beginPath(); ctx.arc(h.cup[0], h.cup[1], 9, 0, 7); ctx.fill();
-  ctx.strokeStyle = "#fff"; ctx.lineWidth = 2; ctx.beginPath(); ctx.moveTo(h.cup[0], h.cup[1]); ctx.lineTo(h.cup[0], h.cup[1] - 34); ctx.stroke();
-  ctx.fillStyle = "#e84a4a"; ctx.beginPath(); ctx.moveTo(h.cup[0], h.cup[1] - 34); ctx.lineTo(h.cup[0] + 17, h.cup[1] - 27); ctx.lineTo(h.cup[0], h.cup[1] - 20); ctx.closePath(); ctx.fill();
-  // HUD
-  ctx.fillStyle = "rgba(0,0,0,.45)"; ctx.fillRect(0, 0, VW, 62);
+  const cupGrad = gradR(h.cup[0] - 3, h.cup[1] - 3, 1, h.cup[0], h.cup[1], 10);
+  cupGrad.addColorStop(0, "#3d3d3d"); cupGrad.addColorStop(1, "#000000");
+  ctx.fillStyle = cupGrad; ctx.beginPath(); ctx.arc(h.cup[0], h.cup[1], 9, 0, 7); ctx.fill();
+  ctx.strokeStyle = "rgba(255,255,255,.4)"; ctx.lineWidth = 1.5; ctx.beginPath(); ctx.arc(h.cup[0], h.cup[1], 9, 0, 7); ctx.stroke();
+  const pole = gradL(h.cup[0] - 1, 0, h.cup[0] + 1, 0);
+  pole.addColorStop(0, "#ffffff"); pole.addColorStop(1, "#b9c0c7");
+  ctx.strokeStyle = pole; ctx.lineWidth = 2; ctx.beginPath(); ctx.moveTo(h.cup[0], h.cup[1]); ctx.lineTo(h.cup[0], h.cup[1] - 34); ctx.stroke();
+  const flag = gradL(h.cup[0], h.cup[1] - 34, h.cup[0], h.cup[1] - 20);
+  flag.addColorStop(0, "#ff6b5e"); flag.addColorStop(1, "#d92f2f");
+  ctx.fillStyle = flag; ctx.beginPath(); ctx.moveTo(h.cup[0], h.cup[1] - 34); ctx.lineTo(h.cup[0] + 17, h.cup[1] - 27); ctx.lineTo(h.cup[0], h.cup[1] - 20); ctx.closePath(); ctx.fill();
+  // HUD — glass bar with a gloss line along the bottom
+  const hudGrad = gradL(0, 0, 0, 62);
+  hudGrad.addColorStop(0, "rgba(8,26,12,.78)"); hudGrad.addColorStop(1, "rgba(8,26,12,.55)");
+  ctx.fillStyle = hudGrad; ctx.fillRect(0, 0, VW, 62);
+  ctx.fillStyle = "rgba(255,255,255,.14)"; ctx.fillRect(0, 61, VW, 1);
   ctx.fillStyle = "#fff"; ctx.font = "700 19px system-ui"; ctx.textAlign = "left";
   ctx.fillText("HOLE " + ((hole || 0) + 1) + "/9 · PAR " + h.par, 14, 27);
   ctx.font = "600 14px system-ui"; ctx.fillStyle = "#cfeeD2";
@@ -258,33 +331,51 @@ function draw(now) {
   if (state === "play" && ball) {
     // aim arrow
     if (phase === "aim") {
-      ctx.strokeStyle = "rgba(255,255,255,.85)"; ctx.lineWidth = 3;
-      ctx.beginPath(); ctx.moveTo(ball.x, ball.y);
-      ctx.lineTo(ball.x + Math.cos(aimAng) * 56, ball.y + Math.sin(aimAng) * 56); ctx.stroke();
+      const ax = ball.x + Math.cos(aimAng) * 56, ay = ball.y + Math.sin(aimAng) * 56;
+      ctx.save();
+      ctx.shadowColor = "rgba(255,255,255,.65)"; ctx.shadowBlur = 7;
+      ctx.strokeStyle = "rgba(255,255,255,.9)"; ctx.lineWidth = 3;
+      ctx.beginPath(); ctx.moveTo(ball.x, ball.y); ctx.lineTo(ax, ay); ctx.stroke();
+      ctx.fillStyle = "#fff";
+      ctx.beginPath(); ctx.moveTo(ax + Math.cos(aimAng) * 11, ay + Math.sin(aimAng) * 11);
+      ctx.lineTo(ax + Math.cos(aimAng + 2.5) * 9, ay + Math.sin(aimAng + 2.5) * 9);
+      ctx.lineTo(ax + Math.cos(aimAng - 2.5) * 9, ay + Math.sin(aimAng - 2.5) * 9);
+      ctx.closePath(); ctx.fill();
+      ctx.restore();
       ctx.fillStyle = "#fff"; ctx.font = "600 14px system-ui"; ctx.textAlign = "center";
       ctx.fillText("Drag to aim — release for the power meter", VW / 2, VH - 148);
     }
     if (phase === "power") {
-      ctx.fillStyle = "#222"; ctx.fillRect(60, VH - 150, VW - 120, 22);
-      const grd = ctx.createLinearGradient(60, 0, VW - 60, 0);
+      ctx.fillStyle = "rgba(10,24,12,.75)"; rr(58, VH - 152, VW - 116, 26, 13); ctx.fill();
+      const grd = gradL(60, 0, VW - 60, 0);
       grd.addColorStop(0, "#39d353"); grd.addColorStop(0.7, "#ffd94a"); grd.addColorStop(1, "#e84a4a");
-      ctx.fillStyle = grd; ctx.fillRect(60, VH - 150, (VW - 120) * powerVal / 100, 22);
-      ctx.strokeStyle = "#fff"; ctx.strokeRect(60, VH - 150, VW - 120, 22);
+      ctx.fillStyle = grd;
+      if (powerVal > 1) { rr(60, VH - 150, Math.max(24, (VW - 120) * powerVal / 100), 22, 11); ctx.fill(); }
+      ctx.fillStyle = "rgba(255,255,255,.22)"; rr(60, VH - 150, VW - 120, 9, 4); ctx.fill();
+      ctx.strokeStyle = "rgba(255,255,255,.8)"; ctx.lineWidth = 1.5; rr(60, VH - 150, VW - 120, 22, 11); ctx.stroke();
       ctx.fillStyle = "#fff"; ctx.font = "700 15px system-ui"; ctx.textAlign = "center";
       ctx.fillText("TAP TO LOCK POWER — " + powerVal + "%", VW / 2, VH - 162);
     }
-    // ball
-    ctx.fillStyle = "#fff"; ctx.beginPath(); ctx.arc(ball.x, ball.y, 8, 0, 7); ctx.fill();
-    ctx.strokeStyle = "rgba(0,0,0,.4)"; ctx.lineWidth = 1.5; ctx.stroke();
+    // ball: soft shadow + glossy sphere
+    ctx.fillStyle = "rgba(0,0,0,.28)"; ctx.beginPath(); ctx.ellipse(ball.x + 2, ball.y + 6, 8, 3.2, 0, 0, 7); ctx.fill();
+    const ballGrad = gradR(ball.x - 3, ball.y - 3.5, 1.5, ball.x, ball.y, 10);
+    ballGrad.addColorStop(0, "#ffffff"); ballGrad.addColorStop(0.7, "#eef1f3"); ballGrad.addColorStop(1, "#c3cbd1");
+    ctx.fillStyle = ballGrad; ctx.beginPath(); ctx.arc(ball.x, ball.y, 8, 0, 7); ctx.fill();
+    ctx.strokeStyle = "rgba(0,0,0,.35)"; ctx.lineWidth = 1.2; ctx.stroke();
   }
   if (msg && performance.now() - msgT < 1500 && state === "play") {
-    ctx.fillStyle = "rgba(0,0,0,.55)"; ctx.fillRect(0, 330, VW, 48);
-    ctx.fillStyle = "#ffd94a"; ctx.font = "800 21px system-ui"; ctx.textAlign = "center";
+    ctx.font = "800 21px system-ui"; ctx.textAlign = "center";
+    const mw = ctx.measureText(msg).width + 48;
+    ctx.fillStyle = "rgba(6,18,8,.68)"; rr(VW / 2 - mw / 2, 328, mw, 50, 14); ctx.fill();
+    ctx.strokeStyle = "rgba(255,255,255,.22)"; ctx.lineWidth = 1; rr(VW / 2 - mw / 2, 328, mw, 50, 14); ctx.stroke();
+    ctx.fillStyle = "#ffd94a";
     ctx.fillText(msg, VW / 2, 362);
   }
   if (state === "menu") {
-    ctx.fillStyle = "rgba(5,25,10,.86)"; ctx.fillRect(0, 210, VW, 250);
-    ctx.fillStyle = "#fff"; ctx.font = "700 32px system-ui"; ctx.textAlign = "center";
+    glassPanel(14, 204, VW - 28, 262, 20);
+    const titleGrad = gradL(0, 244, 0, 280);
+    titleGrad.addColorStop(0, "#ffffff"); titleGrad.addColorStop(0.6, "#c8f5c0"); titleGrad.addColorStop(1, "#7dd87d");
+    ctx.fillStyle = titleGrad; ctx.font = "700 32px system-ui"; ctx.textAlign = "center";
     ctx.fillText("POCKET FAIRWAY", VW / 2, 276);
     ctx.font = "400 16px system-ui"; ctx.fillStyle = "#d2ecd6";
     ctx.fillText("Nine holes. Drag to aim, tap to lock power.", VW / 2, 312);
@@ -293,8 +384,10 @@ function draw(now) {
     ctx.fillText("TAP TO TEE OFF", VW / 2, 396);
   }
   if (state === "over") {
-    ctx.fillStyle = "rgba(5,25,10,.88)"; ctx.fillRect(0, 190, VW, 300);
-    ctx.fillStyle = "#fff"; ctx.font = "700 30px system-ui"; ctx.textAlign = "center";
+    glassPanel(14, 184, VW - 28, 312, 20);
+    const overGrad = gradL(0, 216, 0, 250);
+    overGrad.addColorStop(0, "#ffffff"); overGrad.addColorStop(0.6, "#c8f5c0"); overGrad.addColorStop(1, "#7dd87d");
+    ctx.fillStyle = overGrad; ctx.font = "700 30px system-ui"; ctx.textAlign = "center";
     ctx.fillText("ROUND COMPLETE ⛳", VW / 2, 246);
     ctx.font = "400 16px system-ui"; ctx.fillStyle = "#d2ecd6";
     results.forEach((r, i) => ctx.fillText("Hole " + (i + 1) + ": " + (HOLES[i].par + r) + " (par " + HOLES[i].par + ")", VW / 2, 282 + i * 20));
@@ -342,8 +435,8 @@ window.addEventListener("keydown", e => {
 });
 const muteBtn = document.getElementById("muteBtn");
 function syncMute() { muteBtn.textContent = muted ? "🔇" : "🔊"; }
-muteBtn.addEventListener("click", e => { e.stopPropagation(); muted = !muted; localStorage.setItem("fairway_muted", muted ? 1 : 0); syncMute(); });
-muted = localStorage.getItem("fairway_muted") === "1"; syncMute();
+muteBtn.addEventListener("click", e => { e.stopPropagation(); muted = !muted; try { localStorage.setItem("fairway_muted", muted ? 1 : 0); } catch (e) {} syncMute(); });
+try { muted = localStorage.getItem("fairway_muted") === "1"; } catch (e) { muted = false; } syncMute();
 hole = 0; loadHole(0); state = "menu"; results = [];
 if (QA_MODE) fairnessCheck();
 </script>

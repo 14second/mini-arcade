@@ -9,17 +9,19 @@
 <title>Panel Pop</title>
 <style>
   * { margin:0; padding:0; box-sizing:border-box; }
-  html, body { width:100%; height:100%; overflow:hidden; background:#241033;
+  html, body { width:100%; height:100%; overflow:hidden; background:radial-gradient(120% 90% at 50% 0%, #46206b 0%, rgba(70,32,107,0) 55%), linear-gradient(180deg,#241033 0%,#150826 100%);
     font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
     touch-action:none; user-select:none; -webkit-user-select:none; -webkit-tap-highlight-color: transparent; }
   canvas { position:fixed; inset:0; display:block; touch-action:none; }
-  #muteBtn { position:fixed; top:10px; right:10px; z-index:10; width:48px; height:48px; border-radius:12px;
-    border:2px solid rgba(255,255,255,.7); background:rgba(40,15,60,.55); color:#fff; font-size:22px;
+  #muteBtn { position:fixed; top:10px; right:10px; z-index:10; width:48px; height:48px; border-radius:14px;
+    border:1.5px solid rgba(255,255,255,.55); background:linear-gradient(180deg, rgba(255,255,255,.26), rgba(40,15,60,.55)); backdrop-filter:blur(6px); color:#fff; font-size:22px;
+    box-shadow:0 8px 22px rgba(0,0,0,.4), inset 0 1px 0 rgba(255,255,255,.35);
     line-height:1; cursor:pointer; display:flex; align-items:center; justify-content:center; padding:0; }
   #pad { position:fixed; left:0; right:0; bottom:0; z-index:10; display:flex; justify-content:center; gap:8px; padding:10px 8px calc(10px + env(safe-area-inset-bottom)); }
-  #pad button { flex:1; max-width:66px; height:56px; border-radius:14px; border:2px solid rgba(255,255,255,.45);
-    background:rgba(60,25,90,.72); color:#fff; font-size:21px; cursor:pointer; padding:0; }
-  #pad button:active { background:rgba(110,60,170,.85); }
+  #pad button { flex:1; max-width:66px; height:56px; border-radius:14px; border:1.5px solid rgba(255,255,255,.5);
+    background:linear-gradient(180deg, rgba(140,90,200,.85), rgba(60,25,90,.85)); color:#fff; font-size:21px; cursor:pointer; padding:0;
+    box-shadow:0 8px 18px rgba(0,0,0,.45), inset 0 1px 0 rgba(255,255,255,.35), inset 0 -6px 10px rgba(0,0,0,.25); text-shadow:0 1px 3px rgba(0,0,0,.35); }
+  #pad button:active { background:linear-gradient(180deg, rgba(175,120,240,.95), rgba(90,45,140,.9)); }
 </style>
 </head>
 <body>
@@ -127,12 +129,18 @@ const COLS = 6, ROWS = 12, CELL = 47, TYPES = 5;
 const WX = 69, WY = 84; // well origin; well is 282 x 564
 const RISE_FLOOR_MS = 1050; // slowest allowed top speed: one row per 1.05 s
 const TILE = [
-  { c: "#ef5b7a", s: "circle" }, { c: "#3fa7e8", s: "square" },
-  { c: "#4fce72", s: "tri" }, { c: "#f7c948", s: "diamond" },
-  { c: "#b07fe8", s: "star" }
+  { c: "#ef5b7a", l: "#ff9db4", d: "#c22e52", s: "circle" }, { c: "#3fa7e8", l: "#8fd0f7", d: "#2273b8", s: "square" },
+  { c: "#4fce72", l: "#8fe89e", d: "#2da34e", s: "tri" }, { c: "#f7c948", l: "#ffe98a", d: "#d99a12", s: "diamond" },
+  { c: "#b07fe8", l: "#d3aef7", d: "#8450c4", s: "star" }
 ];
 let state = "menu", grid, cursor, score, best, level, riseAcc, risePx, lastT, resolving, warnFlip;
-best = +(localStorage.getItem("panelpop_best") || 0);
+function storeGet(k) { try { return localStorage.getItem(k); } catch (e) { return null; } }
+function storeSet(k, v) { try { localStorage.setItem(k, v); } catch (e) {} }
+best = +(storeGet("panelpop_best") || 0);
+function LG(x0, y0, x1, y1) { try { const g = ctx.createLinearGradient(x0, y0, x1, y1); if (g && typeof g.addColorStop === "function") return g; } catch (e) {} return { addColorStop: function () {} }; }
+function RG(x0, y0, r0, x1, y1, r1) { try { const g = ctx.createRadialGradient(x0, y0, r0, x1, y1, r1); if (g && typeof g.addColorStop === "function") return g; } catch (e) {} return { addColorStop: function () {} }; }
+function rr(x, y, w, h, r) { ctx.beginPath(); ctx.moveTo(x + r, y); ctx.arcTo(x + w, y, x + w, y + h, r); ctx.arcTo(x + w, y + h, x, y + h, r); ctx.arcTo(x, y + h, x, y, r); ctx.arcTo(x, y, x + w, y, r); ctx.closePath(); }
+function glass(x, y, w, h) { ctx.save(); ctx.shadowColor = "rgba(5,0,12,.55)"; ctx.shadowBlur = 28; ctx.shadowOffsetY = 10; const g = LG(0, y, 0, y + h); g.addColorStop(0, "rgba(52,26,86,.9)"); g.addColorStop(1, "rgba(18,7,34,.93)"); ctx.fillStyle = g; rr(x, y, w, h, 20); ctx.fill(); ctx.restore(); ctx.lineWidth = 1.5; ctx.strokeStyle = "rgba(255,255,255,.2)"; rr(x, y, w, h, 20); ctx.stroke(); }
 function emptyGrid() { return Array.from({ length: ROWS }, () => new Array(COLS).fill(-1)); }
 function riseInterval(lv) { const L = lv === undefined ? (level || 1) : lv; return Math.max(RISE_FLOOR_MS, 3000 - (L - 1) * 160); }
 function pickType(rng, banned) {
@@ -206,7 +214,7 @@ function doSwap() {
 }
 function gameOver() {
   state = "over"; sfx("over");
-  if (score > best) { best = score; localStorage.setItem("panelpop_best", best); }
+  if (score > best) { best = score; storeSet("panelpop_best", best); }
 }
 function startGame() {
   grid = genInitial(emptyGrid(), Math.random, 5);
@@ -249,31 +257,56 @@ function fairnessCheck() {
 /* ---------------- draw ---------------- */
 function drawTile(x, y, t) {
   const s = CELL - 4, cx = x + CELL / 2, cy = y + CELL / 2, r = s * 0.33;
-  ctx.fillStyle = TILE[t].c; ctx.strokeStyle = "rgba(0,0,0,.35)"; ctx.lineWidth = 2;
-  const sh = TILE[t].s;
+  // glossy gradient base with a soft drop shadow
+  ctx.save(); ctx.shadowColor = "rgba(0,0,0,.4)"; ctx.shadowBlur = 5; ctx.shadowOffsetY = 2;
+  const bg2 = LG(0, y + 2, 0, y + CELL - 2); bg2.addColorStop(0, TILE[t].l); bg2.addColorStop(0.5, TILE[t].c); bg2.addColorStop(1, TILE[t].d);
+  ctx.fillStyle = bg2; rr(x + 2, y + 2, s, s, 10); ctx.fill(); ctx.restore();
+  ctx.lineWidth = 1.2; ctx.strokeStyle = "rgba(255,255,255,.4)"; rr(x + 2, y + 2, s, s, 10); ctx.stroke();
+  ctx.fillStyle = "rgba(255,255,255,.35)"; ctx.beginPath(); ctx.ellipse(cx, y + 9, s * 0.32, 4.5, 0, 0, 7); ctx.fill();
+  // the type symbol, in white with a soft shadow
+  ctx.save(); ctx.shadowColor = "rgba(0,0,0,.35)"; ctx.shadowBlur = 3; ctx.shadowOffsetY = 1.5;
+  ctx.fillStyle = "rgba(255,255,255,.92)"; ctx.strokeStyle = "rgba(0,0,0,.2)"; ctx.lineWidth = 1.2;
+  const sh = TILE[t].s, sr = r * 0.72;
   ctx.beginPath();
-  if (sh === "circle") ctx.arc(cx, cy, r, 0, 7);
-  else if (sh === "square") ctx.rect(cx - r, cy - r, r * 2, r * 2);
-  else if (sh === "tri") { ctx.moveTo(cx, cy - r * 1.1); ctx.lineTo(cx + r * 1.1, cy + r * 0.9); ctx.lineTo(cx - r * 1.1, cy + r * 0.9); ctx.closePath(); }
-  else if (sh === "diamond") { ctx.moveTo(cx, cy - r * 1.15); ctx.lineTo(cx + r * 1.05, cy); ctx.lineTo(cx, cy + r * 1.15); ctx.lineTo(cx - r * 1.05, cy); ctx.closePath(); }
-  else { for (let i = 0; i < 5; i++) { const a = -Math.PI / 2 + i * (Math.PI * 4 / 5); const px = cx + Math.cos(a) * r * 1.2, py = cy + Math.sin(a) * r * 1.2; i ? ctx.lineTo(px, py) : ctx.moveTo(px, py); } ctx.closePath(); }
-  ctx.fill(); ctx.stroke();
-  ctx.fillStyle = "rgba(255,255,255,.45)";
-  ctx.beginPath(); ctx.arc(cx - r * 0.3, cy - r * 0.35, r * 0.2, 0, 7); ctx.fill();
+  if (sh === "circle") ctx.arc(cx, cy, sr, 0, 7);
+  else if (sh === "square") ctx.rect(cx - sr, cy - sr, sr * 2, sr * 2);
+  else if (sh === "tri") { ctx.moveTo(cx, cy - sr * 1.1); ctx.lineTo(cx + sr * 1.1, cy + sr * 0.9); ctx.lineTo(cx - sr * 1.1, cy + sr * 0.9); ctx.closePath(); }
+  else if (sh === "diamond") { ctx.moveTo(cx, cy - sr * 1.15); ctx.lineTo(cx + sr * 1.05, cy); ctx.lineTo(cx, cy + sr * 1.15); ctx.lineTo(cx - sr * 1.05, cy); ctx.closePath(); }
+  else { for (let i = 0; i < 5; i++) { const a = -Math.PI / 2 + i * (Math.PI * 4 / 5); const px = cx + Math.cos(a) * sr * 1.2, py = cy + Math.sin(a) * sr * 1.2; i ? ctx.lineTo(px, py) : ctx.moveTo(px, py); } ctx.closePath(); }
+  ctx.fill(); ctx.stroke(); ctx.restore();
 }
 function draw() {
   ctx.setTransform(1, 0, 0, 1, 0, 0);
-  ctx.fillStyle = "#190a26"; ctx.fillRect(0, 0, canvas.width, canvas.height);
+  const bg = LG(0, 0, 0, VH); bg.addColorStop(0, "#2b1247"); bg.addColorStop(0.55, "#190a26"); bg.addColorStop(1, "#2a1440");
+  ctx.fillStyle = bg; ctx.fillRect(0, 0, canvas.width, canvas.height);
   ctx.setTransform(scale, 0, 0, scale, ox, oy);
-  ctx.fillStyle = "#f3e9ff"; ctx.font = "700 25px system-ui"; ctx.textAlign = "left";
+  // soft drifting bokeh depth layer (time-based, visual only)
+  const now2 = performance.now() / 1000;
+  for (let i = 0; i < 9; i++) {
+    const bx = (i * 83 + 30) % VW, by = (i * 137 + 60 + Math.sin(now2 * 0.4 + i * 1.7) * 14) % VH;
+    const bgc = RG(bx, by, 1, bx, by, 26 + (i % 3) * 10); bgc.addColorStop(0, "rgba(176,127,232,.13)"); bgc.addColorStop(1, "rgba(176,127,232,0)");
+    ctx.fillStyle = bgc; ctx.beginPath(); ctx.arc(bx, by, 26 + (i % 3) * 10, 0, 7); ctx.fill();
+  }
+  ctx.save(); ctx.shadowColor = "rgba(0,0,0,.35)"; ctx.shadowBlur = 10; ctx.shadowOffsetY = 3;
+  const hudg = LG(0, 10, 0, 74); hudg.addColorStop(0, "rgba(70,38,110,.6)"); hudg.addColorStop(1, "rgba(40,18,66,.45)");
+  ctx.fillStyle = hudg; rr(56, 10, VW - 102, 64, 14); ctx.fill(); ctx.restore();
+  ctx.lineWidth = 1; ctx.strokeStyle = "rgba(255,255,255,.24)"; rr(56, 10, VW - 102, 64, 14); ctx.stroke();
+  const tg = LG(0, 16, 0, 42); tg.addColorStop(0, "#ffffff"); tg.addColorStop(1, "#d9bfff");
+  ctx.fillStyle = tg; ctx.font = "700 25px system-ui"; ctx.textAlign = "left";
   ctx.fillText("PANEL POP", 69, 40);
   ctx.font = "600 15px system-ui"; ctx.fillStyle = "#bb9ede"; ctx.textAlign = "right";
   ctx.fillText("BEST " + best, VW - 50, 40);
   ctx.font = "600 15px system-ui"; ctx.textAlign = "left";
   ctx.fillText("SCORE " + score + "   LV " + level, 69, 66);
   const danger = grid && stackHeight(grid) >= ROWS - 2;
-  ctx.fillStyle = "#2a1743"; ctx.fillRect(WX - 4, WY - 4, COLS * CELL + 8, ROWS * CELL + 8);
-  ctx.strokeStyle = danger ? "#ff5b6a" : "#54357e"; ctx.lineWidth = 3; ctx.strokeRect(WX - 4, WY - 4, COLS * CELL + 8, ROWS * CELL + 8);
+  ctx.save(); ctx.shadowColor = "rgba(0,0,0,.5)"; ctx.shadowBlur = 22; ctx.shadowOffsetY = 8;
+  const wg = LG(0, WY - 4, 0, WY + ROWS * CELL + 4); wg.addColorStop(0, "#341d55"); wg.addColorStop(1, "#20102f");
+  ctx.fillStyle = wg; rr(WX - 4, WY - 4, COLS * CELL + 8, ROWS * CELL + 8, 12); ctx.fill(); ctx.restore();
+  ctx.strokeStyle = danger ? "#ff5b6a" : "#7a55b0"; ctx.lineWidth = 3; rr(WX - 4, WY - 4, COLS * CELL + 8, ROWS * CELL + 8, 12); ctx.stroke();
+  // faint inner cell grid for depth
+  ctx.strokeStyle = "rgba(255,255,255,.05)"; ctx.lineWidth = 1;
+  for (let gc2 = 1; gc2 < COLS; gc2++) { ctx.beginPath(); ctx.moveTo(WX + gc2 * CELL, WY); ctx.lineTo(WX + gc2 * CELL, WY + ROWS * CELL); ctx.stroke(); }
+  for (let gr2 = 1; gr2 < ROWS; gr2++) { ctx.beginPath(); ctx.moveTo(WX, WY + gr2 * CELL); ctx.lineTo(WX + COLS * CELL, WY + gr2 * CELL); ctx.stroke(); }
   ctx.save();
   ctx.beginPath(); ctx.rect(WX, WY, COLS * CELL, ROWS * CELL); ctx.clip();
   if (grid) {
@@ -283,12 +316,16 @@ function draw() {
   ctx.restore();
   if (state === "play" && cursor) {
     const off = resolving ? 0 : risePx;
+    ctx.save(); ctx.shadowColor = "rgba(255,255,255,.85)"; ctx.shadowBlur = 12;
     ctx.strokeStyle = "#fff"; ctx.lineWidth = 3;
-    ctx.strokeRect(WX + cursor.c * CELL - 2, WY + cursor.r * CELL - 2 - off, CELL * 2 + 4, CELL + 4);
+    rr(WX + cursor.c * CELL - 2, WY + cursor.r * CELL - 2 - off, CELL * 2 + 4, CELL + 4, 9); ctx.stroke(); ctx.restore();
+    ctx.strokeStyle = "rgba(255,217,74,.8)"; ctx.lineWidth = 1.4;
+    rr(WX + cursor.c * CELL + 2, WY + cursor.r * CELL + 2 - off, CELL * 2 - 4, CELL - 4, 7); ctx.stroke();
   }
   if (state === "menu") {
-    ctx.fillStyle = "rgba(10,4,20,.8)"; ctx.fillRect(0, 230, VW, 220);
-    ctx.fillStyle = "#fff"; ctx.font = "700 33px system-ui"; ctx.textAlign = "center";
+    glass(8, 230, VW - 16, 220);
+    const mtg = LG(0, 262, 0, 300); mtg.addColorStop(0, "#ffffff"); mtg.addColorStop(0.55, "#e3ccff"); mtg.addColorStop(1, "#b07fe8");
+    ctx.fillStyle = mtg; ctx.font = "700 33px system-ui"; ctx.textAlign = "center";
     ctx.fillText("PANEL POP", VW / 2, 296);
     ctx.font = "400 16px system-ui"; ctx.fillStyle = "#dccdf5";
     ctx.fillText("Swap two side-by-side tiles. Match 3+ to clear.", VW / 2, 332);
@@ -297,7 +334,7 @@ function draw() {
     ctx.fillText("TAP TO START", VW / 2, 408);
   }
   if (state === "over") {
-    ctx.fillStyle = "rgba(10,4,20,.82)"; ctx.fillRect(0, 230, VW, 220);
+    glass(8, 230, VW - 16, 220);
     ctx.fillStyle = "#fff"; ctx.font = "700 32px system-ui"; ctx.textAlign = "center";
     ctx.fillText("TOPPED OUT", VW / 2, 300);
     ctx.font = "400 18px system-ui"; ctx.fillStyle = "#dccdf5";
@@ -359,8 +396,8 @@ window.addEventListener("keydown", e => {
 });
 const muteBtn = document.getElementById("muteBtn");
 function syncMute() { muteBtn.textContent = muted ? "🔇" : "🔊"; }
-muteBtn.addEventListener("click", e => { e.stopPropagation(); muted = !muted; localStorage.setItem("panelpop_muted", muted ? 1 : 0); syncMute(); });
-muted = localStorage.getItem("panelpop_muted") === "1"; syncMute();
+muteBtn.addEventListener("click", e => { e.stopPropagation(); muted = !muted; storeSet("panelpop_muted", muted ? 1 : 0); syncMute(); });
+muted = storeGet("panelpop_muted") === "1"; syncMute();
 grid = genInitial(emptyGrid(), Math.random, 5); cursor = { r: ROWS - 3, c: 2 };
 if (QA_MODE) fairnessCheck();
 </script>

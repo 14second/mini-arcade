@@ -10,7 +10,7 @@
 <style>
   * { margin:0; padding:0; box-sizing:border-box; }
   html, body {
-    width:100%; height:100%; overflow:hidden; background:#14301c;
+    width:100%; height:100%; overflow:hidden; background:radial-gradient(120% 90% at 50% 0%, #27543a 0%, rgba(39,84,58,0) 55%), linear-gradient(180deg,#1a3d27 0%,#14301c 60%,#0b2011 100%);
     font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
     touch-action:none; user-select:none; -webkit-user-select:none;
     -webkit-tap-highlight-color: transparent;
@@ -19,8 +19,10 @@
   #muteBtn {
     position:fixed; top:10px; right:10px; z-index:10;
     width:48px; height:48px; border-radius:12px;
-    border:2px solid rgba(160,255,170,.5); background:rgba(10,26,14,.62);
+    border:1px solid rgba(170,255,180,.55); background:linear-gradient(180deg, rgba(60,140,80,.55), rgba(8,24,12,.68));
     color:#fff; font-size:22px; line-height:1; cursor:pointer;
+    box-shadow:0 8px 24px rgba(0,0,0,.45), inset 0 1px 0 rgba(255,255,255,.25);
+    backdrop-filter:blur(6px); -webkit-backdrop-filter:blur(6px);
     touch-action:none; user-select:none; -webkit-user-select:none;
     display:flex; align-items:center; justify-content:center; padding:0;
   }
@@ -205,6 +207,12 @@ const FRUITS = {
   orange: { r: 16, pts: 15, color: "#ff9f1c" },
   berry:  { r: 11, pts: 25, color: "#7b5cff" }
 };
+// Visual-only shading per fruit (light/base/dark for glossy gradients).
+const FRUIT_STYLE = {
+  apple:  { light: "#ff9a8a", base: "#e8402f", dark: "#9c1220" },
+  orange: { light: "#ffd88a", base: "#ff9f1c", dark: "#c05f00" },
+  berry:  { light: "#c4b0ff", base: "#7b5cff", dark: "#3d1e9e" }
+};
 function spawnItem() {
   const roll = Math.random();
   const kind = roll < 0.16 ? "bomb" : roll < 0.55 ? "apple" : roll < 0.83 ? "orange" : "berry";
@@ -295,10 +303,48 @@ function update(dt) {
 }
 
 // ---------- Draw ----------
+function rrPath(x, y, w, h, r) {
+  ctx.beginPath();
+  ctx.moveTo(x + r, y);
+  ctx.arcTo(x + w, y, x + w, y + h, r);
+  ctx.arcTo(x + w, y + h, x, y + h, r);
+  ctx.arcTo(x, y + h, x, y, r);
+  ctx.arcTo(x, y, x + w, y, r);
+  ctx.closePath();
+}
+function frostPill(x, y, w, h) {
+  ctx.save();
+  ctx.shadowColor = "rgba(0,10,0,.45)"; ctx.shadowBlur = 12; ctx.shadowOffsetY = 3;
+  const g = ctx.createLinearGradient(0, y, 0, y + h);
+  g.addColorStop(0, "rgba(30,70,40,.72)"); g.addColorStop(1, "rgba(8,24,12,.72)");
+  ctx.fillStyle = g;
+  rrPath(x, y, w, h, 12); ctx.fill();
+  ctx.restore();
+  ctx.lineWidth = 1; ctx.strokeStyle = "rgba(180,255,190,.35)";
+  rrPath(x, y, w, h, 12); ctx.stroke();
+}
+function glassPanel(x, y, w, h) {
+  ctx.save();
+  ctx.shadowColor = "rgba(0,8,0,.6)"; ctx.shadowBlur = 34; ctx.shadowOffsetY = 12;
+  const g = ctx.createLinearGradient(0, y, 0, y + h);
+  g.addColorStop(0, "rgba(26,58,34,.88)"); g.addColorStop(1, "rgba(8,22,11,.92)");
+  ctx.fillStyle = g;
+  rrPath(x, y, w, h, 20); ctx.fill();
+  ctx.restore();
+  ctx.lineWidth = 1.5; ctx.strokeStyle = "rgba(180,255,190,.30)";
+  rrPath(x, y, w, h, 20); ctx.stroke();
+  ctx.strokeStyle = "rgba(255,255,255,.12)"; ctx.lineWidth = 1;
+  ctx.beginPath(); ctx.moveTo(x + 20, y + 1); ctx.lineTo(x + w - 20, y + 1); ctx.stroke();
+}
 function drawItem(it) {
   ctx.save(); ctx.translate(it.x, it.y);
+  // soft drop shadow so items lift off the backdrop
+  ctx.fillStyle = "rgba(0,0,0,0.18)";
+  ctx.beginPath(); ctx.ellipse(2, it.r * 0.92, it.r * 0.85, it.r * 0.3, 0, 0, Math.PI * 2); ctx.fill();
   if (it.kind === "bomb") {
-    ctx.fillStyle = "#22242c";
+    const bg2 = ctx.createRadialGradient(-it.r * 0.35, -it.r * 0.4, it.r * 0.15, 0, 0, it.r * 1.1);
+    bg2.addColorStop(0, "#5a6070"); bg2.addColorStop(0.55, "#2c2f38"); bg2.addColorStop(1, "#101216");
+    ctx.fillStyle = bg2;
     ctx.beginPath(); ctx.arc(0, 0, it.r, 0, Math.PI * 2); ctx.fill();
     ctx.strokeStyle = "#4a4f5e"; ctx.lineWidth = 3;
     for (let i = 0; i < 8; i++) {
@@ -308,62 +354,117 @@ function drawItem(it) {
       ctx.lineTo(Math.cos(a) * it.r * 1.18, Math.sin(a) * it.r * 1.18);
       ctx.stroke();
     }
+    ctx.fillStyle = "rgba(255,255,255,0.5)";
+    ctx.beginPath(); ctx.ellipse(-it.r * 0.38, -it.r * 0.44, it.r * 0.2, it.r * 0.11, -0.6, 0, Math.PI * 2); ctx.fill();
+    // glowing fuse spark
+    ctx.save();
+    ctx.shadowColor = "rgba(255,180,40,.95)"; ctx.shadowBlur = 10;
     ctx.fillStyle = "#ffca3a";
     ctx.beginPath(); ctx.arc(-it.r * 0.3, -it.r * 0.35, it.r * 0.16, 0, Math.PI * 2); ctx.fill();
+    ctx.restore();
   } else {
-    const f = FRUITS[it.kind];
-    ctx.fillStyle = f.color;
+    const st = FRUIT_STYLE[it.kind];
+    const fg = ctx.createRadialGradient(-it.r * 0.35, -it.r * 0.42, it.r * 0.12, 0, 0, it.r * 1.08);
+    fg.addColorStop(0, st.light); fg.addColorStop(0.5, st.base); fg.addColorStop(1, st.dark);
+    ctx.fillStyle = fg;
     ctx.beginPath(); ctx.arc(0, 0, it.r, 0, Math.PI * 2); ctx.fill();
-    ctx.fillStyle = "rgba(255,255,255,0.35)";
-    ctx.beginPath(); ctx.arc(-it.r * 0.35, -it.r * 0.4, it.r * 0.28, 0, Math.PI * 2); ctx.fill();
+    ctx.fillStyle = "rgba(255,255,255,0.55)";
+    ctx.beginPath(); ctx.ellipse(-it.r * 0.36, -it.r * 0.44, it.r * 0.26, it.r * 0.14, -0.6, 0, Math.PI * 2); ctx.fill();
+    ctx.fillStyle = "rgba(255,255,255,0.22)";
+    ctx.beginPath(); ctx.arc(it.r * 0.3, it.r * 0.34, it.r * 0.1, 0, Math.PI * 2); ctx.fill();
     ctx.strokeStyle = "#6b4423"; ctx.lineWidth = 2.5;
     ctx.beginPath(); ctx.moveTo(0, -it.r * 0.8); ctx.lineTo(it.r * 0.12, -it.r * 1.15); ctx.stroke();
-    ctx.fillStyle = "#57b84a";
+    const lg = ctx.createLinearGradient(0, -it.r * 1.1, 0, -it.r * 0.8);
+    lg.addColorStop(0, "#7ed36e"); lg.addColorStop(1, "#3f8f33");
+    ctx.fillStyle = lg;
     ctx.beginPath(); ctx.ellipse(it.r * 0.3, -it.r * 0.95, it.r * 0.32, it.r * 0.14, -0.4, 0, Math.PI * 2); ctx.fill();
   }
   ctx.restore();
 }
 function draw() {
-  // orchard backdrop
+  // orchard backdrop: layered canopy silhouettes for depth
   const grad = ctx.createLinearGradient(0, 0, 0, H);
-  grad.addColorStop(0, "#1c4a28"); grad.addColorStop(1, "#14301c");
+  grad.addColorStop(0, "#2a6b3c"); grad.addColorStop(0.6, "#1c4a28"); grad.addColorStop(1, "#14301c");
   ctx.fillStyle = grad; ctx.fillRect(0, 0, W, H);
-  ctx.fillStyle = "#0f2413"; ctx.fillRect(0, groundY, W, H - groundY);
-  ctx.fillStyle = "#2e6b3c"; ctx.fillRect(0, groundY, W, 3);
-  // HUD
+  // warm sun glow through the leaves, top-left
+  const sun = ctx.createRadialGradient(W * 0.16, H * 0.1, 8, W * 0.16, H * 0.1, Math.max(W, H) * 0.55);
+  sun.addColorStop(0, "rgba(255,240,180,.34)"); sun.addColorStop(1, "rgba(255,240,180,0)");
+  ctx.fillStyle = sun; ctx.fillRect(0, 0, W, H);
+  // far tree line (soft, lighter)
+  ctx.fillStyle = "rgba(70,150,90,.45)";
+  for (let i = 0; i < 9; i++) {
+    const tx = (i + 0.5) * (W / 9) + Math.sin(i * 2.7) * 14;
+    const tr = 44 + (Math.sin(i * 5.3) * 0.5 + 0.5) * 36;
+    ctx.beginPath(); ctx.arc(tx, groundY - tr * 0.55, tr, 0, Math.PI * 2); ctx.fill();
+  }
+  // near tree line (darker, lower)
+  ctx.fillStyle = "rgba(16,52,26,.75)";
+  for (let i = 0; i < 7; i++) {
+    const tx = (i + 0.5) * (W / 7) + Math.cos(i * 3.1) * 18;
+    const tr = 34 + (Math.cos(i * 4.7) * 0.5 + 0.5) * 30;
+    ctx.beginPath(); ctx.arc(tx, groundY - tr * 0.3, tr, 0, Math.PI * 2); ctx.fill();
+  }
+  // ground: gradient + sunlit lip + soft mow bands
+  const gg = ctx.createLinearGradient(0, groundY, 0, H);
+  gg.addColorStop(0, "#2e6b3c"); gg.addColorStop(0.25, "#1e4d2a"); gg.addColorStop(1, "#0c2010");
+  ctx.fillStyle = gg; ctx.fillRect(0, groundY, W, H - groundY);
+  ctx.fillStyle = "rgba(255,255,210,.30)"; ctx.fillRect(0, groundY, W, 2.5);
+  ctx.fillStyle = "rgba(255,255,255,.045)";
+  for (let x = 0; x < W; x += 104) ctx.fillRect(x, groundY, 52, H - groundY);
+  // HUD (frosted pills)
+  frostPill(8, 11, Math.max(140, u * 37), 38);
+  frostPill(W - 184, 11, 118, 38);
+  if (streak >= 3) frostPill(W / 2 - 62, 11, 124, 38);
   ctx.textAlign = "left"; ctx.textBaseline = "middle";
   ctx.fillStyle = "#eaffea";
   ctx.font = "bold " + Math.round(u * 5.2) + "px system-ui, sans-serif";
-  ctx.fillText("Score " + score, 14, 30);
+  ctx.fillText("Score " + score, 22, 31);
   ctx.textAlign = "center"; ctx.fillStyle = "#ffd93d";
-  if (streak >= 3) ctx.fillText("Streak ×" + streak, W / 2, 30);
+  if (streak >= 3) ctx.fillText("Streak ×" + streak, W / 2, 31);
   ctx.textAlign = "right";
   let hearts = "";
   for (let i = 0; i < lives; i++) hearts += "● ";
   ctx.fillStyle = "#ff5d7a";
-  ctx.fillText(hearts.trim(), W - 66, 30);
+  ctx.fillText(hearts.trim(), W - 76, 31);
   // items
   for (const it of items) drawItem(it);
-  // basket
+  // basket (woven wood gradient, soft ground shadow, glossy rim)
   const bx = basket.x - basketW / 2;
-  ctx.fillStyle = "#b0793a";
+  ctx.fillStyle = "rgba(0,0,0,.22)";
+  ctx.beginPath(); ctx.ellipse(basket.x, groundY + 4, basketW * 0.52, 6, 0, 0, Math.PI * 2); ctx.fill();
+  const wg = ctx.createLinearGradient(0, basketY, 0, basketY + basketH);
+  wg.addColorStop(0, "#d99a4e"); wg.addColorStop(0.55, "#b0793a"); wg.addColorStop(1, "#7c4c20");
+  ctx.fillStyle = wg;
   ctx.beginPath();
   ctx.moveTo(bx - 6, basketY);
   ctx.lineTo(bx + basketW + 6, basketY);
   ctx.lineTo(bx + basketW - 8, basketY + basketH);
   ctx.lineTo(bx + 8, basketY + basketH);
   ctx.closePath(); ctx.fill();
-  ctx.strokeStyle = "#7a4a21"; ctx.lineWidth = 3;
+  ctx.strokeStyle = "rgba(90,55,20,.55)"; ctx.lineWidth = 2;
   for (let i = 1; i <= 3; i++) {
     const yy = basketY + (basketH / 4) * i;
     ctx.beginPath(); ctx.moveTo(bx - 4 + i * 2, yy); ctx.lineTo(bx + basketW + 4 - i * 2, yy); ctx.stroke();
   }
-  ctx.fillStyle = "#8a5a28";
+  ctx.strokeStyle = "rgba(255,225,170,.28)"; ctx.lineWidth = 1.2;
+  for (let i = 1; i <= 3; i++) {
+    const yy = basketY + (basketH / 4) * i - 2;
+    ctx.beginPath(); ctx.moveTo(bx - 4 + i * 2, yy); ctx.lineTo(bx + basketW + 4 - i * 2, yy); ctx.stroke();
+  }
+  const rimG = ctx.createLinearGradient(bx - 8, 0, bx + basketW + 8, 0);
+  rimG.addColorStop(0, "#8a5a28"); rimG.addColorStop(0.5, "#e0aa5e"); rimG.addColorStop(1, "#8a5a28");
+  ctx.fillStyle = rimG;
   ctx.fillRect(bx - 8, basketY - 5, basketW + 16, 7);
+  ctx.fillStyle = "rgba(255,255,255,.30)";
+  ctx.fillRect(bx - 8, basketY - 5, basketW + 16, 2);
   if (state !== "play") {
-    ctx.fillStyle = "rgba(6,18,9,0.8)"; ctx.fillRect(0, 0, W, H);
+    ctx.fillStyle = "rgba(4,14,6,0.55)"; ctx.fillRect(0, 0, W, H);
+    const pw = Math.min(W - 28, 560);
+    glassPanel(W / 2 - pw / 2, H * 0.19, pw, H * 0.58);
     ctx.textAlign = "center"; ctx.textBaseline = "middle";
-    ctx.fillStyle = "#8be04e";
+    const tg = ctx.createLinearGradient(0, H * 0.23, 0, H * 0.33);
+    tg.addColorStop(0, "#ffffff"); tg.addColorStop(0.55, "#c9f5b8"); tg.addColorStop(1, "#8be04e");
+    ctx.fillStyle = tg;
     ctx.font = "bold " + Math.round(u * 10) + "px system-ui, sans-serif";
     ctx.fillText("FRUIT CATCH", W / 2, H * 0.28);
     ctx.fillStyle = "#eaffea";

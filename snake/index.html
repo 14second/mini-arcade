@@ -10,16 +10,22 @@
 <style>
   * { margin:0; padding:0; box-sizing:border-box; }
   html, body {
-    width:100%; height:100%; overflow:hidden; background:#0d2812;
-    font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+    width:100%; height:100%; overflow:hidden;
+    background:
+      radial-gradient(120% 80% at 50% 0%, #1e4d2a 0%, rgba(30,77,42,0) 55%),
+      linear-gradient(180deg, #14361d 0%, #0d2812 60%, #071a0b 100%);
+    font-family:"Avenir Next", "Segoe UI", system-ui, -apple-system, Roboto, sans-serif;
     touch-action:none; user-select:none; -webkit-user-select:none;
     -webkit-tap-highlight-color: transparent;
   }
   canvas { position:fixed; inset:0; display:block; touch-action:none; }
   #muteBtn {
     position:fixed; top:10px; right:10px; z-index:10;
-    width:48px; height:48px; border-radius:12px;
-    border:2px solid rgba(140,255,160,.55); background:rgba(6,26,10,.62);
+    width:48px; height:48px; border-radius:14px;
+    border:1.5px solid rgba(160,255,180,.55);
+    background:linear-gradient(180deg, rgba(40,95,55,.72), rgba(6,26,10,.72));
+    backdrop-filter:blur(8px); -webkit-backdrop-filter:blur(8px);
+    box-shadow:0 8px 22px rgba(0,0,0,.45), inset 0 1px 0 rgba(255,255,255,.25);
     color:#fff; font-size:22px; line-height:1; cursor:pointer;
     touch-action:none; user-select:none; -webkit-user-select:none;
     display:flex; align-items:center; justify-content:center; padding:0;
@@ -275,43 +281,106 @@ function rr(x, y, w, h, r) {
   ctx.arcTo(x, y + h, x, y, r); ctx.arcTo(x, y, x + w, y, r);
   ctx.closePath();
 }
+function glassPanel(x, y, w, h) {
+  ctx.save();
+  ctx.shadowColor = "rgba(0,0,0,.5)"; ctx.shadowBlur = 34; ctx.shadowOffsetY = 12;
+  const g = ctx.createLinearGradient(0, y, 0, y + h);
+  g.addColorStop(0, "rgba(22,48,30,.88)"); g.addColorStop(1, "rgba(8,22,12,.90)");
+  ctx.fillStyle = g; rr(x, y, w, h, 22); ctx.fill();
+  ctx.restore();
+  ctx.lineWidth = 1.5; ctx.strokeStyle = "rgba(255,255,255,.18)"; rr(x, y, w, h, 22); ctx.stroke();
+  ctx.strokeStyle = "rgba(255,255,255,.10)"; ctx.lineWidth = 1;
+  ctx.beginPath(); ctx.moveTo(x + 22, y + 1); ctx.lineTo(x + w - 22, y + 1); ctx.stroke();
+}
 function draw() {
-  ctx.fillStyle = "#0d2812"; ctx.fillRect(0, 0, W, H);
-  // HUD
+  const bg = ctx.createLinearGradient(0, 0, 0, H);
+  bg.addColorStop(0, "#173d21"); bg.addColorStop(0.55, "#0e2c15"); bg.addColorStop(1, "#071a0b");
+  ctx.fillStyle = bg; ctx.fillRect(0, 0, W, H);
+  const glow = ctx.createRadialGradient(W / 2, H * 0.38, 10, W / 2, H * 0.38, H * 0.6);
+  glow.addColorStop(0, "rgba(120,230,140,.13)"); glow.addColorStop(1, "rgba(120,230,140,0)");
+  ctx.fillStyle = glow; ctx.fillRect(0, 0, W, H);
+  // HUD: frosted pills
+  ctx.save();
+  ctx.fillStyle = "rgba(10,30,16,.48)"; rr(8, 10, Math.min(W * 0.42, 190), 40, 20); ctx.fill();
+  ctx.lineWidth = 1; ctx.strokeStyle = "rgba(255,255,255,.22)"; rr(8, 10, Math.min(W * 0.42, 190), 40, 20); ctx.stroke();
+  ctx.fillStyle = "rgba(10,30,16,.48)"; rr(Math.max(8, W - 66 - Math.min(W * 0.38, 170)), 10, Math.min(W * 0.38, 170), 40, 20); ctx.fill();
+  ctx.strokeStyle = "rgba(255,255,255,.22)"; rr(Math.max(8, W - 66 - Math.min(W * 0.38, 170)), 10, Math.min(W * 0.38, 170), 40, 20); ctx.stroke();
+  ctx.restore();
   ctx.fillStyle = "#eaffea"; ctx.font = "bold " + Math.round(u * 5.2) + "px system-ui, sans-serif";
   ctx.textAlign = "left"; ctx.textBaseline = "middle";
-  ctx.fillText("Score " + score, 14, HUD_H / 2);
+  ctx.fillText("Score " + score, 20, HUD_H / 2);
   ctx.textAlign = "right";
-  ctx.fillStyle = "#9fd8a8";
-  ctx.fillText("Best " + Math.max(hi, score), W - 66, HUD_H / 2);
-  // Board
-  ctx.fillStyle = "#123a1a"; rr(boardX - 4, boardY - 4, cell * N + 8, cell * N + 8, 10); ctx.fill();
+  ctx.fillStyle = "#b9ecc2";
+  ctx.fillText("Best " + Math.max(hi, score), W - 74, HUD_H / 2);
+  // Board: layered garden plot with soft shadow and inner gradient
+  ctx.save();
+  ctx.shadowColor = "rgba(0,0,0,.55)"; ctx.shadowBlur = 26; ctx.shadowOffsetY = 8;
+  const boardG = ctx.createLinearGradient(0, boardY, 0, boardY + cell * N);
+  boardG.addColorStop(0, "#1a4726"); boardG.addColorStop(1, "#103218");
+  ctx.fillStyle = boardG; rr(boardX - 6, boardY - 6, cell * N + 12, cell * N + 12, 14); ctx.fill();
+  ctx.restore();
+  ctx.lineWidth = 1.5; ctx.strokeStyle = "rgba(190,255,200,.28)"; rr(boardX - 6, boardY - 6, cell * N + 12, cell * N + 12, 14); ctx.stroke();
   for (let gy = 0; gy < N; gy++) for (let gx = 0; gx < N; gx++) {
-    if ((gx + gy) % 2 === 0) { ctx.fillStyle = "rgba(255,255,255,0.03)"; ctx.fillRect(boardX + gx * cell, boardY + gy * cell, cell, cell); }
+    if ((gx + gy) % 2 === 0) { ctx.fillStyle = "rgba(255,255,255,0.045)"; ctx.fillRect(boardX + gx * cell, boardY + gy * cell, cell, cell); }
+    else { ctx.fillStyle = "rgba(0,0,0,0.05)"; ctx.fillRect(boardX + gx * cell, boardY + gy * cell, cell, cell); }
   }
-  // Food (apple)
+  // Food (apple): glossy with halo, stem and leaf
   const fx = boardX + food.x * cell + cell / 2, fy = boardY + food.y * cell + cell / 2;
-  ctx.fillStyle = "#e8402f";
-  ctx.beginPath(); ctx.arc(fx, fy + cell * 0.05, cell * 0.34, 0, Math.PI * 2); ctx.fill();
+  const pulse = 1 + Math.sin(performance.now() / 280) * 0.06;
+  const halo = ctx.createRadialGradient(fx, fy, cell * 0.1, fx, fy, cell * 0.85);
+  halo.addColorStop(0, "rgba(255,90,70,.35)"); halo.addColorStop(1, "rgba(255,90,70,0)");
+  ctx.fillStyle = halo; ctx.beginPath(); ctx.arc(fx, fy, cell * 0.85, 0, Math.PI * 2); ctx.fill();
+  const appleG = ctx.createRadialGradient(fx - cell * 0.13, fy - cell * 0.12, cell * 0.06, fx, fy + cell * 0.05, cell * 0.42 * pulse);
+  appleG.addColorStop(0, "#ff9a86"); appleG.addColorStop(0.45, "#f0442e"); appleG.addColorStop(1, "#c22418");
+  ctx.fillStyle = appleG;
+  ctx.beginPath(); ctx.arc(fx, fy + cell * 0.05, cell * 0.34 * pulse, 0, Math.PI * 2); ctx.fill();
+  ctx.fillStyle = "rgba(255,255,255,.65)";
+  ctx.beginPath(); ctx.ellipse(fx - cell * 0.13, fy - cell * 0.10, cell * 0.09, cell * 0.055, -0.5, 0, Math.PI * 2); ctx.fill();
   ctx.strokeStyle = "#7a4a21"; ctx.lineWidth = Math.max(2, cell * 0.07);
   ctx.beginPath(); ctx.moveTo(fx, fy - cell * 0.22); ctx.quadraticCurveTo(fx + cell * 0.08, fy - cell * 0.42, fx + cell * 0.2, fy - cell * 0.44); ctx.stroke();
-  ctx.fillStyle = "#57b84a";
+  const leafG = ctx.createLinearGradient(fx, fy - cell * 0.42, fx + cell * 0.3, fy - cell * 0.18);
+  leafG.addColorStop(0, "#8be04e"); leafG.addColorStop(1, "#3f9e3a");
+  ctx.fillStyle = leafG;
   ctx.beginPath(); ctx.ellipse(fx + cell * 0.16, fy - cell * 0.3, cell * 0.16, cell * 0.08, -0.5, 0, Math.PI * 2); ctx.fill();
-  // Snake
+  // Snake: glossy gradient segments with soft shadow and sheen
+  ctx.save();
+  ctx.shadowColor = "rgba(0,0,0,.35)"; ctx.shadowBlur = 6; ctx.shadowOffsetY = 2;
   for (let i = snake.length - 1; i >= 0; i--) {
     const s = snake[i];
     const t = snake.length <= 1 ? 1 : 1 - i / snake.length;
-    ctx.fillStyle = i === 0 ? "#8be04e" : "rgb(" + Math.round(52 + 40 * t) + "," + Math.round(160 + 40 * t) + ",52)";
-    rr(boardX + s.x * cell + 1.5, boardY + s.y * cell + 1.5, cell - 3, cell - 3, cell * 0.28); ctx.fill();
-    if (i === 0) {
-      ctx.fillStyle = "#0d2812";
-      const ex = cell * 0.2, ey = cell * 0.2;
+    const sx = boardX + s.x * cell + 1.5, sy = boardY + s.y * cell + 1.5;
+    const segG = ctx.createLinearGradient(sx, sy, sx, sy + cell);
+    if (i === 0) { segG.addColorStop(0, "#c6f79a"); segG.addColorStop(0.55, "#8be04e"); segG.addColorStop(1, "#5cb832"); }
+    else {
+      segG.addColorStop(0, "rgb(" + Math.round(92 + 40 * t) + "," + Math.round(195 + 40 * t) + ",92)");
+      segG.addColorStop(1, "rgb(" + Math.round(38 + 30 * t) + "," + Math.round(138 + 30 * t) + ",42)");
+    }
+    ctx.fillStyle = segG;
+    rr(sx, sy, cell - 3, cell - 3, cell * 0.30); ctx.fill();
+    ctx.fillStyle = "rgba(255,255,255,.28)";
+    rr(sx + cell * 0.14, sy + cell * 0.10, (cell - 3) * 0.5, Math.max(2, cell * 0.16), cell * 0.08); ctx.fill();
+  }
+  ctx.restore();
+  {
+    const s = snake[0];
+    if (s) {
       const hx = boardX + s.x * cell + cell / 2, hy = boardY + s.y * cell + cell / 2;
+      const ex = cell * 0.2, ey = cell * 0.2;
       const px = dir.y !== 0 ? ex : 0, py = dir.x !== 0 ? ey : 0;
-      ctx.beginPath();
-      ctx.arc(hx - px + dir.x * 2, hy - py + dir.y * 2, Math.max(1.6, cell * 0.07), 0, Math.PI * 2);
-      ctx.arc(hx + px + dir.x * 2, hy + py + dir.y * 2, Math.max(1.6, cell * 0.07), 0, Math.PI * 2);
-      ctx.fill();
+      for (const sgn of [-1, 1]) {
+        const exx = hx + sgn * px + dir.x * 2, eyy = hy + sgn * py + dir.y * 2;
+        ctx.fillStyle = "#ffffff";
+        ctx.beginPath(); ctx.arc(exx, eyy, Math.max(2.4, cell * 0.115), 0, Math.PI * 2); ctx.fill();
+        ctx.fillStyle = "#0d2812";
+        ctx.beginPath(); ctx.arc(exx + dir.x * 1.2, eyy + dir.y * 1.2, Math.max(1.6, cell * 0.07), 0, Math.PI * 2); ctx.fill();
+      }
+      // tongue flick (visual only, time-based)
+      if (Math.sin(performance.now() / 420) > 0.72) {
+        ctx.strokeStyle = "#ff6b8a"; ctx.lineWidth = Math.max(1.5, cell * 0.05); ctx.lineCap = "round";
+        const tx0 = hx + dir.x * cell * 0.42, ty0 = hy + dir.y * cell * 0.42;
+        const tx1 = hx + dir.x * cell * 0.66, ty1 = hy + dir.y * cell * 0.66;
+        ctx.beginPath(); ctx.moveTo(tx0, ty0); ctx.lineTo(tx1, ty1); ctx.stroke();
+      }
     }
   }
   // D-pad
@@ -319,18 +388,30 @@ function draw() {
     ctx.textAlign = "center"; ctx.textBaseline = "middle";
     const drawBtn = (r, glyph) => {
       if (!r) return;
-      ctx.fillStyle = "rgba(140,255,160,0.13)"; rr(r.x, r.y, r.w, r.h, 12); ctx.fill();
-      ctx.strokeStyle = "rgba(140,255,160,0.4)"; ctx.lineWidth = 1.5; rr(r.x, r.y, r.w, r.h, 12); ctx.stroke();
-      ctx.fillStyle = "#c9f5cf"; ctx.font = "bold " + Math.round(r.h * 0.42) + "px system-ui, sans-serif";
+      ctx.save();
+      ctx.shadowColor = "rgba(0,0,0,.35)"; ctx.shadowBlur = 8; ctx.shadowOffsetY = 3;
+      const bg2 = ctx.createLinearGradient(0, r.y, 0, r.y + r.h);
+      bg2.addColorStop(0, "rgba(120,230,150,.30)"); bg2.addColorStop(1, "rgba(40,110,60,.28)");
+      ctx.fillStyle = bg2; rr(r.x, r.y, r.w, r.h, 14); ctx.fill();
+      ctx.restore();
+      ctx.strokeStyle = "rgba(170,255,190,0.55)"; ctx.lineWidth = 1.5; rr(r.x, r.y, r.w, r.h, 14); ctx.stroke();
+      ctx.fillStyle = "#eaffea"; ctx.font = "bold " + Math.round(r.h * 0.42) + "px system-ui, sans-serif";
       ctx.fillText(glyph, r.x + r.w / 2, r.y + r.h / 2 + 1);
     };
     drawBtn(dpad.up, "▲"); drawBtn(dpad.down, "▼"); drawBtn(dpad.left, "◀"); drawBtn(dpad.right, "▶");
   }
   // Overlays
+  // vignette
+  const vg = ctx.createRadialGradient(W / 2, H / 2, H * 0.42, W / 2, H / 2, H * 0.92);
+  vg.addColorStop(0, "rgba(0,10,0,0)"); vg.addColorStop(1, "rgba(0,10,0,.30)");
+  ctx.fillStyle = vg; ctx.fillRect(0, 0, W, H);
   if (state !== "play") {
-    ctx.fillStyle = "rgba(4,16,7,0.78)"; ctx.fillRect(0, 0, W, H);
+    ctx.fillStyle = "rgba(4,16,7,0.60)"; ctx.fillRect(0, 0, W, H);
+    glassPanel(Math.max(12, W / 2 - 230), H * 0.20, Math.min(W - 24, 460), H * 0.52);
     ctx.textAlign = "center"; ctx.textBaseline = "middle";
-    ctx.fillStyle = "#8be04e";
+    const tg = ctx.createLinearGradient(0, H * 0.25, 0, H * 0.33);
+    tg.addColorStop(0, "#ffffff"); tg.addColorStop(0.55, "#c6f79a"); tg.addColorStop(1, "#8be04e");
+    ctx.fillStyle = tg;
     ctx.font = "bold " + Math.round(u * 11) + "px system-ui, sans-serif";
     ctx.fillText("SNAKE", W / 2, H * 0.30);
     ctx.fillStyle = "#eaffea";

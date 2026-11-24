@@ -10,7 +10,10 @@
 <style>
   * { margin:0; padding:0; box-sizing:border-box; }
   html, body {
-    width:100%; height:100%; overflow:hidden; background:#0a1410;
+    width:100%; height:100%; overflow:hidden;
+    background:
+      radial-gradient(120% 90% at 50% 0%, #173826 0%, rgba(23,56,38,0) 55%),
+      linear-gradient(180deg, #0d2016 0%, #0a1410 60%, #050b08 100%);
     font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
     touch-action:none; user-select:none; -webkit-user-select:none;
     -webkit-tap-highlight-color: transparent;
@@ -18,8 +21,11 @@
   canvas { position:fixed; inset:0; display:block; touch-action:none; }
   #muteBtn {
     position:fixed; top:10px; right:10px; z-index:10;
-    width:48px; height:48px; border-radius:12px;
-    border:2px solid rgba(170,255,190,.5); background:rgba(8,22,14,.62);
+    width:48px; height:48px; border-radius:14px;
+    border:1px solid rgba(170,255,190,.45);
+    background:linear-gradient(180deg, rgba(30,66,42,.72), rgba(7,20,12,.72));
+    -webkit-backdrop-filter:blur(6px); backdrop-filter:blur(6px);
+    box-shadow:0 6px 18px rgba(0,0,0,.4), inset 0 1px 0 rgba(255,255,255,.25);
     color:#fff; font-size:22px; line-height:1; cursor:pointer;
     touch-action:none; user-select:none; -webkit-user-select:none;
     display:flex; align-items:center; justify-content:center; padding:0;
@@ -339,6 +345,34 @@ function keyMove(dt) {
 }
 
 // ---------- Draw ----------
+// Visual helpers (restyle): safe gradient wrappers — if a canvas stub
+// returns a plain object without addColorStop, patch it so nothing throws.
+function gradL(x0, y0, x1, y1) {
+  const g = ctx.createLinearGradient(x0, y0, x1, y1);
+  if (g && typeof g.addColorStop !== "function") { try { g.addColorStop = function () {}; } catch (e) { return "#888888"; } }
+  return g;
+}
+function gradR(x0, y0, r0, x1, y1, r1) {
+  const g = ctx.createRadialGradient(x0, y0, r0, x1, y1, r1);
+  if (g && typeof g.addColorStop !== "function") { try { g.addColorStop = function () {}; } catch (e) { return "#888888"; } }
+  return g;
+}
+function shade(hex, amt) {
+  const n = parseInt(hex.slice(1), 16);
+  const c = v => Math.max(0, Math.min(255, v));
+  return "rgb(" + c((n >> 16) + amt) + "," + c(((n >> 8) & 255) + amt) + "," + c((n & 255) + amt) + ")";
+}
+function glassPanel(x, y, w, h, r) {
+  ctx.save();
+  ctx.shadowColor = "rgba(0,0,0,.55)"; ctx.shadowBlur = 30; ctx.shadowOffsetY = 10;
+  const g = gradL(0, y, 0, y + h);
+  g.addColorStop(0, "rgba(16,36,24,.90)"); g.addColorStop(1, "rgba(4,12,7,.93)");
+  ctx.fillStyle = g; rr(x, y, w, h, r); ctx.fill();
+  ctx.restore();
+  ctx.lineWidth = 1.5; ctx.strokeStyle = "rgba(170,255,190,.26)"; rr(x, y, w, h, r); ctx.stroke();
+  ctx.strokeStyle = "rgba(255,255,255,.12)"; ctx.lineWidth = 1;
+  ctx.beginPath(); ctx.moveTo(x + r, y + 1); ctx.lineTo(x + w - r, y + 1); ctx.stroke();
+}
 function rr(x, y, w, h, r) {
   r = Math.min(r, w / 2, h / 2);
   ctx.beginPath(); ctx.moveTo(x + r, y);
@@ -349,8 +383,12 @@ function rr(x, y, w, h, r) {
 function drawRacket(x, y, color, handleDir) {
   ctx.fillStyle = "rgba(0,0,0,0.3)";
   rr(x - racketW / 2 + 2, y - racketH / 2 + 3, racketW, racketH, racketH / 2); ctx.fill();
-  ctx.fillStyle = color;
+  const racketGrad = gradL(0, y - racketH / 2, 0, y + racketH / 2);
+  racketGrad.addColorStop(0, shade(color, 55)); racketGrad.addColorStop(0.5, color); racketGrad.addColorStop(1, shade(color, -55));
+  ctx.fillStyle = racketGrad;
   rr(x - racketW / 2, y - racketH / 2, racketW, racketH, racketH / 2); ctx.fill();
+  ctx.fillStyle = "rgba(255,255,255,0.20)";
+  rr(x - racketW / 2 + 3, y - racketH / 2 + 1.5, racketW - 6, racketH * 0.38, racketH * 0.19); ctx.fill();
   ctx.strokeStyle = "rgba(255,255,255,0.55)"; ctx.lineWidth = 1.4;
   for (let i = -2; i <= 2; i++) {
     ctx.beginPath();
@@ -360,12 +398,22 @@ function drawRacket(x, y, color, handleDir) {
   }
 }
 function draw() {
+  // arena surround with a soft spotlight pool over the court
   ctx.fillStyle = "#0a1410"; ctx.fillRect(0, 0, W, H);
-  // court
-  ctx.fillStyle = "#1d6a41";
+  const arena = gradR(W / 2, H * 0.42, 50, W / 2, H * 0.5, H * 0.78);
+  arena.addColorStop(0, "rgba(70,160,105,0.20)"); arena.addColorStop(1, "rgba(70,160,105,0)");
+  ctx.fillStyle = arena; ctx.fillRect(0, 0, W, H);
+  // apron behind the court
+  ctx.fillStyle = "#123c2c";
+  rr(courtX - 10, courtTop - 10, courtW + 20, courtBot - courtTop + 20, 14); ctx.fill();
+  ctx.strokeStyle = "rgba(255,255,255,0.10)"; ctx.lineWidth = 1;
+  rr(courtX - 10, courtTop - 10, courtW + 20, courtBot - courtTop + 20, 14); ctx.stroke();
+  // court: two-tone gradient with a hard change at the net
+  const courtGrad = gradL(0, courtTop, 0, courtBot);
+  courtGrad.addColorStop(0, "#2a814e"); courtGrad.addColorStop(0.499, "#22784a");
+  courtGrad.addColorStop(0.501, "#1d6a41"); courtGrad.addColorStop(1, "#175732");
+  ctx.fillStyle = courtGrad;
   ctx.fillRect(courtX, courtTop, courtW, courtBot - courtTop);
-  ctx.fillStyle = "#22784a";
-  ctx.fillRect(courtX, courtTop, courtW, (courtBot - courtTop) / 2);
   ctx.strokeStyle = "rgba(255,255,255,0.8)"; ctx.lineWidth = 2;
   ctx.strokeRect(courtX, courtTop, courtW, courtBot - courtTop);
   // service lines + net
@@ -373,52 +421,85 @@ function draw() {
   ctx.beginPath(); ctx.moveTo(courtX, courtTop + (courtBot - courtTop) * 0.27); ctx.lineTo(courtX + courtW, courtTop + (courtBot - courtTop) * 0.27); ctx.stroke();
   ctx.beginPath(); ctx.moveTo(courtX, courtTop + (courtBot - courtTop) * 0.73); ctx.lineTo(courtX + courtW, courtTop + (courtBot - courtTop) * 0.73); ctx.stroke();
   ctx.beginPath(); ctx.moveTo(W / 2, courtTop + (courtBot - courtTop) * 0.27); ctx.lineTo(W / 2, courtTop + (courtBot - courtTop) * 0.73); ctx.stroke();
+  ctx.fillStyle = "rgba(0,0,0,0.16)";
+  ctx.fillRect(courtX - 4, H / 2 + 4, courtW + 8, 5);
   ctx.fillStyle = "rgba(240,240,240,0.9)";
   ctx.fillRect(courtX - 4, H / 2 - 3, courtW + 8, 6);
+  ctx.fillStyle = "rgba(255,255,255,0.95)";
+  ctx.fillRect(courtX - 4, H / 2 - 3, courtW + 8, 1.6);
   ctx.fillStyle = "rgba(20,20,30,0.9)";
   for (let x = courtX - 4; x < courtX + courtW + 8; x += 9) ctx.fillRect(x, H / 2 - 3, 4, 6);
   // score
   ctx.textAlign = "center"; ctx.textBaseline = "middle";
   ctx.font = "bold " + Math.round(u * 15) + "px system-ui, sans-serif";
+  ctx.save();
+  ctx.shadowBlur = 18;
+  ctx.shadowColor = "rgba(255,110,120,0.5)";
   ctx.fillStyle = "rgba(255,110,120,0.30)";
   ctx.fillText(String(cScore), W / 2, H * 0.315);
+  ctx.shadowColor = "rgba(150,255,180,0.5)";
   ctx.fillStyle = "rgba(150,255,180,0.30)";
   ctx.fillText(String(pScore), W / 2, H * 0.70);
+  ctx.restore();
   ctx.font = Math.round(u * 3.4) + "px system-ui, sans-serif";
   ctx.fillStyle = "rgba(255,150,160,0.8)";
   ctx.fillText("RIVAL", W / 2, H * 0.315 - u * 9.5);
   ctx.fillStyle = "rgba(160,255,190,0.85)";
   ctx.fillText("YOU", W / 2, H * 0.70 + u * 10);
   ctx.textAlign = "left";
-  ctx.fillStyle = "#9fb8a8";
   ctx.font = Math.round(u * 3.3) + "px system-ui, sans-serif";
-  ctx.fillText("First to 6, win by 2 · Matches won: " + wins, 12, 24);
+  const infoText = "First to 6, win by 2 · Matches won: " + wins;
+  const infoW = ctx.measureText(infoText).width;
+  ctx.fillStyle = "rgba(6,16,10,0.45)";
+  rr(6, 24 - u * 2.7, infoW + 16, u * 5.4, 9); ctx.fill();
+  ctx.strokeStyle = "rgba(255,255,255,0.14)"; ctx.lineWidth = 1;
+  rr(6, 24 - u * 2.7, infoW + 16, u * 5.4, 9); ctx.stroke();
+  ctx.fillStyle = "#9fb8a8";
+  ctx.fillText(infoText, 14, 24);
   // rackets + ball
   drawRacket(cpu.x, cpu.y, "#ff5d7a", -1);
   drawRacket(player.x, player.y, "#ffe14d", 1);
   if (state !== "menu") {
-    ctx.fillStyle = "#f8fff2";
+    ctx.fillStyle = "rgba(0,0,0,0.25)";
+    ctx.beginPath(); ctx.ellipse(ball.x + 2, ball.y + ballR + 4, ballR * 0.9, ballR * 0.32, 0, 0, Math.PI * 2); ctx.fill();
+    const ballGrad = gradR(ball.x - ballR * 0.35, ball.y - ballR * 0.4, ballR * 0.15, ball.x, ball.y, ballR * 1.25);
+    ballGrad.addColorStop(0, "#ffffff"); ballGrad.addColorStop(0.6, "#eef7d8"); ballGrad.addColorStop(1, "#c9dd8e");
+    ctx.fillStyle = ballGrad;
     ctx.beginPath(); ctx.arc(ball.x, ball.y, ballR, 0, Math.PI * 2); ctx.fill();
-    ctx.strokeStyle = "rgba(190,220,80,0.8)"; ctx.lineWidth = 1.4;
+    ctx.strokeStyle = "rgba(150,190,60,0.85)"; ctx.lineWidth = 1.4;
     ctx.beginPath(); ctx.arc(ball.x, ball.y, ballR * 0.75, 0.4, 2.4); ctx.stroke();
     ctx.beginPath(); ctx.arc(ball.x, ball.y, ballR * 0.75, Math.PI + 0.4, Math.PI + 2.4); ctx.stroke();
   }
   if (state === "serve") {
     ctx.textAlign = "center";
     ctx.font = "bold " + Math.round(u * 4.6) + "px system-ui, sans-serif";
+    const serveText = server === 1 ? "YOUR SERVE — TAP!" : "RIVAL SERVING…";
+    const serveW = ctx.measureText(serveText).width;
+    ctx.fillStyle = "rgba(6,16,10,0.5)";
+    rr(W / 2 - serveW / 2 - 14, H * 0.52 + u * 8 - u * 3.6, serveW + 28, u * 7.2, 10); ctx.fill();
+    ctx.strokeStyle = "rgba(255,255,255,0.18)"; ctx.lineWidth = 1;
+    rr(W / 2 - serveW / 2 - 14, H * 0.52 + u * 8 - u * 3.6, serveW + 28, u * 7.2, 10); ctx.stroke();
     ctx.fillStyle = "#ffffff";
-    ctx.fillText(server === 1 ? "YOUR SERVE — TAP!" : "RIVAL SERVING…", W / 2, H * 0.52 + u * 8);
+    ctx.fillText(serveText, W / 2, H * 0.52 + u * 8);
   }
   if (state === "point") {
     ctx.textAlign = "center";
     ctx.font = "bold " + Math.round(u * 6) + "px system-ui, sans-serif";
+    const pointW = ctx.measureText(bannerText).width;
+    ctx.fillStyle = "rgba(6,16,10,0.55)";
+    rr(W / 2 - pointW / 2 - 16, H * 0.52 - u * 4.6, pointW + 32, u * 9.2, 12); ctx.fill();
+    ctx.strokeStyle = "rgba(255,209,102,0.35)"; ctx.lineWidth = 1;
+    rr(W / 2 - pointW / 2 - 16, H * 0.52 - u * 4.6, pointW + 32, u * 9.2, 12); ctx.stroke();
     ctx.fillStyle = "#ffd166";
     ctx.fillText(bannerText, W / 2, H * 0.52);
   }
   if (state === "menu" || state === "over") {
     ctx.fillStyle = "rgba(3,10,6,0.84)"; ctx.fillRect(0, 0, W, H);
+    glassPanel(W * 0.06, H * 0.19, W * 0.88, H * 0.58, 22);
     ctx.textAlign = "center";
-    ctx.fillStyle = "#8be04e";
+    const titleGrad = gradL(0, H * 0.30 - u * 6, 0, H * 0.30 + u * 6);
+    titleGrad.addColorStop(0, "#eaffc9"); titleGrad.addColorStop(0.55, "#8be04e"); titleGrad.addColorStop(1, "#4da33f");
+    ctx.fillStyle = titleGrad;
     ctx.font = "bold " + Math.round(u * 11) + "px system-ui, sans-serif";
     ctx.fillText("🎾 TENNIS", W / 2, H * 0.30);
     ctx.fillStyle = "#e8f5e9";

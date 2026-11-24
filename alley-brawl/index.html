@@ -9,21 +9,30 @@
 <title>Alley Brawl</title>
 <style>
   * { margin:0; padding:0; box-sizing:border-box; }
-  html, body { width:100%; height:100%; overflow:hidden; background:#2b2135;
+  html, body { width:100%; height:100%; overflow:hidden;
+    background:
+      radial-gradient(120% 90% at 50% 0%, #4a3566 0%, rgba(74,53,102,0) 55%),
+      linear-gradient(180deg, #241a33 0%, #2b2135 55%, #171221 100%);
     font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
     touch-action:none; user-select:none; -webkit-user-select:none; -webkit-tap-highlight-color: transparent; }
   canvas { position:fixed; inset:0; display:block; touch-action:none; }
   #muteBtn { position:fixed; top:10px; right:10px; z-index:10; width:48px; height:48px; border-radius:12px;
-    border:2px solid rgba(255,255,255,.7); background:rgba(30,20,45,.5); color:#fff; font-size:22px;
+    border:1px solid rgba(255,255,255,.45); background:linear-gradient(180deg, rgba(70,52,96,.72), rgba(28,18,44,.72));
+    backdrop-filter:blur(6px); -webkit-backdrop-filter:blur(6px);
+    box-shadow:0 6px 18px rgba(0,0,0,.45), inset 0 1px 0 rgba(255,255,255,.25);
+    color:#fff; font-size:22px;
     line-height:1; cursor:pointer; display:flex; align-items:center; justify-content:center; padding:0; }
   .ctl { position:fixed; z-index:10; width:58px; height:58px; border-radius:50%;
-    border:2px solid rgba(255,255,255,.7); background:rgba(30,20,45,.45); color:#fff; font-size:22px;
+    border:1px solid rgba(255,255,255,.45); background:linear-gradient(180deg, rgba(80,60,110,.55), rgba(28,18,44,.6));
+    backdrop-filter:blur(6px); -webkit-backdrop-filter:blur(6px);
+    box-shadow:0 8px 20px rgba(0,0,0,.45), inset 0 1px 0 rgba(255,255,255,.3);
+    color:#fff; font-size:22px;
     display:flex; align-items:center; justify-content:center; }
   .ctl:active { background:rgba(255,255,255,.35); }
   #btnU { left:52px; bottom:100px; } #btnD { left:52px; bottom:22px; }
   #btnL { left:8px; bottom:61px; } #btnR { left:96px; bottom:61px; }
-  #btnP { right:96px; bottom:61px; width:70px; height:70px; background:rgba(200,60,50,.5); font-size:15px; font-weight:700; }
-  #btnK { right:12px; bottom:61px; width:70px; height:70px; background:rgba(60,120,200,.5); font-size:15px; font-weight:700; }
+  #btnP { right:96px; bottom:61px; width:70px; height:70px; background:linear-gradient(180deg, rgba(232,90,70,.75), rgba(160,40,32,.75)); font-size:15px; font-weight:700; }
+  #btnK { right:12px; bottom:61px; width:70px; height:70px; background:linear-gradient(180deg, rgba(90,150,235,.75), rgba(40,85,170,.75)); font-size:15px; font-weight:700; }
 </style>
 </head>
 <body>
@@ -125,6 +134,12 @@ function sfx(name) {
   if (name === "win") { [523, 659, 784, 1047].forEach((f, i) => tone(f, 0.16, "square", 0.11, t + i * 0.11)); }
 }
 
+/* ---------------- guarded storage ---------------- */
+// Storage can be denied (preview panes, private-mode webviews); a throwing
+// read would kill the script or the draw loop — route every access here.
+function storeGet(k) { try { return localStorage.getItem(k); } catch (e) { return null; } }
+function storeSet(k, v) { try { localStorage.setItem(k, v); } catch (e) {} }
+
 /* ---------------- data ---------------- */
 const STAGES = [
   { name: "Neon Row", sky: "#2b2135", wall: "#3d2f4d", sign: "#ff5da2", waves: [3, 4], boss: { name: "Big Bruno", hp: 26, color: "#b5522f" } },
@@ -155,7 +170,7 @@ function nextWave() {
     spawnBoss(); banner = "BOSS — " + st.boss.name; bannerT = 2.0; sfx("boss");
   } else {
     if (stageIdx + 1 < STAGES.length) { state = "stageClear"; sfx("win"); }
-    else { state = "win"; sfx("win"); const best = parseInt(localStorage.getItem("alleyBrawlBest") || "0", 10); if (score > best) localStorage.setItem("alleyBrawlBest", String(score)); }
+    else { state = "win"; sfx("win"); const best = parseInt(storeGet("alleyBrawlBest") || "0", 10); if (score > best) storeSet("alleyBrawlBest", String(score)); }
   }
 }
 function spawnPos() {
@@ -203,7 +218,7 @@ function enemyStrike(e) {
     player.x += (player.x < e.x ? -1 : 1) * 14;
     if (player.hp <= 0) {
       if (lives > 0) { lives--; player.hp = 100; player.invuln = 2; banner = "Knocked down! " + lives + " left"; bannerT = 1.6; }
-      else { state = "gameOver"; const best = parseInt(localStorage.getItem("alleyBrawlBest") || "0", 10); if (score > best) localStorage.setItem("alleyBrawlBest", String(score)); }
+      else { state = "gameOver"; const best = parseInt(storeGet("alleyBrawlBest") || "0", 10); if (score > best) storeSet("alleyBrawlBest", String(score)); }
     }
   }
 }
@@ -265,13 +280,40 @@ function update(dt) {
 }
 
 /* ---------------- draw ---------------- */
+// lighten (amt>0) or darken (amt<0) a #rrggbb colour — visual shading only
+function shade(hex, amt) {
+  const n = parseInt(hex.slice(1), 16);
+  const c = v => Math.max(0, Math.min(255, v));
+  return "rgb(" + c((n >> 16) + amt) + "," + c(((n >> 8) & 255) + amt) + "," + c((n & 255) + amt) + ")";
+}
+// shared glass-panel look for menu / overlay cards
+function glassPanel(x, y, w, h, r) {
+  ctx.save();
+  ctx.shadowColor = "rgba(0,0,0,.55)"; ctx.shadowBlur = 26; ctx.shadowOffsetY = 10;
+  const g = ctx.createLinearGradient(0, y, 0, y + h);
+  g.addColorStop(0, "rgba(52,38,74,.88)"); g.addColorStop(1, "rgba(18,12,28,.92)");
+  ctx.fillStyle = g; ctx.beginPath(); ctx.roundRect(x, y, w, h, r); ctx.fill();
+  ctx.restore();
+  ctx.lineWidth = 1.5; ctx.strokeStyle = "rgba(255,255,255,.22)";
+  ctx.beginPath(); ctx.roundRect(x, y, w, h, r); ctx.stroke();
+  ctx.strokeStyle = "rgba(255,255,255,.10)"; ctx.lineWidth = 1;
+  ctx.beginPath(); ctx.moveTo(x + r, y + 1); ctx.lineTo(x + w - r, y + 1); ctx.stroke();
+}
 function drawFighterB(x, y, color, face, pose, flash, big, label) {
   const s = big ? 1.3 : 1;
   ctx.save(); ctx.translate(x, y); ctx.scale(face * s, s);
-  ctx.fillStyle = "rgba(0,0,0,.3)"; ctx.beginPath(); ctx.ellipse(0, 4, 22, 6, 0, 0, 7); ctx.fill();
-  ctx.fillStyle = "#2c3550"; ctx.fillRect(-9, -34, 7, 30); ctx.fillRect(3, -34, 7, 30); // legs
-  ctx.fillStyle = flash > 0 ? "#fff" : color; ctx.beginPath(); ctx.roundRect(-13, -66, 26, 36, 7); ctx.fill(); // torso
-  ctx.fillStyle = "#e8b98a"; ctx.beginPath(); ctx.arc(0, -76, 10, 0, 7); ctx.fill(); // head
+  ctx.fillStyle = "rgba(0,0,0,.38)"; ctx.beginPath(); ctx.ellipse(0, 5, 23, 6.5, 0, 0, 7); ctx.fill(); // soft contact shadow
+  const legG = ctx.createLinearGradient(0, -36, 0, -2); legG.addColorStop(0, "#3d4e75"); legG.addColorStop(1, "#222b45");
+  ctx.fillStyle = legG; ctx.fillRect(-9, -34, 7, 30); ctx.fillRect(3, -34, 7, 30); // legs
+  ctx.fillStyle = "#ece7db"; ctx.fillRect(-10, -6, 9, 5); ctx.fillRect(2, -6, 9, 5); // shoes
+  if (flash > 0) ctx.fillStyle = "#fff";
+  else { const tg = ctx.createLinearGradient(0, -68, 0, -28); tg.addColorStop(0, shade(color, 58)); tg.addColorStop(0.5, color); tg.addColorStop(1, shade(color, -48)); ctx.fillStyle = tg; }
+  ctx.beginPath(); ctx.roundRect(-13, -66, 26, 36, 7); ctx.fill(); // torso
+  if (!(flash > 0)) { ctx.fillStyle = "rgba(255,255,255,.22)"; ctx.beginPath(); ctx.ellipse(-4, -58, 8, 5, -0.4, 0, 7); ctx.fill(); } // sheen
+  if (flash > 0) ctx.fillStyle = "#fff";
+  else { const hg = ctx.createRadialGradient(-3, -80, 2, 0, -76, 12); hg.addColorStop(0, "#f7d09e"); hg.addColorStop(1, "#dda668"); ctx.fillStyle = hg; }
+  ctx.beginPath(); ctx.arc(0, -76, 10, 0, 7); ctx.fill(); // head
+  if (!(flash > 0)) { ctx.fillStyle = "#38291b"; ctx.beginPath(); ctx.arc(0, -78.5, 10, Math.PI, 0); ctx.fill(); } // hair cap
   // arms by pose
   ctx.strokeStyle = flash > 0 ? "#fff" : color; ctx.lineWidth = 7; ctx.lineCap = "round";
   ctx.beginPath();
@@ -281,9 +323,9 @@ function drawFighterB(x, y, color, face, pose, flash, big, label) {
   else { ctx.moveTo(8, -58); ctx.lineTo(18, -42); }
   ctx.stroke();
   if (pose === "kick") { ctx.strokeStyle = "#2c3550"; ctx.beginPath(); ctx.moveTo(4, -32); ctx.lineTo(30, -26); ctx.stroke(); }
-  if (pose === "windup") { ctx.strokeStyle = "#ffd23e"; ctx.lineWidth = 3; ctx.beginPath(); ctx.arc(0, -52, 30, 0, 7); ctx.stroke(); }
+  if (pose === "windup") { ctx.save(); ctx.shadowColor = "rgba(255,210,62,.9)"; ctx.shadowBlur = 12; ctx.strokeStyle = "#ffd23e"; ctx.lineWidth = 3; ctx.beginPath(); ctx.arc(0, -52, 30, 0, 7); ctx.stroke(); ctx.restore(); }
   ctx.restore();
-  if (label) { ctx.fillStyle = "#fff"; ctx.font = "bold 12px sans-serif"; ctx.textAlign = "center"; ctx.fillText(label, x, y - 96 * s); }
+  if (label) { ctx.save(); ctx.shadowColor = "rgba(0,0,0,.7)"; ctx.shadowBlur = 5; ctx.fillStyle = "#fff"; ctx.font = "bold 12px sans-serif"; ctx.textAlign = "center"; ctx.fillText(label, x, y - 96 * s); ctx.restore(); }
 }
 function draw() {
   ctx.setTransform(1, 0, 0, 1, 0, 0);
@@ -291,13 +333,15 @@ function draw() {
   ctx.setTransform(scale, 0, 0, scale, ox, oy);
   ctx.textAlign = "center";
   if (state === "menu") {
-    ctx.fillStyle = "#ff5da2"; ctx.font = "bold 42px sans-serif"; ctx.fillText("ALLEY BRAWL", VW / 2, 130);
+    glassPanel(24, 92, VW - 48, 300, 22);
+    const titleG = ctx.createLinearGradient(0, 96, 0, 140); titleG.addColorStop(0, "#ffffff"); titleG.addColorStop(0.55, "#ffb3d1"); titleG.addColorStop(1, "#ff5da2");
+    ctx.fillStyle = titleG; ctx.font = "bold 42px sans-serif"; ctx.fillText("ALLEY BRAWL", VW / 2, 130);
     ctx.fillStyle = "#fff"; ctx.font = "16px sans-serif";
     ctx.fillText("Walk the street. Clear the waves.", VW / 2, 168);
     ctx.fillText("Watch for the golden ring — that's a wind-up.", VW / 2, 192);
     ctx.fillText("Hit them first to interrupt it!", VW / 2, 216);
     ctx.fillText("3 stages, a boss at the end of each.", VW / 2, 252);
-    const best = localStorage.getItem("alleyBrawlBest");
+    const best = storeGet("alleyBrawlBest");
     if (best) { ctx.font = "bold 17px sans-serif"; ctx.fillText("Best score: " + best, VW / 2, 292); }
     ctx.font = "bold 21px sans-serif"; ctx.fillText("TAP TO START", VW / 2, 350);
     drawFighterB(160, 560, "#2255aa", 1, "punch", 0, false);
@@ -309,12 +353,24 @@ function draw() {
   // backdrop
   const g = ctx.createLinearGradient(0, 0, 0, VH); g.addColorStop(0, st.sky); g.addColorStop(0.62, st.wall); g.addColorStop(0.63, "#241d2e"); g.addColorStop(1, "#171221");
   ctx.fillStyle = g; ctx.fillRect(0, 0, VW, VH);
-  // buildings & signs (parallax by camX)
+  // buildings & signs (parallax by camX) — silhouettes with lit windows
   for (let i = -1; i < 6; i++) {
     const bx = i * 110 - (camX * 0.5 % 110), bh = 130 + ((i * 53 + Math.floor(camX / 110) * 31) % 90);
-    ctx.fillStyle = "rgba(0,0,0,.28)"; ctx.fillRect(bx, 446 - bh, 96, bh);
-    ctx.fillStyle = st.sign; ctx.globalAlpha = 0.75; ctx.fillRect(bx + 14, 446 - bh + 22, 40, 12); ctx.globalAlpha = 1;
+    const bg = ctx.createLinearGradient(0, 446 - bh, 0, 446); bg.addColorStop(0, "rgba(10,6,18,.18)"); bg.addColorStop(1, "rgba(10,6,18,.42)");
+    ctx.fillStyle = bg; ctx.fillRect(bx, 446 - bh, 96, bh);
+    // window grid (deterministic per building so it doesn't flicker)
+    const seedBase = (i + Math.floor(camX / 110) + 20) * 37;
+    for (let r = 0; r < Math.floor(bh / 26); r++) for (let cix = 0; cix < 4; cix++) {
+      const lit = ((seedBase + r * 11 + cix * 7) % 5) < 2;
+      ctx.fillStyle = lit ? "rgba(255,216,130,.55)" : "rgba(255,255,255,.06)";
+      ctx.fillRect(bx + 10 + cix * 21, 446 - bh + 34 + r * 26, 11, 14);
+    }
+    ctx.save(); ctx.shadowColor = st.sign; ctx.shadowBlur = 14;
+    ctx.fillStyle = st.sign; ctx.globalAlpha = 0.8; ctx.fillRect(bx + 14, 446 - bh + 12, 40, 12); ctx.globalAlpha = 1; ctx.restore();
   }
+  // neon wash + sheen on the street
+  ctx.fillStyle = "rgba(255,93,162,.05)"; ctx.fillRect(0, LANE_TOP, VW, VH - LANE_TOP);
+  ctx.fillStyle = "rgba(255,255,255,.05)"; ctx.fillRect(0, LANE_TOP + 34, VW, 3); ctx.fillRect(0, LANE_BOT + 22, VW, 3);
   ctx.strokeStyle = "rgba(255,255,255,.15)"; ctx.beginPath(); ctx.moveTo(0, LANE_TOP - 6); ctx.lineTo(VW, LANE_TOP - 6); ctx.stroke();
   // entities sorted by lane depth
   const all = enemies.map(e => ({ e, y: e.y })).concat([{ p: true, y: player.y }]);
@@ -328,30 +384,36 @@ function draw() {
       if (e.state === "ko") { ctx.save(); ctx.translate(e.x - camX, e.y); ctx.rotate(Math.PI / 2); ctx.globalAlpha = Math.max(0, 1 - e.t); drawFighterB(0, 0, e.color, e.face, "idle", 0, e.boss); ctx.restore(); }
       else drawFighterB(e.x - camX, e.y, e.color, e.face, e.state === "windup" ? "windup" : e.state === "strike" ? "punch" : "idle", e.flash, e.boss, e.boss ? e.name : "");
       if (e.boss && e.state !== "ko") { // boss hp
-        ctx.fillStyle = "rgba(0,0,0,.5)"; ctx.fillRect(VW / 2 - 90, 92, 180, 10);
-        ctx.fillStyle = "#e5534b"; ctx.fillRect(VW / 2 - 90, 92, 180 * Math.max(0, e.hp / e.maxHp), 10);
+        ctx.fillStyle = "rgba(10,6,18,.55)"; ctx.beginPath(); ctx.roundRect(VW / 2 - 94, 88, 188, 18, 9); ctx.fill();
+        ctx.lineWidth = 1; ctx.strokeStyle = "rgba(255,255,255,.3)"; ctx.beginPath(); ctx.roundRect(VW / 2 - 94, 88, 188, 18, 9); ctx.stroke();
+        const bg2 = ctx.createLinearGradient(VW / 2 - 90, 0, VW / 2 + 90, 0); bg2.addColorStop(0, "#ff8a5e"); bg2.addColorStop(1, "#e5534b");
+        ctx.fillStyle = bg2; ctx.beginPath(); ctx.roundRect(VW / 2 - 90, 92, Math.max(8, 180 * Math.max(0, e.hp / e.maxHp)), 10, 5); ctx.fill();
       }
     }
   }
-  // HUD
-  ctx.fillStyle = "rgba(0,0,0,.45)"; ctx.fillRect(8, 8, 190, 52);
-  ctx.fillStyle = "#444"; ctx.fillRect(16, 18, 150, 12);
-  ctx.fillStyle = "#57d977"; ctx.fillRect(16, 18, 150 * Math.max(0, player.hp / 100), 12);
+  // HUD — frosted pill
+  ctx.fillStyle = "rgba(14,9,24,.55)"; ctx.beginPath(); ctx.roundRect(8, 8, 190, 52, 14); ctx.fill();
+  ctx.lineWidth = 1; ctx.strokeStyle = "rgba(255,255,255,.28)"; ctx.beginPath(); ctx.roundRect(8, 8, 190, 52, 14); ctx.stroke();
+  ctx.fillStyle = "rgba(0,0,0,.5)"; ctx.beginPath(); ctx.roundRect(16, 18, 150, 12, 6); ctx.fill();
+  const hpG = ctx.createLinearGradient(16, 0, 166, 0); hpG.addColorStop(0, "#8bf79b"); hpG.addColorStop(1, "#35b558");
+  ctx.fillStyle = hpG; ctx.beginPath(); ctx.roundRect(16, 18, Math.max(10, 150 * Math.max(0, player.hp / 100)), 12, 6); ctx.fill();
   ctx.fillStyle = "#fff"; ctx.font = "bold 14px sans-serif"; ctx.textAlign = "left";
   ctx.fillText("SCORE " + score, 16, 50);
   ctx.fillText("EXTRA LIVES " + lives, VW - 130, 30);
   ctx.fillText(STAGES[stageIdx].name, VW - 130, 50);
   ctx.textAlign = "center";
-  if (bannerT > 0) { ctx.fillStyle = "#ffd23e"; ctx.font = "bold 26px sans-serif"; ctx.fillText(banner, VW / 2, 140); }
+  if (bannerT > 0) { ctx.save(); ctx.shadowColor = "rgba(255,210,62,.65)"; ctx.shadowBlur = 14; ctx.fillStyle = "#ffd23e"; ctx.font = "bold 26px sans-serif"; ctx.fillText(banner, VW / 2, 140); ctx.restore(); }
   if (player.combo >= 3) { ctx.fillStyle = "#ff9f43"; ctx.font = "bold 18px sans-serif"; ctx.fillText(player.combo + " HITS!", VW / 2, 176); }
   if (state === "stageClear") overlay("STAGE CLEAR!", "Tap for the next stage");
   if (state === "gameOver") overlay("GAME OVER", "Score " + score + " — tap to retry");
   if (state === "win") overlay("STREETS CLEARED! 🏆", "Final score " + score + " — tap to play again");
 }
 function overlay(title, sub) {
-  ctx.fillStyle = "rgba(0,0,0,.55)"; ctx.fillRect(0, 0, VW, VH);
-  ctx.fillStyle = "#ffd23e"; ctx.font = "bold 34px sans-serif"; ctx.textAlign = "center"; ctx.fillText(title, VW / 2, 320);
-  ctx.fillStyle = "#fff"; ctx.font = "17px sans-serif"; ctx.fillText(sub, VW / 2, 356);
+  ctx.fillStyle = "rgba(5,3,10,.45)"; ctx.fillRect(0, 0, VW, VH);
+  glassPanel(36, 262, VW - 72, 128, 20);
+  const og = ctx.createLinearGradient(0, 292, 0, 330); og.addColorStop(0, "#ffffff"); og.addColorStop(1, "#ffd23e");
+  ctx.fillStyle = og; ctx.font = "bold 34px sans-serif"; ctx.textAlign = "center"; ctx.fillText(title, VW / 2, 320);
+  ctx.fillStyle = "#e9e2f2"; ctx.font = "17px sans-serif"; ctx.fillText(sub, VW / 2, 356);
 }
 function drawQA() {
   const rows = [

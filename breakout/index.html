@@ -10,16 +10,22 @@
 <style>
   * { margin:0; padding:0; box-sizing:border-box; }
   html, body {
-    width:100%; height:100%; overflow:hidden; background:#101828;
-    font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+    width:100%; height:100%; overflow:hidden;
+    background:
+      radial-gradient(120% 80% at 50% 0%, #2a3d5f 0%, rgba(42,61,95,0) 55%),
+      linear-gradient(180deg, #16233c 0%, #101828 60%, #0a101d 100%);
+    font-family:"Avenir Next", "Segoe UI", system-ui, -apple-system, Roboto, sans-serif;
     touch-action:none; user-select:none; -webkit-user-select:none;
     -webkit-tap-highlight-color: transparent;
   }
   canvas { position:fixed; inset:0; display:block; touch-action:none; }
   #muteBtn {
     position:fixed; top:10px; right:10px; z-index:10;
-    width:48px; height:48px; border-radius:12px;
-    border:2px solid rgba(150,200,255,.5); background:rgba(10,16,30,.62);
+    width:48px; height:48px; border-radius:14px;
+    border:1.5px solid rgba(170,215,255,.55);
+    background:linear-gradient(180deg, rgba(50,75,115,.72), rgba(10,16,30,.72));
+    backdrop-filter:blur(8px); -webkit-backdrop-filter:blur(8px);
+    box-shadow:0 8px 22px rgba(0,0,0,.45), inset 0 1px 0 rgba(255,255,255,.25);
     color:#fff; font-size:22px; line-height:1; cursor:pointer;
     touch-action:none; user-select:none; -webkit-user-select:none;
     display:flex; align-items:center; justify-content:center; padding:0;
@@ -332,48 +338,110 @@ function rr(x, y, w, h, r) {
   ctx.arcTo(x, y + h, x, y, r); ctx.arcTo(x, y, x + w, y, r);
   ctx.closePath();
 }
+// Darker shade per row colour for brick gradients (visual only)
+const ROW_DARK = ["#c22a2a","#c96a14","#c9a414","#3da34a","#2478c8","#7a4fd0","#c22a90","#1da88f"];
+function glassPanel(x, y, w, h) {
+  ctx.save();
+  ctx.shadowColor = "rgba(0,0,0,.5)"; ctx.shadowBlur = 34; ctx.shadowOffsetY = 12;
+  const g = ctx.createLinearGradient(0, y, 0, y + h);
+  g.addColorStop(0, "rgba(26,40,64,.88)"); g.addColorStop(1, "rgba(10,16,28,.90)");
+  ctx.fillStyle = g; rr(x, y, w, h, 22); ctx.fill();
+  ctx.restore();
+  ctx.lineWidth = 1.5; ctx.strokeStyle = "rgba(255,255,255,.18)"; rr(x, y, w, h, 22); ctx.stroke();
+  ctx.strokeStyle = "rgba(255,255,255,.10)"; ctx.lineWidth = 1;
+  ctx.beginPath(); ctx.moveTo(x + 22, y + 1); ctx.lineTo(x + w - 22, y + 1); ctx.stroke();
+}
 function draw() {
-  ctx.fillStyle = "#101828"; ctx.fillRect(0, 0, W, H);
-  // HUD
+  const bg = ctx.createLinearGradient(0, 0, 0, H);
+  bg.addColorStop(0, "#1b2c49"); bg.addColorStop(0.55, "#111c30"); bg.addColorStop(1, "#0a101d");
+  ctx.fillStyle = bg; ctx.fillRect(0, 0, W, H);
+  const glow = ctx.createRadialGradient(W / 2, H * 0.30, 10, W / 2, H * 0.30, H * 0.62);
+  glow.addColorStop(0, "rgba(110,180,255,.15)"); glow.addColorStop(1, "rgba(110,180,255,0)");
+  ctx.fillStyle = glow; ctx.fillRect(0, 0, W, H);
+  // faint starfield / dust (deterministic, visual only)
+  ctx.fillStyle = "rgba(200,220,255,.32)";
+  for (let i = 0; i < 30; i++) {
+    const sx = ((i * 149.3) % 97) / 97 * W, sy = ((i * 83.7) % 89) / 89 * H;
+    ctx.fillRect(sx, sy, 2, 2);
+  }
+  // HUD: frosted pills
+  ctx.save();
+  ctx.fillStyle = "rgba(12,22,40,.48)"; rr(8, 8, Math.min(W * 0.40, 180), 40, 20); ctx.fill();
+  ctx.lineWidth = 1; ctx.strokeStyle = "rgba(255,255,255,.22)"; rr(8, 8, Math.min(W * 0.40, 180), 40, 20); ctx.stroke();
+  ctx.fillStyle = "rgba(12,22,40,.48)"; rr(W / 2 - 52, 8, 104, 40, 20); ctx.fill();
+  ctx.strokeStyle = "rgba(255,255,255,.22)"; rr(W / 2 - 52, 8, 104, 40, 20); ctx.stroke();
+  ctx.restore();
   ctx.textAlign = "left"; ctx.textBaseline = "middle";
   ctx.fillStyle = "#eaf2ff";
   ctx.font = "bold " + Math.round(u * 5) + "px system-ui, sans-serif";
-  ctx.fillText("Score " + score, 14, 30);
+  ctx.fillText("Score " + score, 20, 30);
   ctx.textAlign = "center";
-  ctx.fillStyle = "#9db8dd";
+  ctx.fillStyle = "#c8dcf5";
   ctx.fillText("Level " + level, W / 2, 30);
   ctx.textAlign = "right";
   let hearts = "";
   for (let i = 0; i < lives; i++) hearts += "● ";
-  ctx.fillStyle = "#ff5d7a";
+  ctx.fillStyle = "#ff7a94";
   ctx.fillText(hearts.trim(), W - 66, 30);
   ctx.textAlign = "right";
   ctx.fillStyle = "#5f7595";
   ctx.font = Math.round(u * 3.6) + "px system-ui, sans-serif";
   // (best shown on overlays)
-  // Bricks
+  // Bricks: glossy gradients with soft shadows and a top sheen
+  ctx.save();
+  ctx.shadowColor = "rgba(0,0,0,.38)"; ctx.shadowBlur = 6; ctx.shadowOffsetY = 3;
   for (const b of bricks) {
     if (!b.alive) continue;
     const bx = brickX + b.c * (brickW + brickGap);
     const by = brickY + b.r * (brickH + brickGap);
-    ctx.fillStyle = ROW_COLORS[b.r % ROW_COLORS.length];
-    rr(bx, by, brickW, brickH, 4); ctx.fill();
-    ctx.fillStyle = "rgba(255,255,255,0.22)";
-    ctx.fillRect(bx + 3, by + 3, brickW - 6, 3);
+    const ci = b.r % ROW_COLORS.length;
+    const bgd = ctx.createLinearGradient(0, by, 0, by + brickH);
+    bgd.addColorStop(0, ROW_COLORS[ci]); bgd.addColorStop(0.55, ROW_COLORS[ci]); bgd.addColorStop(1, ROW_DARK[ci]);
+    ctx.fillStyle = bgd;
+    rr(bx, by, brickW, brickH, 6); ctx.fill();
+    ctx.fillStyle = "rgba(255,255,255,0.32)";
+    rr(bx + 3, by + 2.5, brickW - 6, Math.max(2.5, brickH * 0.26), 3); ctx.fill();
   }
-  // Paddle + ball
-  ctx.fillStyle = "#54c8ff"; rr(paddle.x - padW / 2, padY, padW, padH, padH / 2); ctx.fill();
-  ctx.fillStyle = "#ffffff";
+  ctx.restore();
+  // Paddle: glossy cyan gradient + ball: glowing orb with trail
+  ctx.save();
+  ctx.shadowColor = "rgba(0,0,0,.5)"; ctx.shadowBlur = 12; ctx.shadowOffsetY = 4;
+  const padG = ctx.createLinearGradient(0, padY, 0, padY + padH);
+  padG.addColorStop(0, "#bfeaff"); padG.addColorStop(0.5, "#54c8ff"); padG.addColorStop(1, "#2478c8");
+  ctx.fillStyle = padG; rr(paddle.x - padW / 2, padY, padW, padH, padH / 2); ctx.fill();
+  ctx.restore();
+  ctx.fillStyle = "rgba(255,255,255,.45)";
+  rr(paddle.x - padW / 2 + 6, padY + 2, padW - 12, Math.max(2, padH * 0.32), padH * 0.16); ctx.fill();
+  if (!ball.stuck) {
+    ctx.fillStyle = "rgba(255,210,120,.16)";
+    ctx.beginPath(); ctx.arc(ball.x - ball.vx * 0.026, ball.y - ball.vy * 0.026, ballR * 0.85, 0, Math.PI * 2); ctx.fill();
+    ctx.fillStyle = "rgba(255,210,120,.24)";
+    ctx.beginPath(); ctx.arc(ball.x - ball.vx * 0.013, ball.y - ball.vy * 0.013, ballR * 0.92, 0, Math.PI * 2); ctx.fill();
+  }
+  const halo = ctx.createRadialGradient(ball.x, ball.y, ballR * 0.3, ball.x, ball.y, ballR * 2.2);
+  halo.addColorStop(0, "rgba(255,230,170,.38)"); halo.addColorStop(1, "rgba(255,230,170,0)");
+  ctx.fillStyle = halo;
+  ctx.beginPath(); ctx.arc(ball.x, ball.y, ballR * 2.2, 0, Math.PI * 2); ctx.fill();
+  const ballG = ctx.createRadialGradient(ball.x - ballR * 0.35, ball.y - ballR * 0.4, ballR * 0.15, ball.x, ball.y, ballR * 1.2);
+  ballG.addColorStop(0, "#ffffff"); ballG.addColorStop(0.65, "#ffeec2"); ballG.addColorStop(1, "#f5b94e");
+  ctx.fillStyle = ballG;
   ctx.beginPath(); ctx.arc(ball.x, ball.y, ballR, 0, Math.PI * 2); ctx.fill();
   if (ball.stuck && state === "play") {
     ctx.fillStyle = "#9db8dd"; ctx.textAlign = "center";
     ctx.font = Math.round(u * 4) + "px system-ui, sans-serif";
     ctx.fillText("Tap or press SPACE to launch", W / 2, padY - 34);
   }
+  // vignette
+  const vg = ctx.createRadialGradient(W / 2, H / 2, H * 0.42, W / 2, H / 2, H * 0.92);
+  vg.addColorStop(0, "rgba(0,0,12,0)"); vg.addColorStop(1, "rgba(0,0,12,.30)");
+  ctx.fillStyle = vg; ctx.fillRect(0, 0, W, H);
   if (state !== "play") {
-    ctx.fillStyle = "rgba(5,8,16,0.8)"; ctx.fillRect(0, 0, W, H);
+    ctx.fillStyle = "rgba(5,8,16,0.60)"; ctx.fillRect(0, 0, W, H);
+    glassPanel(Math.max(12, W / 2 - 230), H * 0.20, Math.min(W - 24, 460), H * 0.52);
     ctx.textAlign = "center"; ctx.textBaseline = "middle";
-    ctx.fillStyle = "#54c8ff";
+    const tg = ctx.createLinearGradient(0, H * 0.25, 0, H * 0.33);
+    tg.addColorStop(0, "#ffffff"); tg.addColorStop(0.55, "#bfeaff"); tg.addColorStop(1, "#54c8ff");
+    ctx.fillStyle = tg;
     ctx.font = "bold " + Math.round(u * 10.5) + "px system-ui, sans-serif";
     ctx.fillText("BREAKOUT", W / 2, H * 0.30);
     ctx.fillStyle = "#eaf2ff";

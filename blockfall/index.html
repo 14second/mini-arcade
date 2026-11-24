@@ -9,17 +9,24 @@
 <title>Blockfall</title>
 <style>
   * { margin:0; padding:0; box-sizing:border-box; }
-  html, body { width:100%; height:100%; overflow:hidden; background:#141428;
+  html, body { width:100%; height:100%; overflow:hidden;
+    background:
+      radial-gradient(120% 90% at 50% 0%, #2b2a5e 0%, rgba(43,42,94,0) 55%),
+      linear-gradient(180deg, #1b1b3a 0%, #141428 60%, #0a0a1c 100%);
     font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
     touch-action:none; user-select:none; -webkit-user-select:none; -webkit-tap-highlight-color: transparent; }
   canvas { position:fixed; inset:0; display:block; touch-action:none; }
-  #muteBtn { position:fixed; top:10px; right:10px; z-index:10; width:48px; height:48px; border-radius:12px;
-    border:2px solid rgba(255,255,255,.7); background:rgba(20,20,50,.55); color:#fff; font-size:22px;
+  #muteBtn { position:fixed; top:10px; right:10px; z-index:10; width:48px; height:48px; border-radius:14px;
+    border:1px solid rgba(255,255,255,.35); background:linear-gradient(180deg, rgba(70,70,140,.75), rgba(24,24,58,.8));
+    box-shadow:0 6px 18px rgba(0,0,0,.45), inset 0 1px 0 rgba(255,255,255,.25); backdrop-filter:blur(6px);
+    color:#fff; font-size:22px;
     line-height:1; cursor:pointer; display:flex; align-items:center; justify-content:center; padding:0; }
   #pad { position:fixed; left:0; right:0; bottom:0; z-index:10; display:flex; justify-content:center; gap:8px; padding:10px 8px calc(10px + env(safe-area-inset-bottom)); }
-  #pad button { flex:1; max-width:74px; height:56px; border-radius:14px; border:2px solid rgba(255,255,255,.45);
-    background:rgba(30,30,64,.72); color:#fff; font-size:24px; cursor:pointer; padding:0; }
-  #pad button:active { background:rgba(80,80,160,.8); }
+  #pad button { flex:1; max-width:74px; height:56px; border-radius:16px; border:1px solid rgba(255,255,255,.32);
+    background:linear-gradient(180deg, rgba(88,88,170,.66), rgba(28,28,66,.78));
+    box-shadow:0 8px 20px rgba(0,0,0,.4), inset 0 1px 0 rgba(255,255,255,.28); backdrop-filter:blur(6px);
+    color:#fff; font-size:24px; cursor:pointer; padding:0; }
+  #pad button:active { background:linear-gradient(180deg, rgba(120,120,210,.85), rgba(60,60,140,.85)); }
 </style>
 </head>
 <body>
@@ -139,7 +146,9 @@ function gravityInterval(level) { return Math.max(MIN_INTERVAL, Math.round(820 *
 
 let state = "menu"; // menu | play | over
 let grid, bag, queue, cur, score, lines, level, best, dropAcc, lastT, softDrop;
-best = +(localStorage.getItem("blockfall_best") || 0);
+function storeGet(k) { try { return localStorage.getItem(k); } catch (e) { return null; } }
+function storeSet(k, v) { try { localStorage.setItem(k, v); } catch (e) {} }
+best = +(storeGet("blockfall_best") || 0);
 
 function newBag() {
   const b = KEYS.slice();
@@ -195,7 +204,7 @@ function lockPiece() {
 }
 function gameOver() {
   state = "over"; sfx("over");
-  if (score > best) { best = score; localStorage.setItem("blockfall_best", best); }
+  if (score > best) { best = score; storeSet("blockfall_best", best); }
 }
 function startGame() {
   grid = Array.from({ length: ROWS }, () => new Array(COLS).fill(null));
@@ -229,21 +238,65 @@ function fairnessCheck() {
 }
 
 /* ---------------- draw ---------------- */
+function shade(hex, amt) {
+  const n = parseInt(hex.slice(1), 16);
+  let r = (n >> 16) & 255, g = (n >> 8) & 255, b = n & 255;
+  if (amt >= 0) { r += (255 - r) * amt; g += (255 - g) * amt; b += (255 - b) * amt; }
+  else { r *= 1 + amt; g *= 1 + amt; b *= 1 + amt; }
+  return "rgb(" + (r | 0) + "," + (g | 0) + "," + (b | 0) + ")";
+}
+function rr(x, y, w, h, r) {
+  ctx.beginPath();
+  ctx.moveTo(x + r, y);
+  ctx.arcTo(x + w, y, x + w, y + h, r); ctx.arcTo(x + w, y + h, x, y + h, r);
+  ctx.arcTo(x, y + h, x, y, r); ctx.arcTo(x, y, x + w, y, r);
+  ctx.closePath();
+}
+function glassPanel(x, y, w, h, r) {
+  ctx.save();
+  ctx.shadowColor = "rgba(0,0,0,.5)"; ctx.shadowBlur = 30; ctx.shadowOffsetY = 10;
+  const g = ctx.createLinearGradient(0, y, 0, y + h);
+  g.addColorStop(0, "rgba(38,42,84,.92)"); g.addColorStop(1, "rgba(14,14,36,.94)");
+  ctx.fillStyle = g; rr(x, y, w, h, r); ctx.fill();
+  ctx.restore();
+  ctx.lineWidth = 1.5; ctx.strokeStyle = "rgba(255,255,255,.18)"; rr(x, y, w, h, r); ctx.stroke();
+  ctx.strokeStyle = "rgba(255,255,255,.10)"; ctx.lineWidth = 1;
+  ctx.beginPath(); ctx.moveTo(x + r, y + 1); ctx.lineTo(x + w - r, y + 1); ctx.stroke();
+}
+
 function drawCell(x, y, color) {
-  ctx.fillStyle = color; ctx.fillRect(x + 1, y + 1, CELL - 2, CELL - 2);
-  ctx.fillStyle = "rgba(255,255,255,.28)"; ctx.fillRect(x + 1, y + 1, CELL - 2, 5);
+  const g = ctx.createLinearGradient(0, y, 0, y + CELL);
+  g.addColorStop(0, shade(color, 0.38)); g.addColorStop(0.5, color); g.addColorStop(1, shade(color, -0.28));
+  ctx.fillStyle = g;
+  rr(x + 1, y + 1, CELL - 2, CELL - 2, 6); ctx.fill();
+  ctx.fillStyle = "rgba(255,255,255,.34)"; rr(x + 4, y + 3, CELL - 8, 6, 3); ctx.fill();
+  ctx.strokeStyle = "rgba(0,0,0,.28)"; ctx.lineWidth = 1; rr(x + 1.5, y + 1.5, CELL - 3, CELL - 3, 6); ctx.stroke();
 }
 function draw() {
   ctx.setTransform(1, 0, 0, 1, 0, 0);
-  ctx.fillStyle = "#0c0c1e"; ctx.fillRect(0, 0, canvas.width, canvas.height);
+  const bg = ctx.createLinearGradient(0, 0, 0, canvas.height);
+  bg.addColorStop(0, "#232350"); bg.addColorStop(0.55, "#12122a"); bg.addColorStop(1, "#08081a");
+  ctx.fillStyle = bg; ctx.fillRect(0, 0, canvas.width, canvas.height);
   ctx.setTransform(scale, 0, 0, scale, ox, oy);
-  ctx.fillStyle = "#dfe3ff"; ctx.font = "700 26px system-ui"; ctx.textAlign = "left";
+  const glow = ctx.createRadialGradient(VW / 2, 120, 20, VW / 2, 120, 420);
+  glow.addColorStop(0, "rgba(110,110,255,.16)"); glow.addColorStop(1, "rgba(110,110,255,0)");
+  ctx.fillStyle = glow; ctx.fillRect(0, 0, VW, VH);
+  const tg = ctx.createLinearGradient(0, 14, 0, 40);
+  tg.addColorStop(0, "#ffffff"); tg.addColorStop(1, "#aab4ff");
+  ctx.fillStyle = tg; ctx.font = "700 26px system-ui"; ctx.textAlign = "left";
   ctx.fillText("BLOCKFALL", 28, 38);
   ctx.font = "600 15px system-ui"; ctx.fillStyle = "#9aa0c8"; ctx.textAlign = "right";
   ctx.fillText("BEST " + best, VW - 70, 38);
   // well
-  ctx.fillStyle = "#191932"; ctx.fillRect(WX - 4, WY - 4, COLS * CELL + 8, ROWS * CELL + 8);
-  ctx.strokeStyle = "#3a3a6e"; ctx.lineWidth = 2; ctx.strokeRect(WX - 4, WY - 4, COLS * CELL + 8, ROWS * CELL + 8);
+  const wg = ctx.createLinearGradient(0, WY, 0, WY + ROWS * CELL);
+  wg.addColorStop(0, "#1d1d3d"); wg.addColorStop(1, "#12122a");
+  ctx.fillStyle = wg; rr(WX - 4, WY - 4, COLS * CELL + 8, ROWS * CELL + 8, 10); ctx.fill();
+  ctx.strokeStyle = "rgba(255,255,255,.05)"; ctx.lineWidth = 1; ctx.beginPath();
+  for (let gx = 1; gx < COLS; gx++) { ctx.moveTo(WX + gx * CELL, WY); ctx.lineTo(WX + gx * CELL, WY + ROWS * CELL); }
+  for (let gy = 1; gy < ROWS; gy++) { ctx.moveTo(WX, WY + gy * CELL); ctx.lineTo(WX + COLS * CELL, WY + gy * CELL); }
+  ctx.stroke();
+  ctx.save(); ctx.shadowColor = "rgba(90,90,255,.35)"; ctx.shadowBlur = 16;
+  ctx.strokeStyle = "#4c4c96"; ctx.lineWidth = 2; rr(WX - 4, WY - 4, COLS * CELL + 8, ROWS * CELL + 8, 10); ctx.stroke(); ctx.restore();
   if (grid) for (let r = 0; r < ROWS; r++) for (let c = 0; c < COLS; c++) if (grid[r][c]) drawCell(WX + c * CELL, WY + r * CELL, grid[r][c]);
   // ghost + current
   if (state === "play" && cur) {
@@ -255,11 +308,20 @@ function draw() {
   }
   // side panel
   const px = WX + COLS * CELL + 22;
+  ctx.save();
+  ctx.fillStyle = "rgba(255,255,255,.045)"; rr(px - 10, WY - 6, VW - px - 2, 268, 14); ctx.fill();
+  ctx.strokeStyle = "rgba(255,255,255,.13)"; ctx.lineWidth = 1; rr(px - 10, WY - 6, VW - px - 2, 268, 14); ctx.stroke();
+  ctx.restore();
   ctx.fillStyle = "#9aa0c8"; ctx.font = "600 14px system-ui"; ctx.textAlign = "left";
   ctx.fillText("NEXT", px, WY + 14);
   if (state !== "menu") {
     const nk = peekNext(), nm = SHAPES[nk].m, cs = 17;
-    for (let r = 0; r < nm.length; r++) for (let c = 0; c < nm[r].length; c++) if (nm[r][c]) { ctx.fillStyle = SHAPES[nk].c; ctx.fillRect(px + c * cs, WY + 26 + r * cs, cs - 2, cs - 2); }
+    for (let r = 0; r < nm.length; r++) for (let c = 0; c < nm[r].length; c++) if (nm[r][c]) {
+      const ng = ctx.createLinearGradient(0, WY + 26 + r * cs, 0, WY + 26 + r * cs + cs);
+      ng.addColorStop(0, shade(SHAPES[nk].c, 0.38)); ng.addColorStop(1, shade(SHAPES[nk].c, -0.25));
+      ctx.fillStyle = ng; rr(px + c * cs, WY + 26 + r * cs, cs - 2, cs - 2, 4); ctx.fill();
+      ctx.fillStyle = "rgba(255,255,255,.3)"; ctx.fillRect(px + c * cs + 2, WY + 28 + r * cs, cs - 6, 3);
+    }
   }
   ctx.fillStyle = "#dfe3ff"; ctx.font = "700 20px system-ui";
   ctx.fillText(score, px, WY + 130);
@@ -267,7 +329,8 @@ function draw() {
   ctx.fillText("SCORE", px, WY + 112); ctx.fillText("LINES  " + lines, px, WY + 180);
   ctx.fillText("LEVEL  " + level, px, WY + 206);
   if (state === "menu") {
-    ctx.fillStyle = "rgba(8,8,24,.78)"; ctx.fillRect(0, 200, VW, 240);
+    ctx.fillStyle = "rgba(8,8,24,.55)"; ctx.fillRect(0, 0, VW, VH);
+    glassPanel(VW / 2 - 196, 196, 392, 248, 20);
     ctx.fillStyle = "#fff"; ctx.font = "700 34px system-ui"; ctx.textAlign = "center";
     ctx.fillText("BLOCKFALL", VW / 2, 268);
     ctx.font = "400 17px system-ui"; ctx.fillStyle = "#c6caf0";
@@ -277,7 +340,8 @@ function draw() {
     ctx.fillText("TAP TO START", VW / 2, 386);
   }
   if (state === "over") {
-    ctx.fillStyle = "rgba(8,8,24,.8)"; ctx.fillRect(0, 200, VW, 240);
+    ctx.fillStyle = "rgba(8,8,24,.55)"; ctx.fillRect(0, 0, VW, VH);
+    glassPanel(VW / 2 - 196, 196, 392, 248, 20);
     ctx.fillStyle = "#fff"; ctx.font = "700 32px system-ui"; ctx.textAlign = "center";
     ctx.fillText("GAME OVER", VW / 2, 272);
     ctx.font = "400 18px system-ui"; ctx.fillStyle = "#c6caf0";
@@ -329,8 +393,8 @@ window.addEventListener("keydown", e => {
 window.addEventListener("keyup", e => { if (e.code === "ArrowDown") softDrop = false; });
 const muteBtn = document.getElementById("muteBtn");
 function syncMute() { muteBtn.textContent = muted ? "🔇" : "🔊"; }
-muteBtn.addEventListener("click", e => { e.stopPropagation(); muted = !muted; localStorage.setItem("blockfall_muted", muted ? 1 : 0); syncMute(); });
-muted = localStorage.getItem("blockfall_muted") === "1"; syncMute();
+muteBtn.addEventListener("click", e => { e.stopPropagation(); muted = !muted; storeSet("blockfall_muted", muted ? 1 : 0); syncMute(); });
+muted = storeGet("blockfall_muted") === "1"; syncMute();
 grid = Array.from({ length: ROWS }, () => new Array(COLS).fill(null)); queue = [];
 if (QA_MODE) fairnessCheck();
 </script>

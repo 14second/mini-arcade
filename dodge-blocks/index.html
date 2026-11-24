@@ -14,25 +14,37 @@
   * { margin:0; padding:0; box-sizing:border-box; }
   html, body { height:100%; }
   body {
-    background:#0e1420;
+    background:
+      radial-gradient(120% 90% at 50% 0%, #2b3f63 0%, rgba(43,63,99,0) 55%),
+      linear-gradient(180deg, #131c2e 0%, #0b101c 60%, #070b13 100%);
     display:flex; flex-direction:column; align-items:center; justify-content:center;
     font-family:"Segoe UI", system-ui, -apple-system, sans-serif;
     color:#e8eef7; overflow:hidden;
     -webkit-user-select:none; user-select:none;
     touch-action:none;
   }
-  h1 { font-size:clamp(20px,4vw,34px); letter-spacing:2px; margin-bottom:4px; font-weight:800; }
-  h1 .accent { color:#2dd4bf; }
-  p.sub { color:#8b98ad; font-size:clamp(12px,2vw,15px); margin-bottom:14px; }
+  h1 {
+    font-size:clamp(20px,4vw,34px); letter-spacing:2px; margin-bottom:4px; font-weight:800;
+    background:linear-gradient(180deg, #ffffff 20%, #bcd7f5 90%);
+    -webkit-background-clip:text; background-clip:text; -webkit-text-fill-color:transparent;
+    filter:drop-shadow(0 2px 10px rgba(80,140,220,.35));
+  }
+  h1 .accent {
+    background:linear-gradient(180deg, #8ef5e3 10%, #2dd4bf 55%, #0d9488 100%);
+    -webkit-background-clip:text; background-clip:text; -webkit-text-fill-color:transparent;
+  }
+  p.sub { color:#9fb0c6; font-size:clamp(12px,2vw,15px); margin-bottom:14px; }
   #wrap { position:relative; width:min(96vw, 1060px); }
   canvas {
-    width:100%; height:auto; display:block; border-radius:14px;
-    box-shadow:0 18px 60px rgba(0,0,0,.55), 0 0 0 1px rgba(255,255,255,.06);
+    width:100%; height:auto; display:block; border-radius:18px;
+    box-shadow:0 24px 70px rgba(0,0,0,.6), 0 4px 18px rgba(0,0,0,.45),
+               0 0 0 1px rgba(255,255,255,.09), inset 0 0 0 1px rgba(255,255,255,.05);
     background:#dff3fa; cursor:pointer;
   }
-  #hint { margin-top:10px; color:#8b98ad; font-size:13px; text-align:center; }
-  kbd { background:#1c2534; border:1px solid #33405a; border-bottom-width:3px; border-radius:6px;
-        padding:1px 8px; font-family:inherit; font-size:12px; color:#dbe4f0; }
+  #hint { margin-top:12px; color:#93a5bd; font-size:13px; text-align:center; }
+  kbd { background:linear-gradient(180deg, #26334a, #1a2436); border:1px solid #3a4a66; border-bottom-width:3px; border-radius:6px;
+        padding:1px 8px; font-family:inherit; font-size:12px; color:#e2ebf7;
+        box-shadow:0 1px 3px rgba(0,0,0,.4); }
 </style>
 </head>
 <body>
@@ -181,7 +193,8 @@ const sfx = {
 // ---------- state ----------
 let state = "menu";           // menu | play | dead
 let t = 0, survived = 0, dodged = 0, score = 0;
-let hi = +(localStorage.getItem("dodgeblocks_hi") || 0);
+let hi = 0;
+try { hi = +(localStorage.getItem("dodgeblocks_hi") || 0); } catch (e) { hi = 0; }
 let fallSpeed = CONFIG.startFall, spawnGap = CONFIG.startGap, spawnT = 0;
 let lastMilestone = 0, flash = 0, shake = 0, deadT = 0;
 
@@ -335,7 +348,7 @@ function update(dt) {
     const bx = b.x + 4, bw = b.s - 8, by = b.y + 4, bh = b.s - 8;
     if (sx < bx + bw && sx + sw > bx && sy < by + bh && sy + sh > by) {
       state = "dead"; deadT = 0; ship.dead = true; shake = 0.5; sfx.crash();
-      if (score > hi) { hi = score; localStorage.setItem("dodgeblocks_hi", hi); }
+      if (score > hi) { hi = score; try { localStorage.setItem("dodgeblocks_hi", hi); } catch (e) {} }
       for (let i = 0; i < 16; i++) puffs.push({ x: ship.x, y: shipY - 20 * S, vx: (-170 + Math.random() * 340) * S, vy: (-220 + Math.random() * 160) * S, life: 0.8 });
       break;
     }
@@ -348,10 +361,48 @@ function update(dt) {
 // ---------- drawing ----------
 function bgGradient() {
   const g = ctx.createLinearGradient(0, 0, 0, H);
-  g.addColorStop(0, "#dff3fa");
-  g.addColorStop(0.75, "#eefaf5");
-  g.addColorStop(1, "#d9f2e4");
+  g.addColorStop(0, "#bfe6f7");
+  g.addColorStop(0.45, "#dff3fa");
+  g.addColorStop(0.78, "#eefaf5");
+  g.addColorStop(1, "#cdeeda");
   return g;
+}
+
+// soft sun glow, drifting clouds and far hills — visual depth only,
+// positioned from the ever-advancing clock t so nothing in update() changes
+function drawBackdropDecor() {
+  const sx = W - 130 * S - 30, sy = 74 * S + 16;
+  const halo = ctx.createRadialGradient(sx, sy, 6, sx, sy, 130 * S);
+  halo.addColorStop(0, "rgba(255,246,200,.85)");
+  halo.addColorStop(0.35, "rgba(255,240,190,.30)");
+  halo.addColorStop(1, "rgba(255,240,190,0)");
+  ctx.fillStyle = halo;
+  ctx.beginPath(); ctx.arc(sx, sy, 130 * S, 0, 7); ctx.fill();
+  const core = ctx.createRadialGradient(sx - 6, sy - 6, 3, sx, sy, 34 * S);
+  core.addColorStop(0, "#fffbe8"); core.addColorStop(1, "#ffe9a8");
+  ctx.fillStyle = core;
+  ctx.beginPath(); ctx.arc(sx, sy, 32 * S, 0, 7); ctx.fill();
+  // clouds drifting slowly left
+  for (let i = 0; i < 4; i++) {
+    const span = W + 340;
+    let cx = ((i * 317 + 80 - t * (10 + i * 3)) % span + span) % span - 170;
+    const cy = (46 + i * 44) * S + 8, cs = (0.75 + (i % 3) * 0.28) * S;
+    ctx.fillStyle = "rgba(170,205,232,.35)";
+    ctx.beginPath();
+    ctx.arc(cx, cy + 6 * cs, 20 * cs, 0, 7); ctx.arc(cx + 26 * cs, cy + 2 * cs, 25 * cs, 0, 7); ctx.arc(cx + 54 * cs, cy + 7 * cs, 18 * cs, 0, 7);
+    ctx.fill();
+    const cg = ctx.createLinearGradient(0, cy - 26 * cs, 0, cy + 16 * cs);
+    cg.addColorStop(0, "rgba(255,255,255,.95)"); cg.addColorStop(1, "rgba(228,242,252,.85)");
+    ctx.fillStyle = cg;
+    ctx.beginPath();
+    ctx.arc(cx, cy, 20 * cs, 0, 7); ctx.arc(cx + 26 * cs, cy - 4 * cs, 25 * cs, 0, 7); ctx.arc(cx + 54 * cs, cy + 1 * cs, 18 * cs, 0, 7);
+    ctx.fill();
+  }
+  // far hills along the floor line
+  ctx.fillStyle = "rgba(110,180,130,.35)";
+  for (let x = -((t * 9) % 520) - 520; x < W + 520; x += 520) {
+    ctx.beginPath(); ctx.ellipse(x + 260, shipY + 30 * S, 320 * S, 100 * S, 0, Math.PI, 0); ctx.fill();
+  }
 }
 
 function rrect(x, y, w, h, r) {
@@ -375,8 +426,12 @@ function drawBlock(b) {
   grd.addColorStop(1, `hsl(${b.hue} 78% 48%)`);
   ctx.fillStyle = grd;
   rrect(-b.s / 2, -b.s / 2, b.s, b.s, 9); ctx.fill();
-  ctx.fillStyle = "rgba(255,255,255,.35)";
+  ctx.strokeStyle = `hsl(${b.hue} 70% 34% / .55)`; ctx.lineWidth = 1.5;
+  rrect(-b.s / 2, -b.s / 2, b.s, b.s, 9); ctx.stroke();
+  ctx.fillStyle = "rgba(255,255,255,.38)";
   rrect(-b.s / 2 + 6, -b.s / 2 + 6, b.s - 12, b.s * 0.32, 6); ctx.fill();
+  ctx.fillStyle = "rgba(255,255,255,.20)";
+  rrect(-b.s / 2 + 6, b.s / 2 - b.s * 0.22 - 6, b.s - 12, b.s * 0.16, 5); ctx.fill();
   ctx.restore();
 }
 
@@ -411,11 +466,16 @@ function drawShip() {
   ctx.lineTo(-15, -2);
   ctx.quadraticCurveTo(-17, -26, 0, -46);
   ctx.fill();
-  // window
+  // glossy sheen down the hull
+  ctx.fillStyle = "rgba(255,255,255,.28)";
+  ctx.beginPath(); ctx.ellipse(-4, -30, 4.5, 13, 0.2, 0, 7); ctx.fill();
+  // window (glossy dome)
   ctx.fillStyle = "#e0f2fe";
   ctx.beginPath(); ctx.arc(0, -26, 7.5, 0, 7); ctx.fill();
   ctx.fillStyle = "#0284c7";
   ctx.beginPath(); ctx.arc(0, -26, 4.2, 0, 7); ctx.fill();
+  ctx.fillStyle = "rgba(255,255,255,.9)";
+  ctx.beginPath(); ctx.arc(-2, -28.5, 1.7, 0, 7); ctx.fill();
   ctx.restore();
 }
 
@@ -428,6 +488,16 @@ function drawPuffs() {
 
 function drawHUD() {
   const fs = Math.min(1, Math.max(S, 0.85)); // HUD type scale (1 on desktop)
+  // frosted glass pills behind the readouts
+  ctx.save();
+  ctx.shadowColor = "rgba(20,40,60,.22)"; ctx.shadowBlur = 10; ctx.shadowOffsetY = 3;
+  ctx.fillStyle = "rgba(255,255,255,.55)";
+  rrect(14 * fs, 16 * fs, 196 * fs, 60 * fs, 14 * fs); ctx.fill();
+  rrect(W - 184 * fs, 16 * fs, 170 * fs, 60 * fs, 14 * fs); ctx.fill();
+  ctx.restore();
+  ctx.lineWidth = 1; ctx.strokeStyle = "rgba(255,255,255,.75)";
+  rrect(14 * fs, 16 * fs, 196 * fs, 60 * fs, 14 * fs); ctx.stroke();
+  rrect(W - 184 * fs, 16 * fs, 170 * fs, 60 * fs, 14 * fs); ctx.stroke();
   ctx.textAlign = "right";
   ctx.fillStyle = "#2b3648";
   ctx.font = `700 ${26 * fs}px 'Segoe UI', system-ui, sans-serif`;
@@ -446,9 +516,19 @@ function centerText(main, sub, mainSize) {
   const ts = Math.min(1, (W - 40) / 520);        // title scale (1 on desktop)
   const k = Math.max(ts, 0.8);                    // panel/offset scale
   ctx.textAlign = "center";
-  ctx.fillStyle = "rgba(20,28,40,.74)";
   const w = Math.min(520, W - 24), h = (sub ? 196 : 116) * k;
+  // glass panel (shared look with the menu cards)
+  ctx.save();
+  ctx.shadowColor = "rgba(8,18,34,.45)"; ctx.shadowBlur = 34; ctx.shadowOffsetY = 12;
+  const pg = ctx.createLinearGradient(0, H / 2 - h / 2 - 30 * k, 0, H / 2 + h / 2 - 30 * k);
+  pg.addColorStop(0, "rgba(26,38,58,.86)"); pg.addColorStop(1, "rgba(13,20,33,.88)");
+  ctx.fillStyle = pg;
   rrect(W / 2 - w / 2, H / 2 - h / 2 - 30 * k, w, h, 18); ctx.fill();
+  ctx.restore();
+  ctx.lineWidth = 1.5; ctx.strokeStyle = "rgba(255,255,255,.16)";
+  rrect(W / 2 - w / 2, H / 2 - h / 2 - 30 * k, w, h, 18); ctx.stroke();
+  ctx.strokeStyle = "rgba(255,255,255,.10)"; ctx.lineWidth = 1;
+  ctx.beginPath(); ctx.moveTo(W / 2 - w / 2 + 18, H / 2 - h / 2 - 30 * k + 1); ctx.lineTo(W / 2 + w / 2 - 18, H / 2 - h / 2 - 30 * k + 1); ctx.stroke();
   ctx.fillStyle = "#fff";
   ctx.font = `800 ${(mainSize || 42) * ts}px 'Segoe UI', system-ui, sans-serif`;
   ctx.fillText(main, W / 2, H / 2 - (sub ? 20 : 2) * k);
@@ -466,12 +546,16 @@ function draw() {
   ctx.save();
   ctx.fillStyle = bgGradient();
   ctx.fillRect(0, 0, W, H);
+  drawBackdropDecor();
   // drifting specks
   ctx.fillStyle = "rgba(14,165,233,.20)";
   for (const s of stars) { ctx.beginPath(); ctx.arc(s.x, s.y, s.s, 0, 7); ctx.fill(); }
-  // floor line
-  ctx.fillStyle = "#99d5b8"; ctx.fillRect(0, shipY + 14 * S, W, Math.max(2, 4 * S));
-  ctx.fillStyle = "rgba(20,184,166,.10)"; ctx.fillRect(0, shipY + 18 * S, W, H - shipY - 18 * S);
+  // ground band + floor line
+  const gg = ctx.createLinearGradient(0, shipY + 14 * S, 0, H);
+  gg.addColorStop(0, "rgba(46,160,110,.20)"); gg.addColorStop(1, "rgba(20,120,90,.30)");
+  ctx.fillStyle = gg; ctx.fillRect(0, shipY + 14 * S, W, H - shipY - 14 * S);
+  ctx.fillStyle = "#7cc7a2"; ctx.fillRect(0, shipY + 14 * S, W, Math.max(2, 4 * S));
+  ctx.fillStyle = "rgba(255,255,255,.35)"; ctx.fillRect(0, shipY + 14 * S, W, Math.max(1, 1.5 * S));
   for (const b of blocks) drawBlock(b);
   drawPuffs();
   drawShip();

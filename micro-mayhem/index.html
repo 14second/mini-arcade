@@ -9,12 +9,18 @@
 <title>Micro Mayhem</title>
 <style>
   * { margin:0; padding:0; box-sizing:border-box; }
-  html, body { width:100%; height:100%; overflow:hidden; background:#3a2b10;
+  html, body { width:100%; height:100%; overflow:hidden;
+    background:
+      radial-gradient(120% 90% at 50% 0%, #6b4d16 0%, rgba(107,77,22,0) 55%),
+      linear-gradient(180deg, #2c2008 0%, #3a2b10 55%, #1d1405 100%);
     font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
     touch-action:none; user-select:none; -webkit-user-select:none; -webkit-tap-highlight-color: transparent; }
   canvas { position:fixed; inset:0; display:block; touch-action:none; }
   #muteBtn { position:fixed; top:10px; right:10px; z-index:10; width:48px; height:48px; border-radius:12px;
-    border:2px solid rgba(255,255,255,.7); background:rgba(60,40,10,.5); color:#fff; font-size:22px;
+    border:1px solid rgba(255,255,255,.45); background:linear-gradient(180deg, rgba(110,80,25,.65), rgba(46,32,8,.65));
+    backdrop-filter:blur(6px); -webkit-backdrop-filter:blur(6px);
+    box-shadow:0 6px 18px rgba(0,0,0,.45), inset 0 1px 0 rgba(255,255,255,.25);
+    color:#fff; font-size:22px;
     line-height:1; cursor:pointer; display:flex; align-items:center; justify-content:center; padding:0; }
 </style>
 </head>
@@ -108,6 +114,12 @@ function sfx(name) {
   if (name === "next") tone(784, 0.08, "square", 0.1, t);
 }
 
+/* ---------------- guarded storage ---------------- */
+// Storage can be denied (preview panes, private-mode webviews); a throwing
+// read would kill the script or the draw loop — route every access here.
+function storeGet(k) { try { return localStorage.getItem(k); } catch (e) { return null; } }
+function storeSet(k, v) { try { localStorage.setItem(k, v); } catch (e) {} }
+
 /* ---------------- microgames ---------------- */
 /* Each entry: word (instruction), taps (max discrete inputs needed at any
    speed), zone (narrowest timing zone as a fraction of sweep, if any),
@@ -117,17 +129,29 @@ const GAMES = [
   { word: "TAP!", taps: 3, zone: null,
     start(g) { g.n = 0; g.x = 90 + Math.random() * 240; g.y = 240 + Math.random() * 240; },
     tap(g, x, y) { if (Math.hypot(x - g.x, y - g.y) < 64) { g.n++; sfx("tap"); g.x = 80 + Math.random() * 260; g.y = 230 + Math.random() * 260; if (g.n >= 3) g.done = true; } },
-    draw(g) { ctx.fillStyle = "#ffd23e"; ctx.beginPath(); ctx.arc(g.x, g.y, 56, 0, 7); ctx.fill(); ctx.fillStyle = "#7a5200"; ctx.font = "bold 26px sans-serif"; ctx.fillText("TAP", g.x, g.y + 4); ctx.fillStyle = "#fff"; ctx.font = "bold 20px sans-serif"; ctx.fillText(g.n + " / 3", VW / 2, 640); } },
+    draw(g) { ctx.fillStyle = "rgba(0,0,0,.3)"; ctx.beginPath(); ctx.ellipse(g.x, g.y + 50, 44, 9, 0, 0, 7); ctx.fill();
+      const bg = ctx.createRadialGradient(g.x - 18, g.y - 20, 8, g.x, g.y, 62); bg.addColorStop(0, "#fff3b0"); bg.addColorStop(0.55, "#ffd23e"); bg.addColorStop(1, "#e8a812");
+      ctx.fillStyle = bg; ctx.beginPath(); ctx.arc(g.x, g.y, 56, 0, 7); ctx.fill();
+      ctx.fillStyle = "rgba(255,255,255,.5)"; ctx.beginPath(); ctx.ellipse(g.x - 20, g.y - 24, 16, 9, -0.5, 0, 7); ctx.fill();
+      ctx.fillStyle = "#7a5200"; ctx.font = "bold 26px sans-serif"; ctx.fillText("TAP", g.x, g.y + 4); ctx.fillStyle = "#fff"; ctx.font = "bold 20px sans-serif"; ctx.fillText(g.n + " / 3", VW / 2, 640); } },
   { word: "MASH!", taps: 6, zone: null,
     start(g) { g.n = 0; },
     tap(g) { g.n++; sfx("tap"); if (g.n >= 6) g.done = true; },
-    draw(g) { const f = g.n / 6; ctx.fillStyle = "#444"; ctx.fillRect(70, 330, 280, 44); ctx.fillStyle = "#57d977"; ctx.fillRect(70, 330, 280 * f, 44); ctx.fillStyle = "#fff"; ctx.font = "bold 22px sans-serif"; ctx.fillText("TAP ANYWHERE!", VW / 2, 300); ctx.font = "44px sans-serif"; ctx.fillText("🥤", VW / 2, 470); ctx.fillText("fill the cup: " + g.n + "/6", VW / 2, 540); } },
+    draw(g) { const f = g.n / 6; ctx.fillStyle = "rgba(0,0,0,.45)"; ctx.beginPath(); ctx.roundRect(70, 330, 280, 44, 22); ctx.fill();
+      if (f > 0) { const fg = ctx.createLinearGradient(70, 0, 350, 0); fg.addColorStop(0, "#8bf79b"); fg.addColorStop(1, "#35b558"); ctx.fillStyle = fg; ctx.beginPath(); ctx.roundRect(70, 330, Math.max(44, 280 * f), 44, 22); ctx.fill(); }
+      ctx.fillStyle = "rgba(255,255,255,.25)"; ctx.beginPath(); ctx.roundRect(82, 336, 256, 12, 6); ctx.fill();
+      ctx.fillStyle = "#fff"; ctx.font = "bold 22px sans-serif"; ctx.fillText("TAP ANYWHERE!", VW / 2, 300); ctx.font = "44px sans-serif"; ctx.fillText("🥤", VW / 2, 470); ctx.fillText("fill the cup: " + g.n + "/6", VW / 2, 540); } },
   { word: "CATCH!", taps: 0, zone: null,
     start(g) { g.bx = VW / 2; g.sx = 60 + Math.random() * 300; g.sy = 130; g.caught = false; },
     update(g, dt) { g.sy += dt * 235 * g.speed; if (g.sy > 566) { if (Math.abs(g.sx - g.bx) < 52) { g.caught = true; g.done = true; sfx("good"); } else if (g.sy > 640) { g.fail = true; g.done = true; } } },
     move(g, x) { g.bx = Math.max(44, Math.min(VW - 44, x)); },
     key(g, dir) { g.bx = Math.max(44, Math.min(VW - 44, g.bx + dir * 30)); },
-    draw(g) { ctx.font = "40px sans-serif"; ctx.fillText("⭐", g.sx, g.sy); ctx.fillStyle = "#c86b32"; ctx.beginPath(); ctx.roundRect(g.bx - 48, 560, 96, 26, 8); ctx.fill(); ctx.fillStyle = "#fff"; ctx.font = "15px sans-serif"; ctx.fillText("◀ drag or arrow keys ▶", VW / 2, 660); } },
+    draw(g) { ctx.font = "40px sans-serif"; ctx.fillText("⭐", g.sx, g.sy);
+      ctx.fillStyle = "rgba(0,0,0,.3)"; ctx.beginPath(); ctx.ellipse(g.bx, 592, 50, 7, 0, 0, 7); ctx.fill();
+      const bg2 = ctx.createLinearGradient(0, 556, 0, 590); bg2.addColorStop(0, "#e8935a"); bg2.addColorStop(1, "#a85424");
+      ctx.fillStyle = bg2; ctx.beginPath(); ctx.roundRect(g.bx - 48, 560, 96, 26, 8); ctx.fill();
+      ctx.fillStyle = "rgba(255,255,255,.35)"; ctx.fillRect(g.bx - 44, 562, 88, 4);
+      ctx.fillStyle = "#fff"; ctx.font = "15px sans-serif"; ctx.fillText("◀ drag or arrow keys ▶", VW / 2, 660); } },
   { word: "DODGE!", taps: 0, zone: null,
     start(g) { g.px = VW / 2; g.barrels = [0, 1, 2].map(i => ({ x: 60 + Math.random() * 300, y: -60 - i * 210, s: 200 + Math.random() * 60 })); },
     update(g, dt) {
@@ -140,13 +164,20 @@ const GAMES = [
   { word: "ORDER!", taps: 3, zone: null,
     start(g) { g.next = 1; const spots = [[110, 300], [310, 300], [210, 470]]; g.order = [1, 2, 3].sort(() => Math.random() - 0.5); g.pads = spots.map((s, i) => ({ x: s[0], y: s[1], n: g.order[i] })); },
     tap(g, x, y) { for (const p of g.pads) if (Math.hypot(x - p.x, y - p.y) < 52) { if (p.n === g.next) { p.hit = true; g.next++; sfx("tap"); if (g.next > 3) g.done = true; } else { g.fail = true; g.done = true; } } },
-    draw(g) { for (const p of g.pads) { ctx.fillStyle = p.hit ? "#57d977" : "#3a6bd7"; ctx.beginPath(); ctx.arc(p.x, p.y, 46, 0, 7); ctx.fill(); ctx.fillStyle = "#fff"; ctx.font = "bold 30px sans-serif"; ctx.fillText(String(p.n), p.x, p.y + 4); } ctx.font = "17px sans-serif"; ctx.fillText("tap 1, then 2, then 3", VW / 2, 640); } },
+    draw(g) { for (const p of g.pads) { ctx.fillStyle = "rgba(0,0,0,.3)"; ctx.beginPath(); ctx.ellipse(p.x, p.y + 42, 40, 8, 0, 0, 7); ctx.fill();
+        const pg = ctx.createRadialGradient(p.x - 14, p.y - 16, 6, p.x, p.y, 52); if (p.hit) { pg.addColorStop(0, "#a5f2b1"); pg.addColorStop(1, "#2f9e4f"); } else { pg.addColorStop(0, "#7ba7f0"); pg.addColorStop(1, "#2b4fa8"); }
+        ctx.fillStyle = pg; ctx.beginPath(); ctx.arc(p.x, p.y, 46, 0, 7); ctx.fill();
+        ctx.fillStyle = "rgba(255,255,255,.35)"; ctx.beginPath(); ctx.ellipse(p.x - 15, p.y - 18, 14, 8, -0.5, 0, 7); ctx.fill();
+        ctx.fillStyle = "#fff"; ctx.font = "bold 30px sans-serif"; ctx.fillText(String(p.n), p.x, p.y + 4); } ctx.font = "17px sans-serif"; ctx.fillText("tap 1, then 2, then 3", VW / 2, 640); } },
   { word: "STOP!", taps: 1, zone: 0.16,
     start(g) { g.t = 0; g.stopped = false; g.zoneC = 0.3 + Math.random() * 0.4; },
     update(g, dt) { if (!g.stopped) g.t += dt * g.speed; },
     tap(g) { if (g.stopped) return; g.stopped = true; const pos = (Math.sin(g.t * 2.4) + 1) / 2; if (Math.abs(pos - g.zoneC) <= 0.08) { g.done = true; sfx("good"); } else { g.fail = true; g.done = true; } },
     key(g) { g.tap && g.tap(g); },
-    draw(g) { const pos = (Math.sin(g.t * 2.4) + 1) / 2; ctx.fillStyle = "#444"; ctx.fillRect(50, 340, 320, 30); ctx.fillStyle = "#57d977"; ctx.fillRect(50 + 320 * (g.zoneC - 0.08), 340, 320 * 0.16, 30); ctx.fillStyle = "#ffd23e"; ctx.fillRect(50 + 320 * pos - 5, 322, 10, 66); ctx.fillStyle = "#fff"; ctx.font = "17px sans-serif"; ctx.fillText("tap when the bar is in the green", VW / 2, 460); } },
+    draw(g) { const pos = (Math.sin(g.t * 2.4) + 1) / 2; ctx.fillStyle = "rgba(0,0,0,.5)"; ctx.beginPath(); ctx.roundRect(50, 340, 320, 30, 15); ctx.fill();
+      const zg = ctx.createLinearGradient(0, 340, 0, 370); zg.addColorStop(0, "#8bf79b"); zg.addColorStop(1, "#35b558"); ctx.fillStyle = zg; ctx.fillRect(50 + 320 * (g.zoneC - 0.08), 340, 320 * 0.16, 30);
+      ctx.save(); ctx.shadowColor = "rgba(255,210,62,.85)"; ctx.shadowBlur = 12; const mg = ctx.createLinearGradient(0, 322, 0, 388); mg.addColorStop(0, "#ffe98a"); mg.addColorStop(1, "#e8a812"); ctx.fillStyle = mg; ctx.beginPath(); ctx.roundRect(50 + 320 * pos - 5, 322, 10, 66, 5); ctx.fill(); ctx.restore();
+      ctx.fillStyle = "#fff"; ctx.font = "17px sans-serif"; ctx.fillText("tap when the bar is in the green", VW / 2, 460); } },
   { word: "POP!", taps: 3, zone: null,
     start(g) { g.n = 0; g.bs = [0, 1, 2, 3].map(i => ({ x: 60 + Math.random() * 300, y: 240 + Math.random() * 260, vx: (Math.random() * 2 - 1) * 60, vy: (Math.random() * 2 - 1) * 45, dead: false })); },
     update(g, dt) { for (const b of g.bs) { if (b.dead) continue; b.x += b.vx * dt * g.speed; b.y += b.vy * dt * g.speed; if (b.x < 44 || b.x > VW - 44) b.vx *= -1; if (b.y < 200 || b.y > 560) b.vy *= -1; } },
@@ -155,13 +186,18 @@ const GAMES = [
   { word: "HAMMER!", taps: 4, zone: null,
     start(g) { g.n = 0; },
     tap(g) { g.n++; sfx("tap"); if (g.n >= 4) g.done = true; },
-    draw(g) { ctx.font = "52px sans-serif"; ctx.fillText("🔨", VW / 2, 300); ctx.fillStyle = "#c0c6ce"; ctx.fillRect(VW / 2 - 5, 380, 10, 90 - g.n * 18); ctx.fillStyle = "#8a5a2b"; ctx.fillRect(VW / 2 - 70, 470, 140, 16); ctx.fillStyle = "#fff"; ctx.font = "bold 20px sans-serif"; ctx.fillText("nail: " + g.n + "/4 taps", VW / 2, 550); } },
+    draw(g) { ctx.font = "52px sans-serif"; ctx.fillText("🔨", VW / 2, 300);
+      const ng = ctx.createLinearGradient(VW / 2 - 5, 0, VW / 2 + 5, 0); ng.addColorStop(0, "#e8edf2"); ng.addColorStop(0.5, "#aeb6bf"); ng.addColorStop(1, "#7e8894"); ctx.fillStyle = ng; ctx.fillRect(VW / 2 - 5, 380, 10, 90 - g.n * 18);
+      const wg = ctx.createLinearGradient(0, 470, 0, 486); wg.addColorStop(0, "#b07a3e"); wg.addColorStop(1, "#7c4f22"); ctx.fillStyle = wg; ctx.beginPath(); ctx.roundRect(VW / 2 - 70, 470, 140, 16, 4); ctx.fill();
+      ctx.fillStyle = "#fff"; ctx.font = "bold 20px sans-serif"; ctx.fillText("nail: " + g.n + "/4 taps", VW / 2, 550); } },
   { word: "SLIDE!", taps: 0, zone: null,
     start(g) { g.px = 70; g.gx = 280 + Math.random() * 60; g.held = false; },
     down(g, x, y) { if (Math.hypot(x - g.px, y - 420) < 52) g.held = true; },
     move(g, x) { if (g.held) g.px = Math.max(46, Math.min(VW - 46, x)); },
     up(g) { if (!g.held) return; g.held = false; if (Math.abs(g.px - g.gx) < 40) { g.done = true; sfx("good"); } else { g.fail = true; g.done = true; } },
-    draw(g) { ctx.fillStyle = "#57d977"; ctx.globalAlpha = 0.5; ctx.beginPath(); ctx.arc(g.gx, 420, 40, 0, 7); ctx.fill(); ctx.globalAlpha = 1; ctx.fillStyle = "#fff"; ctx.font = "14px sans-serif"; ctx.fillText("GOAL", g.gx, 424); ctx.font = "46px sans-serif"; ctx.fillText("🥌", g.px, 436); ctx.font = "15px sans-serif"; ctx.fillText("drag the stone into the goal, let go", VW / 2, 560); } }
+    draw(g) { ctx.save(); ctx.shadowColor = "rgba(87,217,119,.8)"; ctx.shadowBlur = 16; ctx.fillStyle = "rgba(87,217,119,.5)"; ctx.beginPath(); ctx.arc(g.gx, 420, 40, 0, 7); ctx.fill(); ctx.restore();
+      ctx.strokeStyle = "rgba(190,255,205,.9)"; ctx.lineWidth = 2.5; ctx.beginPath(); ctx.arc(g.gx, 420, 40, 0, 7); ctx.stroke();
+      ctx.fillStyle = "#fff"; ctx.font = "14px sans-serif"; ctx.fillText("GOAL", g.gx, 424); ctx.font = "46px sans-serif"; ctx.fillText("🥌", g.px, 436); ctx.font = "15px sans-serif"; ctx.fillText("drag the stone into the goal, let go", VW / 2, 560); } }
 ];
 function fairnessCheck() {
   const winAtMax = BASE_WINDOW / MAX_SPEEDUP;
@@ -173,6 +209,21 @@ function fairnessCheck() {
     rows.push(gm.word + " needs " + gm.taps + " taps" + (gm.zone !== null ? ", zone " + Math.round(gm.zone * 100) + "% of sweep" : "") + " — " + (tapOk && zoneOk ? "PASS" : "FAIL"));
   }
   return { ok, rows, winAtMax };
+}
+
+/* ---------------- visual helpers ---------------- */
+// shared glass-panel look for menu / result cards
+function glassPanel(x, y, w, h, r) {
+  ctx.save();
+  ctx.shadowColor = "rgba(0,0,0,.55)"; ctx.shadowBlur = 26; ctx.shadowOffsetY = 10;
+  const g = ctx.createLinearGradient(0, y, 0, y + h);
+  g.addColorStop(0, "rgba(74,54,16,.88)"); g.addColorStop(1, "rgba(30,20,4,.92)");
+  ctx.fillStyle = g; ctx.beginPath(); ctx.roundRect(x, y, w, h, r); ctx.fill();
+  ctx.restore();
+  ctx.lineWidth = 1.5; ctx.strokeStyle = "rgba(255,210,62,.35)";
+  ctx.beginPath(); ctx.roundRect(x, y, w, h, r); ctx.stroke();
+  ctx.strokeStyle = "rgba(255,255,255,.12)"; ctx.lineWidth = 1;
+  ctx.beginPath(); ctx.moveTo(x + r, y + 1); ctx.lineTo(x + w - r, y + 1); ctx.stroke();
 }
 
 /* ---------------- flow ---------------- */
@@ -202,8 +253,8 @@ function update(dt) {
     else { misses++; sfx("bad"); }
     if (misses >= 4) {
       state = "over";
-      const best = parseInt(localStorage.getItem("microMayhemBest") || "0", 10);
-      if (score > best) localStorage.setItem("microMayhemBest", String(score));
+      const best = parseInt(storeGet("microMayhemBest") || "0", 10);
+      if (score > best) storeSet("microMayhemBest", String(score));
       return;
     }
     between = 1; betweenT = 0.85;
@@ -215,37 +266,52 @@ function draw() {
   ctx.setTransform(scale, 0, 0, scale, ox, oy);
   ctx.textAlign = "center";
   if (state === "menu") {
-    ctx.fillStyle = "#ffd23e"; ctx.font = "bold 42px sans-serif"; ctx.fillText("MICRO MAYHEM", VW / 2, 130);
-    ctx.fillStyle = "#fff"; ctx.font = "16px sans-serif";
+    glassPanel(20, 92, VW - 40, 262, 22);
+    const titleG = ctx.createLinearGradient(0, 96, 0, 140); titleG.addColorStop(0, "#ffffff"); titleG.addColorStop(0.55, "#ffe98a"); titleG.addColorStop(1, "#ffb52e");
+    ctx.fillStyle = titleG; ctx.font = "bold 42px sans-serif"; ctx.fillText("MICRO MAYHEM", VW / 2, 130);
+    ctx.fillStyle = "#f5ecd7"; ctx.font = "16px sans-serif";
     ctx.fillText("One word. Four seconds. No mercy.", VW / 2, 168);
     ctx.fillText(GAMES.length + " tiny games, faster every four you clear.", VW / 2, 192);
     ctx.fillText("Four misses and the mayhem ends.", VW / 2, 216);
-    const best = localStorage.getItem("microMayhemBest");
+    const best = storeGet("microMayhemBest");
     if (best) { ctx.font = "bold 17px sans-serif"; ctx.fillText("Best streak: " + best, VW / 2, 262); }
     ctx.font = "bold 21px sans-serif"; ctx.fillText("TAP TO START", VW / 2, 330);
     if (QA_MODE) drawQA();
     return;
   }
   if (state === "over") {
-    ctx.fillStyle = "#ffd23e"; ctx.font = "bold 36px sans-serif"; ctx.fillText("MAYHEM OVER", VW / 2, 300);
+    glassPanel(30, 252, VW - 60, 152, 20);
+    const og = ctx.createLinearGradient(0, 272, 0, 308); og.addColorStop(0, "#ffffff"); og.addColorStop(1, "#ffb52e");
+    ctx.fillStyle = og; ctx.font = "bold 36px sans-serif"; ctx.fillText("MAYHEM OVER", VW / 2, 300);
     ctx.fillStyle = "#fff"; ctx.font = "20px sans-serif"; ctx.fillText("You cleared " + score + " microgames", VW / 2, 344);
-    ctx.font = "16px sans-serif"; ctx.fillText("Tap to play again", VW / 2, 384);
+    ctx.fillStyle = "#e8dcc0"; ctx.font = "16px sans-serif"; ctx.fillText("Tap to play again", VW / 2, 384);
     return;
   }
   if (between > 0) {
-    ctx.fillStyle = lastResult ? "#57d977" : "#e5534b"; ctx.font = "bold 54px sans-serif";
-    ctx.fillText(lastResult ? "✔ NICE!" : "✘ MISS", VW / 2, 350);
+    glassPanel(VW / 2 - 150, 292, 300, 92, 20);
+    ctx.save(); ctx.shadowColor = lastResult ? "rgba(87,217,119,.7)" : "rgba(229,83,75,.7)"; ctx.shadowBlur = 16;
+    ctx.fillStyle = lastResult ? "#7ee787" : "#ff8a80"; ctx.font = "bold 54px sans-serif";
+    ctx.fillText(lastResult ? "✔ NICE!" : "✘ MISS", VW / 2, 356);
+    ctx.restore();
     return;
   }
-  // stage backdrop per game
-  ctx.fillStyle = "#54400f"; ctx.fillRect(24, 120, VW - 48, 520);
-  ctx.strokeStyle = "#ffd23e"; ctx.lineWidth = 3; ctx.strokeRect(24, 120, VW - 48, 520);
+  // stage backdrop per game — gradient arena with a soft inner glow
+  const arenaG = ctx.createLinearGradient(0, 120, 0, 640); arenaG.addColorStop(0, "#6b5013"); arenaG.addColorStop(0.5, "#54400f"); arenaG.addColorStop(1, "#42300a");
+  ctx.fillStyle = arenaG; ctx.beginPath(); ctx.roundRect(24, 120, VW - 48, 520, 18); ctx.fill();
+  ctx.fillStyle = "rgba(255,255,255,.05)";
+  for (let i = 0; i < 26; i++) { const dxp = 44 + (i * 149) % (VW - 96), dyp = 140 + (i * 211) % 480; ctx.beginPath(); ctx.arc(dxp, dyp, 2, 0, 7); ctx.fill(); }
+  ctx.strokeStyle = "rgba(255,210,62,.75)"; ctx.lineWidth = 3; ctx.beginPath(); ctx.roundRect(24, 120, VW - 48, 520, 18); ctx.stroke();
+  ctx.strokeStyle = "rgba(255,255,255,.14)"; ctx.lineWidth = 1; ctx.beginPath(); ctx.roundRect(28, 124, VW - 56, 512, 15); ctx.stroke();
   g.def.draw(g);
   // instruction + timer + lives
-  ctx.fillStyle = "#ffd23e"; ctx.font = "bold 44px sans-serif"; ctx.fillText(g.def.word, VW / 2, 84);
+  ctx.save(); ctx.shadowColor = "rgba(255,210,62,.55)"; ctx.shadowBlur = 16;
+  const wordG = ctx.createLinearGradient(0, 48, 0, 88); wordG.addColorStop(0, "#ffffff"); wordG.addColorStop(0.55, "#ffe98a"); wordG.addColorStop(1, "#ffb52e");
+  ctx.fillStyle = wordG; ctx.font = "bold 44px sans-serif"; ctx.fillText(g.def.word, VW / 2, 84); ctx.restore();
   const frac = Math.max(0, 1 - gTime / gWindow);
-  ctx.fillStyle = "#444"; ctx.fillRect(40, 668, VW - 80, 14);
-  ctx.fillStyle = frac > 0.3 ? "#57d977" : "#e5534b"; ctx.fillRect(40, 668, (VW - 80) * frac, 14);
+  ctx.fillStyle = "rgba(0,0,0,.5)"; ctx.beginPath(); ctx.roundRect(40, 668, VW - 80, 14, 7); ctx.fill();
+  if (frac > 0.01) { const tg = ctx.createLinearGradient(40, 0, VW - 40, 0); if (frac > 0.3) { tg.addColorStop(0, "#8bf79b"); tg.addColorStop(1, "#35b558"); } else { tg.addColorStop(0, "#ff9d5c"); tg.addColorStop(1, "#e5534b"); } ctx.fillStyle = tg; ctx.beginPath(); ctx.roundRect(40, 668, Math.max(14, (VW - 80) * frac), 14, 7); ctx.fill(); }
+  ctx.fillStyle = "rgba(24,16,2,.5)"; ctx.beginPath(); ctx.roundRect(10, 12, VW - 20, 58, 14); ctx.fill();
+  ctx.lineWidth = 1; ctx.strokeStyle = "rgba(255,210,62,.3)"; ctx.beginPath(); ctx.roundRect(10, 12, VW - 20, 58, 14); ctx.stroke();
   ctx.fillStyle = "#fff"; ctx.font = "bold 15px sans-serif"; ctx.textAlign = "left";
   ctx.fillText("CLEARED " + cleared, 26, 40);
   ctx.textAlign = "right";

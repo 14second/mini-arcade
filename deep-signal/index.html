@@ -13,18 +13,29 @@
     font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
     touch-action:none; user-select:none; -webkit-user-select:none; -webkit-tap-highlight-color: transparent; }
   canvas { position:fixed; inset:0; display:block; touch-action:none; }
-  #muteBtn { position:fixed; top:10px; right:10px; z-index:10; width:48px; height:48px; border-radius:12px;
-    border:2px solid rgba(255,255,255,.7); background:rgba(8,18,35,.55); color:#fff; font-size:22px;
+  #muteBtn { position:fixed; top:10px; right:10px; z-index:10; width:48px; height:48px; border-radius:14px;
+    border:1.5px solid rgba(255,255,255,.6);
+    background:linear-gradient(180deg, rgba(40,80,140,.72), rgba(8,18,35,.72));
+    -webkit-backdrop-filter:blur(8px); backdrop-filter:blur(8px);
+    box-shadow:0 6px 18px rgba(0,0,0,.45), inset 0 1px 0 rgba(255,255,255,.25);
+    color:#fff; font-size:22px;
     line-height:1; cursor:pointer; display:flex; align-items:center; justify-content:center; padding:0; }
   #pad { position:fixed; left:0; right:0; bottom:0; z-index:10; display:flex; justify-content:space-between; align-items:flex-end;
     padding:10px 12px calc(10px + env(safe-area-inset-bottom)); }
   .cluster { display:flex; gap:10px; }
-  #pad button { width:62px; height:60px; border-radius:16px; border:2px solid rgba(255,255,255,.45);
-    background:rgba(15,35,60,.8); color:#fff; font-size:22px; cursor:pointer; padding:0; }
-  #pad button:active { background:rgba(45,85,140,.9); }
-  #fireBtn { background:rgba(140,45,30,.85); }
-  #mapBtn { position:fixed; top:66px; right:10px; z-index:10; width:48px; height:48px; border-radius:12px;
-    border:2px solid rgba(255,255,255,.5); background:rgba(8,18,35,.55); color:#fff; font-size:20px; cursor:pointer; }
+  #pad button { width:62px; height:60px; border-radius:16px; border:1.5px solid rgba(255,255,255,.5);
+    background:linear-gradient(180deg, rgba(38,78,128,.88), rgba(12,28,52,.9));
+    -webkit-backdrop-filter:blur(6px); backdrop-filter:blur(6px);
+    box-shadow:0 8px 20px rgba(0,0,0,.4), inset 0 1px 0 rgba(255,255,255,.3);
+    color:#fff; font-size:22px; cursor:pointer; padding:0; }
+  #pad button:active { background:linear-gradient(180deg, rgba(70,120,185,.95), rgba(35,70,120,.95)); transform:translateY(1px); }
+  #fireBtn { background:linear-gradient(180deg, rgba(205,70,45,.92), rgba(120,30,18,.92)); }
+  #mapBtn { position:fixed; top:66px; right:10px; z-index:10; width:48px; height:48px; border-radius:14px;
+    border:1.5px solid rgba(255,255,255,.55);
+    background:linear-gradient(180deg, rgba(40,80,140,.72), rgba(8,18,35,.72));
+    -webkit-backdrop-filter:blur(8px); backdrop-filter:blur(8px);
+    box-shadow:0 6px 18px rgba(0,0,0,.45), inset 0 1px 0 rgba(255,255,255,.25);
+    color:#fff; font-size:20px; cursor:pointer; }
 </style>
 </head>
 <body>
@@ -259,7 +270,10 @@ function fairnessCheck() {
 
 /* ---------------- game state ---------------- */
 let state = "menu", player, bullets, ebolts, walkers, turrets, boss, camX, camY, startT, elapsed, lastT, msg, msgT, showMap, bestTime;
-bestTime = +(localStorage.getItem("deepsignal_best") || 0);
+/* guarded storage — a denied read at startup must not kill the script */
+function storeGet(k) { try { return localStorage.getItem(k); } catch (e) { return null; } }
+function storeSet(k, v) { try { localStorage.setItem(k, v); } catch (e) {} }
+bestTime = +(storeGet("deepsignal_best") || 0);
 let keys = { left: false, right: false };
 let fireHeld = false;
 function resetDynamics() {
@@ -357,7 +371,7 @@ function step(dtms, now) {
     if (b.life > 0) for (const t of turrets) if (t.alive && Math.abs(b.x - (t.c + 0.5) * TILE) < 18 && Math.abs(b.y - (t.r + 0.5) * TILE) < 18) { t.hp--; b.life = 0; if (t.hp <= 0) { t.alive = false; sfx("crack"); } break; }
     if (b.life > 0 && boss.alive && Math.abs(b.x - (boss.c + 0.5) * TILE) < 32 && Math.abs(b.y - (boss.r + 0.5) * TILE) < 30) {
       boss.hp--; b.life = 0;
-      if (boss.hp <= 0) { boss.alive = false; sfx("boom"); state = "win"; if (!bestTime || elapsed < bestTime) { bestTime = Math.round(elapsed); localStorage.setItem("deepsignal_best", bestTime); } }
+      if (boss.hp <= 0) { boss.alive = false; sfx("boom"); state = "win"; if (!bestTime || elapsed < bestTime) { bestTime = Math.round(elapsed); storeSet("deepsignal_best", bestTime); } }
     }
   }
   bullets = bullets.filter(b => b.life > 0);
@@ -421,6 +435,34 @@ function doJump() {
 }
 
 /* ---------------- draw ---------------- */
+/* Safe gradient wrappers: a canvas stub whose create*Gradient returns a
+   plain object (no addColorStop) must not throw — fall back to flat color. */
+function linG(x0, y0, x1, y1, stops) {
+  try { const g = ctx.createLinearGradient(x0, y0, x1, y1);
+    if (!g || typeof g.addColorStop !== "function") return stops[stops.length - 1][1];
+    for (const s of stops) g.addColorStop(s[0], s[1]); return g;
+  } catch (e) { return stops[stops.length - 1][1]; }
+}
+function radG(x0, y0, r0, x1, y1, r1, stops) {
+  try { const g = ctx.createRadialGradient(x0, y0, r0, x1, y1, r1);
+    if (!g || typeof g.addColorStop !== "function") return stops[stops.length - 1][1];
+    for (const s of stops) g.addColorStop(s[0], s[1]); return g;
+  } catch (e) { return stops[stops.length - 1][1]; }
+}
+function rr(x, y, w, h, r) {
+  ctx.beginPath(); ctx.moveTo(x + r, y);
+  ctx.arcTo(x + w, y, x + w, y + h, r); ctx.arcTo(x + w, y + h, x, y + h, r);
+  ctx.arcTo(x, y + h, x, y, r); ctx.arcTo(x, y, x + w, y, r); ctx.closePath();
+}
+/* shared glass-panel look for menu / win / map cards */
+function glassPanel(x, y, w, h, r) {
+  ctx.save(); ctx.shadowColor = "rgba(0,2,10,.55)"; ctx.shadowBlur = 26; ctx.shadowOffsetY = 10;
+  ctx.fillStyle = linG(0, y, 0, y + h, [[0, "rgba(16,30,56,.92)"], [1, "rgba(5,10,22,.94)"]]);
+  rr(x, y, w, h, r); ctx.fill(); ctx.restore();
+  ctx.lineWidth = 1.5; ctx.strokeStyle = "rgba(140,190,255,.30)"; rr(x, y, w, h, r); ctx.stroke();
+  ctx.strokeStyle = "rgba(255,255,255,.10)"; ctx.lineWidth = 1;
+  ctx.beginPath(); ctx.moveTo(x + r, y + 1); ctx.lineTo(x + w - r, y + 1); ctx.stroke();
+}
 function draw(now) {
   ctx.setTransform(1, 0, 0, 1, 0, 0);
   ctx.fillStyle = "#060a14"; ctx.fillRect(0, 0, canvas.width, canvas.height);
@@ -432,60 +474,98 @@ function draw(now) {
   for (let r = r0; r <= r1; r++) for (let c = c0; c <= c1; c++) {
     const t = grid[r][c], x = c * TILE, y = r * TILE;
     if (t === "#") {
-      ctx.fillStyle = "#26355c"; ctx.fillRect(x, y, TILE, TILE);
-      ctx.fillStyle = "#33477a"; ctx.fillRect(x, y, TILE, 4);
-      ctx.fillStyle = "#1a2745"; ctx.fillRect(x + TILE - 4, y, 4, TILE);
+      ctx.fillStyle = linG(0, y, 0, y + TILE, [[0, "#31497a"], [0.5, "#26355c"], [1, "#1b2947"]]);
+      ctx.fillRect(x, y, TILE, TILE);
+      ctx.fillStyle = "rgba(140,180,255,.35)"; ctx.fillRect(x, y, TILE, 3);
+      ctx.fillStyle = "rgba(0,0,0,.28)"; ctx.fillRect(x + TILE - 4, y, 4, TILE); ctx.fillRect(x, y + TILE - 3, TILE, 3);
+      ctx.fillStyle = "rgba(160,200,255,.20)"; ctx.beginPath(); ctx.arc(x + 6, y + TILE - 6, 1.6, 0, 7); ctx.fill();
     } else {
       ctx.fillStyle = ((r + c) % 2) ? "#0d1730" : "#0c1428"; ctx.fillRect(x, y, TILE, TILE);
-      if (t === "B") { ctx.fillStyle = "#8a6a3a"; ctx.fillRect(x + 1, y + 1, TILE - 2, TILE - 2); ctx.strokeStyle = "#3a2c14"; ctx.lineWidth = 2; ctx.beginPath(); ctx.moveTo(x + 5, y + 4); ctx.lineTo(x + 16, y + 15); ctx.lineTo(x + 11, y + 26); ctx.moveTo(x + 25, y + 6); ctx.lineTo(x + 16, y + 15); ctx.stroke(); }
+      if (t === "B") {
+        ctx.fillStyle = linG(0, y, 0, y + TILE, [[0, "#a37f47"], [1, "#75552a"]]);
+        ctx.fillRect(x + 1, y + 1, TILE - 2, TILE - 2);
+        ctx.fillStyle = "rgba(255,230,170,.30)"; ctx.fillRect(x + 1, y + 1, TILE - 2, 2);
+        ctx.strokeStyle = "#3a2c14"; ctx.lineWidth = 2; ctx.beginPath(); ctx.moveTo(x + 5, y + 4); ctx.lineTo(x + 16, y + 15); ctx.lineTo(x + 11, y + 26); ctx.moveTo(x + 25, y + 6); ctx.lineTo(x + 16, y + 15); ctx.stroke();
+      }
       if (t === "D") {
         const open = player && player.blaster && player.djump;
+        ctx.save(); ctx.shadowColor = open ? "rgba(57,211,83,.8)" : "rgba(232,74,120,.8)"; ctx.shadowBlur = 10;
         ctx.fillStyle = open ? "rgba(57,211,83,.25)" : "rgba(232,74,120,.35)"; ctx.fillRect(x + 2, y, TILE - 4, TILE);
         ctx.strokeStyle = open ? "#39d353" : "#e84a78"; ctx.lineWidth = 2; ctx.strokeRect(x + 3, y + 2, TILE - 6, TILE - 4);
+        ctx.restore();
       }
     }
   }
+  // depth overlay over the visible world: cool light above, shade below (visual only)
+  ctx.fillStyle = linG(0, cy, 0, cy + VH, [[0, "rgba(120,180,255,.06)"], [0.6, "rgba(0,0,0,0)"], [1, "rgba(0,0,10,.22)"]]);
+  ctx.fillRect(cx, cy, VW, VH);
   for (const pk of WORLD.feats.pickups) {
     if (pk.taken) continue;
     const px = (pk.c + 0.5) * TILE, py = (pk.r + 0.5) * TILE + Math.sin(now / 300 + pk.c) * 3;
-    ctx.fillStyle = pk.kind === "health" ? "#39d353" : "#ffd94a";
-    ctx.beginPath(); ctx.arc(px, py, 11, 0, 7); ctx.fill();
+    ctx.save(); ctx.shadowColor = pk.kind === "health" ? "rgba(57,211,83,.9)" : "rgba(255,217,74,.9)"; ctx.shadowBlur = 16;
+    ctx.fillStyle = pk.kind === "health"
+      ? radG(px - 3, py - 3, 1, px, py, 12, [[0, "#b6ffc4"], [0.5, "#39d353"], [1, "#1e8f3a"]])
+      : radG(px - 3, py - 3, 1, px, py, 12, [[0, "#fff3b0"], [0.5, "#ffd94a"], [1, "#e8a41c"]]);
+    ctx.beginPath(); ctx.arc(px, py, 11, 0, 7); ctx.fill(); ctx.restore();
     ctx.fillStyle = "#14213d"; ctx.font = "700 13px system-ui"; ctx.textAlign = "center";
     ctx.fillText(pk.kind === "blaster" ? "🔥" : pk.kind === "djump" ? "⬆" : "✚", px, py + 5);
   }
   for (const w of walkers) {
     if (w.hp <= 0) continue;
-    ctx.fillStyle = "#e8734a"; ctx.fillRect(w.x - 11, w.y - 20, 22, 16);
-    ctx.fillStyle = "#ffd94a"; ctx.beginPath(); ctx.arc(w.x, w.y - 24, 6, 0, 7); ctx.fill();
+    ctx.fillStyle = "rgba(0,0,0,.3)"; ctx.beginPath(); ctx.ellipse(w.x, w.y - 1, 12, 3.5, 0, 0, 7); ctx.fill();
+    ctx.fillStyle = linG(0, w.y - 22, 0, w.y - 4, [[0, "#ff9a66"], [1, "#d6542e"]]);
+    rr(w.x - 11, w.y - 20, 22, 16, 6); ctx.fill();
+    ctx.fillStyle = radG(w.x - 2, w.y - 27, 1, w.x, w.y - 24, 7, [[0, "#fff3b0"], [1, "#f0a51e"]]);
+    ctx.beginPath(); ctx.arc(w.x, w.y - 24, 6, 0, 7); ctx.fill();
     ctx.fillStyle = "#222"; ctx.fillRect(w.x - 9, w.y - 4, 6, 4); ctx.fillRect(w.x + 3, w.y - 4, 6, 4);
   }
   for (const t of turrets) {
     if (!t.alive) continue;
     const tx = (t.c + 0.5) * TILE, ty = (t.r + 1) * TILE;
-    ctx.fillStyle = "#7a4a8e"; ctx.fillRect(tx - 13, ty - 24, 26, 24);
-    ctx.fillStyle = "#e84a78"; ctx.beginPath(); ctx.arc(tx, ty - 26, 6, 0, 7); ctx.fill();
+    ctx.fillStyle = "rgba(0,0,0,.3)"; ctx.beginPath(); ctx.ellipse(tx, ty - 1, 14, 3.5, 0, 0, 7); ctx.fill();
+    ctx.fillStyle = linG(0, ty - 24, 0, ty, [[0, "#9a63b0"], [1, "#5e3570"]]);
+    rr(tx - 13, ty - 24, 26, 24, 5); ctx.fill();
+    ctx.save(); ctx.shadowColor = "rgba(232,74,120,.9)"; ctx.shadowBlur = 10;
+    ctx.fillStyle = radG(tx - 2, ty - 28, 1, tx, ty - 26, 7, [[0, "#ffc2d4"], [1, "#e84a78"]]);
+    ctx.beginPath(); ctx.arc(tx, ty - 26, 6, 0, 7); ctx.fill(); ctx.restore();
   }
   if (boss && boss.alive) {
     const bx = (boss.c + 0.5) * TILE, by = (boss.r + 1) * TILE;
-    ctx.fillStyle = "#5c2a3a"; ctx.fillRect(bx - 28, by - 52, 56, 52);
-    ctx.fillStyle = "#e84a4a"; ctx.beginPath(); ctx.arc(bx, by - 54, 10, 0, 7); ctx.fill();
-    ctx.fillStyle = "#222"; ctx.fillRect(bx - 28, by - 66, 56, 8);
-    ctx.fillStyle = "#e84a4a"; ctx.fillRect(bx - 28, by - 66, 56 * Math.max(0, boss.hp / 22), 8);
+    ctx.fillStyle = "rgba(0,0,0,.35)"; ctx.beginPath(); ctx.ellipse(bx, by - 1, 30, 5, 0, 0, 7); ctx.fill();
+    ctx.fillStyle = linG(0, by - 52, 0, by, [[0, "#7a3548"], [1, "#451d29"]]);
+    rr(bx - 28, by - 52, 56, 52, 8); ctx.fill();
+    ctx.fillStyle = "rgba(255,180,180,.25)"; ctx.fillRect(bx - 20, by - 46, 40, 3);
+    ctx.save(); ctx.shadowColor = "rgba(232,74,74,.95)"; ctx.shadowBlur = 14;
+    ctx.fillStyle = radG(bx - 3, by - 57, 2, bx, by - 54, 11, [[0, "#ffc9c9"], [0.5, "#e84a4a"], [1, "#a02020"]]);
+    ctx.beginPath(); ctx.arc(bx, by - 54, 10, 0, 7); ctx.fill(); ctx.restore();
+    ctx.fillStyle = "#222"; rr(bx - 28, by - 66, 56, 8, 4); ctx.fill();
+    if (boss.hp > 0) { ctx.fillStyle = linG(bx - 28, 0, bx + 28, 0, [[0, "#ff8a5c"], [1, "#e84a4a"]]); rr(bx - 28, by - 66, 56 * Math.max(0, boss.hp / 22), 8, 4); ctx.fill(); }
   }
+  ctx.save(); ctx.shadowColor = "rgba(255,226,122,.9)"; ctx.shadowBlur = 8;
   ctx.fillStyle = "#ffe27a"; for (const b of bullets) { ctx.fillRect(b.x - 4, b.y - 2, 9, 4); }
+  ctx.restore();
+  ctx.save(); ctx.shadowColor = "rgba(255,138,176,.9)"; ctx.shadowBlur = 8;
   ctx.fillStyle = "#ff8ab0"; for (const b of ebolts) { ctx.beginPath(); ctx.arc(b.x, b.y, 5, 0, 7); ctx.fill(); }
+  ctx.restore();
   if (player && state !== "menu") {
     const p = player, blink = p.invulnT > 0 && Math.floor(now / 110) % 2 === 0;
     if (!blink && !p.dead) {
-      ctx.fillStyle = "#3fa7e8"; ctx.fillRect(p.x - 10, p.y - 26, 20, 20);
-      ctx.fillStyle = "#cfe8ff"; ctx.fillRect(p.x - 10, p.y - 26, 20, 7);
+      ctx.fillStyle = "rgba(0,0,0,.3)"; ctx.beginPath(); ctx.ellipse(p.x, p.y + 1, 11, 3.2, 0, 0, 7); ctx.fill();
+      ctx.fillStyle = linG(0, p.y - 26, 0, p.y - 6, [[0, "#6fc2f5"], [1, "#2b7fc4"]]);
+      rr(p.x - 10, p.y - 26, 20, 20, 6); ctx.fill();
+      ctx.fillStyle = linG(0, p.y - 24, 0, p.y - 18, [[0, "#eaf7ff"], [1, "#9fd0f5"]]);
+      rr(p.x - 7, p.y - 24, 14, 6, 3); ctx.fill();
       ctx.fillStyle = "#28418c"; ctx.fillRect(p.x - 9, p.y - 6, 7, 6); ctx.fillRect(p.x + 2, p.y - 6, 7, 6);
-      if (p.blaster) { ctx.fillStyle = "#ffd94a"; ctx.fillRect(p.x + p.face * 8 - (p.face < 0 ? 12 : 0), p.y - 17, 13, 5); }
+      if (p.blaster) {
+        ctx.fillStyle = linG(0, p.y - 17, 0, p.y - 12, [[0, "#ffe98a"], [1, "#e8a41c"]]);
+        rr(p.x + p.face * 8 - (p.face < 0 ? 12 : 0), p.y - 17, 13, 5, 2); ctx.fill();
+      }
     }
   }
   ctx.restore();
-  // HUD
-  ctx.fillStyle = "rgba(0,0,0,.45)"; ctx.fillRect(0, 0, VW, 58);
+  // HUD — frosted pill bar
+  ctx.fillStyle = "rgba(4,10,22,.55)"; rr(8, 8, VW - 16, 50, 14); ctx.fill();
+  ctx.lineWidth = 1; ctx.strokeStyle = "rgba(140,190,255,.30)"; rr(8, 8, VW - 16, 50, 14); ctx.stroke();
   ctx.fillStyle = "#fff"; ctx.font = "700 17px system-ui"; ctx.textAlign = "left";
   ctx.fillText("DEEP SIGNAL", 14, 25);
   ctx.font = "600 13px system-ui"; ctx.fillStyle = "#a9c6e8";
@@ -496,12 +576,13 @@ function draw(now) {
     ctx.fillText((player.blaster ? "🔥 Blaster  " : "") + (player.djump ? "⬆⬆ Double Jump  " : "") + "⏱ " + Math.floor(elapsed || 0) + "s", 120, 48);
   }
   if (msg && performance.now() - msgT < 2200 && state === "play") {
-    ctx.fillStyle = "rgba(0,0,0,.6)"; ctx.fillRect(0, 300, VW, 44);
+    ctx.fillStyle = "rgba(4,10,22,.65)"; rr(VW / 2 - 190, 300, 380, 44, 22); ctx.fill();
+    ctx.lineWidth = 1; ctx.strokeStyle = "rgba(255,217,74,.4)"; rr(VW / 2 - 190, 300, 380, 44, 22); ctx.stroke();
     ctx.fillStyle = "#ffd94a"; ctx.font = "800 19px system-ui"; ctx.textAlign = "center";
     ctx.fillText(msg, VW / 2, 329);
   }
   if (showMap && state === "play") {
-    ctx.fillStyle = "rgba(4,8,18,.92)"; ctx.fillRect(20, 90, VW - 40, 400);
+    glassPanel(20, 90, VW - 40, 400, 16);
     const mw = (VW - 60) / MW, mh = (400 - 60) / MH;
     for (let r = 0; r < MH; r++) for (let c = 0; c < MW; c++) {
       const t = grid[r][c];
@@ -514,8 +595,9 @@ function draw(now) {
     ctx.fillText("STATION MAP — you are the white dot", VW / 2, 478);
   }
   if (state === "menu") {
-    ctx.fillStyle = "rgba(4,8,18,.85)"; ctx.fillRect(0, 190, VW, 280);
-    ctx.fillStyle = "#fff"; ctx.font = "700 32px system-ui"; ctx.textAlign = "center";
+    glassPanel(10, 190, VW - 20, 280, 20);
+    ctx.fillStyle = linG(0, 226, 0, 258, [[0, "#ffffff"], [1, "#a9d4ff"]]);
+    ctx.font = "700 32px system-ui"; ctx.textAlign = "center";
     ctx.fillText("DEEP SIGNAL", VW / 2, 256);
     ctx.font = "400 16px system-ui"; ctx.fillStyle = "#c4d6f2";
     ctx.fillText("Explore the station. Find the BLASTER to crack", VW / 2, 292);
@@ -525,8 +607,9 @@ function draw(now) {
     ctx.fillText("TAP TO START", VW / 2, 402);
   }
   if (state === "win") {
-    ctx.fillStyle = "rgba(4,8,18,.88)"; ctx.fillRect(0, 210, VW, 250);
-    ctx.fillStyle = "#ffd94a"; ctx.font = "700 30px system-ui"; ctx.textAlign = "center";
+    glassPanel(10, 210, VW - 20, 250, 20);
+    ctx.fillStyle = linG(0, 250, 0, 282, [[0, "#fff3b0"], [1, "#ffd94a"]]);
+    ctx.font = "700 30px system-ui"; ctx.textAlign = "center";
     ctx.fillText("SIGNAL RESTORED! 🏆", VW / 2, 280);
     ctx.font = "400 17px system-ui"; ctx.fillStyle = "#c4d6f2";
     ctx.fillText("Boss down in " + Math.floor(elapsed) + "s" + (bestTime ? " · Best " + bestTime + "s" : ""), VW / 2, 318);
@@ -574,8 +657,8 @@ window.addEventListener("keyup", e => {
 });
 const muteBtn = document.getElementById("muteBtn");
 function syncMute() { muteBtn.textContent = muted ? "🔇" : "🔊"; }
-muteBtn.addEventListener("click", e => { e.stopPropagation(); muted = !muted; localStorage.setItem("deepsignal_muted", muted ? 1 : 0); syncMute(); });
-muted = localStorage.getItem("deepsignal_muted") === "1"; syncMute();
+muteBtn.addEventListener("click", e => { e.stopPropagation(); muted = !muted; storeSet("deepsignal_muted", muted ? 1 : 0); syncMute(); });
+muted = storeGet("deepsignal_muted") === "1"; syncMute();
 camX = 0; camY = 0; player = null; showMap = false;
 walkers = []; turrets = []; bullets = []; ebolts = []; boss = { alive: false, hp: 0, c: 0, r: 0 };
 if (QA_MODE) fairnessCheck();

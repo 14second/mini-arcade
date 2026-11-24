@@ -9,23 +9,27 @@
 <title>Title Bout</title>
 <style>
   * { margin:0; padding:0; box-sizing:border-box; }
-  html, body { width:100%; height:100%; overflow:hidden; background:#20304a;
+  html, body { width:100%; height:100%; overflow:hidden;
+    background: radial-gradient(120% 90% at 50% 0%, #33507c 0%, rgba(51,80,124,0) 55%), linear-gradient(180deg, #182538 0%, #101a2c 60%, #0a111f 100%);
     font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
     touch-action:none; user-select:none; -webkit-user-select:none; -webkit-tap-highlight-color: transparent; }
   canvas { position:fixed; inset:0; display:block; touch-action:none; }
   #muteBtn { position:fixed; top:10px; right:10px; z-index:10; width:48px; height:48px; border-radius:12px;
-    border:2px solid rgba(255,255,255,.7); background:rgba(20,30,50,.5); color:#fff; font-size:22px;
+    border:2px solid rgba(255,255,255,.6); background:linear-gradient(180deg, rgba(64,86,128,.65), rgba(16,24,42,.65)); color:#fff; font-size:22px;
+    box-shadow:0 8px 22px rgba(0,0,0,.45), inset 0 1px 0 rgba(255,255,255,.3); backdrop-filter:blur(6px); -webkit-backdrop-filter:blur(6px);
     line-height:1; cursor:pointer; display:flex; align-items:center; justify-content:center; padding:0; }
   .ctl { position:fixed; z-index:10; width:60px; height:60px; border-radius:50%;
-    border:2px solid rgba(255,255,255,.7); background:rgba(20,30,50,.45); color:#fff; font-size:16px; font-weight:700;
+    border:2px solid rgba(255,255,255,.6); background:linear-gradient(180deg, rgba(70,94,140,.55), rgba(16,24,42,.55)); color:#fff; font-size:16px; font-weight:700;
+    box-shadow:0 10px 24px rgba(0,0,0,.45), inset 0 1px 0 rgba(255,255,255,.3), inset 0 -8px 14px rgba(0,0,0,.25); backdrop-filter:blur(5px); -webkit-backdrop-filter:blur(5px);
     display:flex; align-items:center; justify-content:center; }
   .ctl:active { background:rgba(255,255,255,.35); }
   #btnDL { left:12px; bottom:96px; } #btnDR { left:84px; bottom:96px; }
   #btnDuck { left:12px; bottom:24px; } #btnBlock { left:84px; bottom:24px; }
-  #btnJL { right:84px; bottom:96px; background:rgba(200,60,50,.5); } #btnJR { right:12px; bottom:96px; background:rgba(200,60,50,.5); }
+  #btnJL { right:84px; bottom:96px; background:linear-gradient(180deg, rgba(232,90,74,.72), rgba(150,32,24,.72)); } #btnJR { right:12px; bottom:96px; background:linear-gradient(180deg, rgba(232,90,74,.72), rgba(150,32,24,.72)); }
   #btnJL2 { display:none; }
   #btnPower { left:50%; transform:translateX(-50%); bottom:170px; width:84px; height:84px; font-size:15px;
-    background:rgba(250,180,20,.75); color:#221a00; display:none; }
+    background:linear-gradient(180deg, rgba(255,214,80,.92), rgba(232,150,16,.92)); color:#221a00; display:none;
+    box-shadow:0 12px 30px rgba(0,0,0,.5), 0 0 22px rgba(255,200,40,.45), inset 0 1px 0 rgba(255,255,255,.55); }
 </style>
 </head>
 <body>
@@ -180,8 +184,12 @@ function fairnessCheck() {
 
 /* ---------------- state ---------------- */
 let state = "menu"; // menu, fight, downCount, roundBreak, fightOver
-let rung = parseInt(localStorage.getItem("titleBoutRung") || "0", 10); // highest beaten index; -1 none beaten => store beatenCount
-let beaten = parseInt(localStorage.getItem("titleBoutBeaten") || "0", 10);
+// Guarded storage: a throwing read at startup (storage denied) would kill
+// the whole script, so every access goes through try/catch — same keys.
+function storeGet(k) { try { return localStorage.getItem(k); } catch (e) { return null; } }
+function storeSet(k, v) { try { localStorage.setItem(k, v); } catch (e) {} }
+let rung = parseInt(storeGet("titleBoutRung") || "0", 10); // highest beaten index; -1 none beaten => store beatenCount
+let beaten = parseInt(storeGet("titleBoutBeaten") || "0", 10);
 let oppIdx = 0, opp = null;
 let player, enemy, round, roundT, msg, msgT, shake;
 function newPlayer() { return { hp: 100, maxHp: 100, downs: 0, state: "idle", t: 0, x: 0, duck: 0, token: false, combo: 0 }; }
@@ -197,7 +205,7 @@ function startFight(i) {
 }
 function endFight(won, how) {
   state = "fightOver"; msg = won ? ("KO! You beat " + opp.name + " — " + how) : ("Down for the count — " + how);
-  if (won) { sfx("win"); if (oppIdx + 1 > beaten) { beaten = oppIdx + 1; localStorage.setItem("titleBoutBeaten", String(beaten)); } }
+  if (won) { sfx("win"); if (oppIdx + 1 > beaten) { beaten = oppIdx + 1; storeSet("titleBoutBeaten", String(beaten)); } }
   else sfx("down");
 }
 
@@ -351,27 +359,85 @@ function update(dt) {
 }
 let breakT = 0;
 
+/* ---------------- draw helpers (visual only) ---------------- */
+// Safe gradient wrappers: if a canvas stub returns a plain object without
+// addColorStop, patch it so drawing can never throw (real browsers unaffected).
+function gradL(x0, y0, x1, y1) {
+  try {
+    const g = ctx.createLinearGradient(x0, y0, x1, y1);
+    if (g && typeof g.addColorStop !== "function") { try { g.addColorStop = function () {}; } catch (e) { return { addColorStop: function () {} }; } }
+    return g;
+  } catch (e) { return { addColorStop: function () {} }; }
+}
+function gradR(x0, y0, r0, x1, y1, r1) {
+  try {
+    const g = ctx.createRadialGradient(x0, y0, r0, x1, y1, r1);
+    if (g && typeof g.addColorStop !== "function") { try { g.addColorStop = function () {}; } catch (e) { return { addColorStop: function () {} }; } }
+    return g;
+  } catch (e) { return { addColorStop: function () {} }; }
+}
+function shade(hex, amt) {
+  const n = parseInt(String(hex).slice(1), 16);
+  if (isNaN(n)) return hex;
+  const f = v => Math.max(0, Math.min(255, v + amt));
+  return "rgb(" + f(n >> 16) + "," + f((n >> 8) & 255) + "," + f(n & 255) + ")";
+}
+function glassPanel(x, y, w, h, r) {
+  ctx.save();
+  ctx.shadowColor = "rgba(3,6,14,.5)"; ctx.shadowBlur = 26; ctx.shadowOffsetY = 9;
+  const g = gradL(0, y, 0, y + h);
+  g.addColorStop(0, "rgba(30,44,70,.88)"); g.addColorStop(1, "rgba(10,16,28,.92)");
+  ctx.fillStyle = g;
+  ctx.beginPath(); ctx.roundRect(x, y, w, h, r); ctx.fill();
+  ctx.restore();
+  ctx.lineWidth = 1.5; ctx.strokeStyle = "rgba(255,255,255,.16)";
+  ctx.beginPath(); ctx.roundRect(x, y, w, h, r); ctx.stroke();
+}
+
 /* ---------------- draw ---------------- */
 function drawFighter(x, y, s, def, flash, pose, faceDown) {
   ctx.save(); ctx.translate(x, y); ctx.scale(s, s);
   if (faceDown) { ctx.rotate(Math.PI / 2.2); ctx.globalAlpha = 0.9; }
-  // legs / shorts
-  ctx.fillStyle = def.color; ctx.fillRect(-34, 62, 26, 52); ctx.fillRect(8, 62, 26, 52);
-  ctx.fillStyle = "#f5f5f5"; ctx.fillRect(-40, 48, 80, 18);
-  // torso
-  ctx.fillStyle = def.skin; ctx.beginPath(); ctx.roundRect(-42, -28, 84, 82, 18); ctx.fill();
+  // soft contact shadow on the canvas
+  ctx.fillStyle = "rgba(10,6,4,.28)";
+  ctx.beginPath(); ctx.ellipse(0, 118, 52, 9, 0, 0, 7); ctx.fill();
+  // legs / shorts — shaded gradient in the fighter's own colour
+  const shortG = gradL(0, 48, 0, 116);
+  shortG.addColorStop(0, shade(def.color, 34)); shortG.addColorStop(0.5, def.color); shortG.addColorStop(1, shade(def.color, -38));
+  ctx.fillStyle = shortG; ctx.fillRect(-34, 62, 26, 52); ctx.fillRect(8, 62, 26, 52);
+  const beltG = gradL(0, 48, 0, 66);
+  beltG.addColorStop(0, "#ffffff"); beltG.addColorStop(1, "#cfd4dc");
+  ctx.fillStyle = beltG; ctx.fillRect(-40, 48, 80, 18);
+  ctx.fillStyle = "rgba(0,0,0,.14)"; ctx.fillRect(-40, 62, 80, 4);
+  // torso — skin gradient with a soft top light
+  const torsoG = gradL(0, -28, 0, 54);
+  torsoG.addColorStop(0, shade(def.skin, 26)); torsoG.addColorStop(0.6, def.skin); torsoG.addColorStop(1, shade(def.skin, -30));
+  ctx.fillStyle = torsoG; ctx.beginPath(); ctx.roundRect(-42, -28, 84, 82, 18); ctx.fill();
+  ctx.fillStyle = "rgba(255,255,255,.16)";
+  ctx.beginPath(); ctx.ellipse(-14, -8, 15, 24, 0.2, 0, 7); ctx.fill();
   // head
+  const headG = gradR(-9, -70, 6, 0, -58, 30);
+  headG.addColorStop(0, shade(def.skin, 30)); headG.addColorStop(0.65, def.skin); headG.addColorStop(1, shade(def.skin, -24));
+  ctx.fillStyle = headG;
   ctx.beginPath(); ctx.arc(0, -58, 27, 0, 7); ctx.fill();
-  ctx.fillStyle = "#222"; ctx.beginPath(); ctx.arc(0, -74, 27, Math.PI, 0); ctx.fill(); // hair cap
+  const hairG = gradL(0, -86, 0, -70);
+  hairG.addColorStop(0, "#4a4a52"); hairG.addColorStop(1, "#17171c");
+  ctx.fillStyle = hairG; ctx.beginPath(); ctx.arc(0, -74, 27, Math.PI, 0); ctx.fill(); // hair cap
   // eyes (angry brows)
   ctx.strokeStyle = "#222"; ctx.lineWidth = 4;
   ctx.beginPath(); ctx.moveTo(-16, -62); ctx.lineTo(-4, -58); ctx.moveTo(16, -62); ctx.lineTo(4, -58); ctx.stroke();
-  // gloves by pose
-  ctx.fillStyle = flash > 0 ? "#fff" : "#c0271b";
+  // gloves by pose — glossy radial leather
   const gy = pose === "telegraph" ? -6 : pose === "attack" ? 26 : 6;
   const gx = pose === "attack" ? 6 : 30;
-  ctx.beginPath(); ctx.arc(-gx, gy, 17, 0, 7); ctx.fill();
-  ctx.beginPath(); ctx.arc(gx, gy, 17, 0, 7); ctx.fill();
+  for (const sgn of [-1, 1]) {
+    const gl = gradR(sgn * gx - 6, gy - 7, 3, sgn * gx, gy, 19);
+    if (flash > 0) { gl.addColorStop(0, "#ffffff"); gl.addColorStop(1, "#d8d8d8"); }
+    else { gl.addColorStop(0, "#e85a4c"); gl.addColorStop(0.55, "#c0271b"); gl.addColorStop(1, "#7e130c"); }
+    ctx.fillStyle = gl;
+    ctx.beginPath(); ctx.arc(sgn * gx, gy, 17, 0, 7); ctx.fill();
+    ctx.fillStyle = "rgba(255,255,255,.5)";
+    ctx.beginPath(); ctx.arc(sgn * gx - 5, gy - 6, 5, 0, 7); ctx.fill();
+  }
   if (pose === "telegraph") { // wind-up glow tell
     ctx.strokeStyle = "rgba(255,220,60,.95)"; ctx.lineWidth = 5;
     ctx.beginPath(); ctx.arc(0, -10, 74, 0, 7); ctx.stroke();
@@ -383,38 +449,86 @@ function drawFighter(x, y, s, def, flash, pose, faceDown) {
   ctx.restore();
 }
 function bar(x, y, w, frac, color, label) {
-  ctx.fillStyle = "rgba(0,0,0,.45)"; ctx.fillRect(x - 2, y - 2, w + 4, 18);
-  ctx.fillStyle = "#444"; ctx.fillRect(x, y, w, 14);
-  ctx.fillStyle = color; ctx.fillRect(x, y, w * Math.max(0, frac), 14);
-  ctx.fillStyle = "#fff"; ctx.font = "bold 12px sans-serif"; ctx.textAlign = "left"; ctx.fillText(label, x, y - 6);
+  ctx.save();
+  ctx.shadowColor = "rgba(3,6,14,.45)"; ctx.shadowBlur = 10; ctx.shadowOffsetY = 3;
+  ctx.fillStyle = "rgba(8,12,22,.55)";
+  ctx.beginPath(); ctx.roundRect(x - 3, y - 3, w + 6, 20, 9); ctx.fill();
+  ctx.restore();
+  ctx.lineWidth = 1; ctx.strokeStyle = "rgba(255,255,255,.28)";
+  ctx.beginPath(); ctx.roundRect(x - 3, y - 3, w + 6, 20, 9); ctx.stroke();
+  ctx.fillStyle = "rgba(255,255,255,.10)"; ctx.fillRect(x, y, w, 14);
+  const fg = gradL(0, y, 0, y + 14);
+  fg.addColorStop(0, shade(color, 55)); fg.addColorStop(0.5, color); fg.addColorStop(1, shade(color, -35));
+  ctx.fillStyle = fg;
+  if (frac > 0.01) { ctx.beginPath(); ctx.roundRect(x, y, Math.max(8, w * Math.max(0, frac)), 14, 6); ctx.fill(); }
+  ctx.fillStyle = "rgba(255,255,255,.35)"; ctx.fillRect(x + 2, y + 2, Math.max(0, w * Math.max(0, frac) - 4), 4);
+  ctx.fillStyle = "#fff"; ctx.font = "bold 12px sans-serif"; ctx.textAlign = "left";
+  ctx.save(); ctx.shadowColor = "rgba(0,0,0,.6)"; ctx.shadowBlur = 4;
+  ctx.fillText(label, x, y - 6);
+  ctx.restore();
 }
 function draw() {
   ctx.setTransform(1, 0, 0, 1, 0, 0);
-  ctx.fillStyle = "#20304a"; ctx.fillRect(0, 0, canvas.width, canvas.height);
+  const bgOut = gradL(0, 0, 0, canvas.height);
+  bgOut.addColorStop(0, "#263b5e"); bgOut.addColorStop(1, "#101a2c");
+  ctx.fillStyle = bgOut; ctx.fillRect(0, 0, canvas.width, canvas.height);
   ctx.setTransform(scale, 0, 0, scale, ox + (shake > 0 ? (Math.random() - 0.5) * 10 * scale : 0), oy);
-  // arena
-  const g = ctx.createLinearGradient(0, 0, 0, VH);
-  g.addColorStop(0, "#141c2e"); g.addColorStop(0.55, "#2c3e5d"); g.addColorStop(0.56, "#7a4a34"); g.addColorStop(1, "#5d3826");
+  // arena — dark crowd bowl up top, warm ring canvas below
+  const g = gradL(0, 0, 0, VH);
+  g.addColorStop(0, "#0c1220"); g.addColorStop(0.30, "#1d2c47"); g.addColorStop(0.55, "#2c3e5d"); g.addColorStop(0.56, "#8a5a3c"); g.addColorStop(1, "#4e2f1e");
   ctx.fillStyle = g; ctx.fillRect(0, 0, VW, VH);
-  ctx.fillStyle = "rgba(255,255,255,.06)";
-  for (let i = 0; i < 24; i++) { const x = (i * 73) % VW, y = (i * 37) % 170 + 16; ctx.fillRect(x, y, 5, 5); } // crowd dots
-  // ring ropes
-  ctx.strokeStyle = "#d8d8e2"; ctx.lineWidth = 4;
-  [300, 348, 396].forEach(y => { ctx.beginPath(); ctx.moveTo(18, y); ctx.lineTo(VW - 18, y); ctx.stroke(); });
-  ctx.strokeStyle = "#a33"; ctx.lineWidth = 7;
+  // spotlight pool over the ring
+  const spot = gradR(VW / 2, 380, 40, VW / 2, 400, 330);
+  spot.addColorStop(0, "rgba(255,244,200,0.20)"); spot.addColorStop(0.6, "rgba(255,244,200,0.07)"); spot.addColorStop(1, "rgba(255,244,200,0)");
+  ctx.fillStyle = spot; ctx.fillRect(0, 0, VW, VH);
+  // crowd dots — two depths of twinkle
+  ctx.fillStyle = "rgba(255,255,255,.07)";
+  for (let i = 0; i < 24; i++) { const x = (i * 73) % VW, y = (i * 37) % 170 + 16; ctx.fillRect(x, y, 5, 5); }
+  ctx.fillStyle = "rgba(255,230,170,.10)";
+  for (let i = 0; i < 14; i++) { const x = (i * 113 + 40) % VW, y = (i * 53) % 150 + 24; ctx.fillRect(x, y, 3.5, 3.5); }
+  // ring apron shadow under the ropes, then shaded ropes with a lit top edge
+  ctx.fillStyle = "rgba(0,0,0,.18)"; ctx.fillRect(14, 404, VW - 28, 12);
+  [300, 348, 396].forEach(y => {
+    ctx.strokeStyle = "rgba(0,0,0,.30)"; ctx.lineWidth = 5;
+    ctx.beginPath(); ctx.moveTo(18, y + 3); ctx.lineTo(VW - 18, y + 3); ctx.stroke();
+    const rg2 = gradL(0, y - 3, 0, y + 3);
+    rg2.addColorStop(0, "#f4f4fa"); rg2.addColorStop(1, "#a9a9ba");
+    ctx.strokeStyle = rg2; ctx.lineWidth = 4;
+    ctx.beginPath(); ctx.moveTo(18, y); ctx.lineTo(VW - 18, y); ctx.stroke();
+  });
+  const postG = gradL(0, 288, 0, 408);
+  postG.addColorStop(0, "#d84a3c"); postG.addColorStop(1, "#7e1f16");
+  ctx.strokeStyle = postG; ctx.lineWidth = 7;
   ctx.beginPath(); ctx.moveTo(18, 288); ctx.lineTo(18, 408); ctx.moveTo(VW - 18, 288); ctx.lineTo(VW - 18, 408); ctx.stroke();
 
   ctx.textAlign = "center";
   if (state === "menu") {
-    ctx.fillStyle = "#ffd23e"; ctx.font = "bold 44px sans-serif"; ctx.fillText("TITLE BOUT", VW / 2, 120);
+    const titleG = gradL(0, 84, 0, 124);
+    titleG.addColorStop(0, "#ffffff"); titleG.addColorStop(0.55, "#ffd23e"); titleG.addColorStop(1, "#e89a16");
+    ctx.save(); ctx.shadowColor = "rgba(255,190,40,.35)"; ctx.shadowBlur = 18;
+    ctx.fillStyle = titleG; ctx.font = "bold 44px sans-serif"; ctx.fillText("TITLE BOUT", VW / 2, 120);
+    ctx.restore();
     ctx.fillStyle = "#fff"; ctx.font = "16px sans-serif";
     ctx.fillText("Watch the golden tell. Dodge, duck, counter —", VW / 2, 156);
     ctx.fillText("earn a ⭐ and land the POWER PUNCH.", VW / 2, 180);
     ctx.font = "bold 18px sans-serif"; ctx.fillText("— THE LADDER —", VW / 2, 232);
     OPPONENTS.forEach((o, i) => {
       const y = 262 + i * 92, locked = i > beaten;
-      ctx.fillStyle = locked ? "rgba(255,255,255,.08)" : "rgba(255,255,255,.16)";
+      ctx.save();
+      if (!locked) { ctx.shadowColor = "rgba(3,6,14,.45)"; ctx.shadowBlur = 14; ctx.shadowOffsetY = 5; }
+      const cardG = gradL(0, y, 0, y + 76);
+      if (locked) { cardG.addColorStop(0, "rgba(255,255,255,.09)"); cardG.addColorStop(1, "rgba(255,255,255,.04)"); }
+      else if (i < beaten) { cardG.addColorStop(0, "rgba(126,231,135,.20)"); cardG.addColorStop(1, "rgba(126,231,135,.07)"); }
+      else { cardG.addColorStop(0, "rgba(255,255,255,.20)"); cardG.addColorStop(1, "rgba(255,255,255,.08)"); }
+      ctx.fillStyle = cardG;
       ctx.beginPath(); ctx.roundRect(40, y, VW - 80, 76, 12); ctx.fill();
+      ctx.restore();
+      ctx.lineWidth = 1.5; ctx.strokeStyle = locked ? "rgba(255,255,255,.12)" : "rgba(255,255,255,.30)";
+      ctx.beginPath(); ctx.roundRect(40, y, VW - 80, 76, 12); ctx.stroke();
+      if (!locked) { // accent spine in the fighter's own colour
+        ctx.fillStyle = o.color;
+        ctx.beginPath(); ctx.roundRect(40, y + 8, 6, 60, 3); ctx.fill();
+      }
       ctx.fillStyle = locked ? "#889" : "#fff"; ctx.font = "bold 20px sans-serif"; ctx.textAlign = "left";
       ctx.fillText((i + 1) + ". " + o.name, 62, y + 32);
       ctx.font = "14px sans-serif"; ctx.fillStyle = locked ? "#778" : "#ccd";
@@ -423,12 +537,19 @@ function draw() {
     });
     ctx.textAlign = "center"; ctx.fillStyle = "#aab"; ctx.font = "14px sans-serif";
     ctx.fillText("Tap a fighter to step into the ring.", VW / 2, 660);
+    const vgM = gradR(VW / 2, VH / 2, VH * 0.40, VW / 2, VH / 2, VH * 0.92);
+    vgM.addColorStop(0, "rgba(3,5,12,0)"); vgM.addColorStop(1, "rgba(3,5,12,.24)");
+    ctx.fillStyle = vgM; ctx.fillRect(0, 0, VW, VH);
     if (QA_MODE) drawQA();
     return;
   }
   // HUD
   bar(16, 30, 176, player.hp / player.maxHp, "#57d977", "YOU" + (player.token ? "  ⭐" : ""));
   bar(VW - 192, 30, 176, enemy.hp / enemy.maxHp, "#e5534b", opp.name.toUpperCase());
+  ctx.fillStyle = "rgba(8,12,22,.48)";
+  ctx.beginPath(); ctx.roundRect(VW / 2 - 62, 22, 124, 52, 13); ctx.fill();
+  ctx.lineWidth = 1; ctx.strokeStyle = "rgba(255,255,255,.28)";
+  ctx.beginPath(); ctx.roundRect(VW / 2 - 62, 22, 124, 52, 13); ctx.stroke();
   ctx.fillStyle = "#fff"; ctx.font = "bold 20px sans-serif"; ctx.textAlign = "center";
   ctx.fillText("R" + round + "  ⏱ " + Math.max(0, Math.ceil(roundT)), VW / 2, 46);
   ctx.font = "13px sans-serif"; ctx.fillStyle = "#ccd";
@@ -446,10 +567,18 @@ function draw() {
   const duckOff = player.state === "duck" ? 34 : 0;
   const px = player.state === "dodgeL" ? -56 : player.state === "dodgeR" ? 56 : 0;
   const jabUp = player.state === "jab" || player.state === "power" ? -64 : 0;
-  ctx.fillStyle = player.state === "power" ? "#ffd23e" : "#2255aa";
-  ctx.beginPath(); ctx.arc(96 + px, 616 + duckOff + jabUp, 34, 0, 7); ctx.fill();
-  ctx.beginPath(); ctx.arc(324 + px, 616 + duckOff + jabUp, 34, 0, 7); ctx.fill();
-  ctx.fillStyle = "rgba(255,255,255,.25)";
+  ctx.fillStyle = "rgba(8,5,3,.25)";
+  ctx.beginPath(); ctx.ellipse(96 + px, 652 + duckOff, 36, 8, 0, 0, 7); ctx.fill();
+  ctx.beginPath(); ctx.ellipse(324 + px, 652 + duckOff, 36, 8, 0, 0, 7); ctx.fill();
+  for (const gx2 of [96, 324]) {
+    const pg2 = gradR(gx2 + px - 11, 616 + duckOff + jabUp - 12, 6, gx2 + px, 616 + duckOff + jabUp, 38);
+    if (player.state === "power") { pg2.addColorStop(0, "#fff3b0"); pg2.addColorStop(0.55, "#ffd23e"); pg2.addColorStop(1, "#d18f10"); }
+    else { pg2.addColorStop(0, "#5b8fe0"); pg2.addColorStop(0.55, "#2255aa"); pg2.addColorStop(1, "#122f63"); }
+    ctx.fillStyle = pg2;
+    ctx.beginPath(); ctx.arc(gx2 + px, 616 + duckOff + jabUp, 34, 0, 7); ctx.fill();
+  }
+  if (player.state === "power") { ctx.save(); ctx.shadowColor = "rgba(255,210,62,.8)"; ctx.shadowBlur = 18; ctx.beginPath(); ctx.arc(96 + px, 616 + duckOff + jabUp, 34, 0, 7); ctx.arc(324 + px, 616 + duckOff + jabUp, 34, 0, 7); ctx.fillStyle = "rgba(255,210,62,.25)"; ctx.fill(); ctx.restore(); }
+  ctx.fillStyle = "rgba(255,255,255,.4)";
   ctx.beginPath(); ctx.arc(96 + px, 606 + duckOff + jabUp, 12, 0, 7); ctx.fill();
   ctx.beginPath(); ctx.arc(324 + px, 606 + duckOff + jabUp, 12, 0, 7); ctx.fill();
   if (player.state === "down") {
@@ -466,11 +595,13 @@ function draw() {
   }
   if (state === "roundBreak") {
     ctx.fillStyle = "rgba(0,0,0,.45)"; ctx.fillRect(0, 0, VW, VH);
+    glassPanel(VW / 2 - 170, 286, 340, 128, 18);
     ctx.fillStyle = "#fff"; ctx.font = "bold 40px sans-serif"; ctx.fillText("ROUND " + round, VW / 2, 350);
     ctx.font = "16px sans-serif"; ctx.fillText("Corners, both of you. +15 health.", VW / 2, 386);
   }
   if (state === "fightOver") {
     ctx.fillStyle = "rgba(0,0,0,.55)"; ctx.fillRect(0, 0, VW, VH);
+    glassPanel(24, 246, VW - 48, 196, 18);
     ctx.fillStyle = "#ffd23e"; ctx.font = "bold 26px sans-serif";
     wrapText(msg, VW / 2, 300, VW - 60, 32);
     ctx.fillStyle = "#fff"; ctx.font = "17px sans-serif";

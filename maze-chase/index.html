@@ -9,7 +9,7 @@
 <style>
   html, body {
     margin: 0; padding: 0; height: 100%;
-    background: #05081a;
+    background: radial-gradient(120% 90% at 50% 0%, #16265e 0%, rgba(22,38,94,0) 55%), linear-gradient(180deg, #05081a, #02040d 75%);
     overflow: hidden;
     font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
     touch-action: none;
@@ -27,8 +27,10 @@
     position: fixed; top: 10px; right: 10px; z-index: 10;
     width: 44px; height: 44px;
     border-radius: 50%;
-    border: 2px solid #35509e;
-    background: rgba(13, 22, 54, 0.9);
+    border: 1px solid rgba(140,175,255,.55);
+    background: rgba(13, 22, 54, 0.55);
+    backdrop-filter: blur(8px); -webkit-backdrop-filter: blur(8px);
+    box-shadow: 0 8px 22px rgba(0,0,0,.45);
     color: #fff;
     font-size: 21px;
     line-height: 1;
@@ -559,6 +561,16 @@ function rr(x, y, w, h, r) {
 }
 
 function drawHUD() {
+  // frosted HUD pills
+  ctx.save();
+  ctx.shadowColor = 'rgba(0,0,0,.4)'; ctx.shadowBlur = 10; ctx.shadowOffsetY = 3;
+  ctx.fillStyle = 'rgba(16,28,64,.52)';
+  rr(6, 6, 148, 48, 14); ctx.fill();
+  rr(W / 2 - 62, 6, 124, 48, 14); ctx.fill();
+  ctx.restore();
+  ctx.lineWidth = 1; ctx.strokeStyle = 'rgba(160,195,255,.30)';
+  rr(6, 6, 148, 48, 14); ctx.stroke();
+  rr(W / 2 - 62, 6, 124, 48, 14); ctx.stroke();
   ctx.fillStyle = '#eaf2ff';
   ctx.font = '700 17px system-ui, sans-serif';
   ctx.textAlign = 'left';
@@ -598,10 +610,17 @@ function drawHUD() {
 
 function drawMaze() {
   const L = layout();
-  // Panel behind the maze
-  rr(L.ox - 6, L.oy - 6, L.tile * COLS + 12, L.tile * ROWS + 12, 12);
-  ctx.fillStyle = '#0a1233';
+  // Panel behind the maze — deep gradient with soft shadow
+  ctx.save();
+  ctx.shadowColor = 'rgba(0,0,0,.55)'; ctx.shadowBlur = 28; ctx.shadowOffsetY = 10;
+  const panelG = ctx.createLinearGradient(0, L.oy - 6, 0, L.oy + L.tile * ROWS + 6);
+  panelG.addColorStop(0, '#101d4d'); panelG.addColorStop(1, '#060b26');
+  rr(L.ox - 6, L.oy - 6, L.tile * COLS + 12, L.tile * ROWS + 12, 14);
+  ctx.fillStyle = panelG;
   ctx.fill();
+  ctx.restore();
+  ctx.lineWidth = 1; ctx.strokeStyle = 'rgba(140,175,255,.22)';
+  rr(L.ox - 6, L.oy - 6, L.tile * COLS + 12, L.tile * ROWS + 12, 14); ctx.stroke();
 
   // Walls: rounded neon-outline blocks on dark blue
   for (let y = 0; y < ROWS; y++) {
@@ -610,15 +629,21 @@ function drawMaze() {
       const px = L.ox + x * L.tile, py = L.oy + y * L.tile;
       const inset = Math.max(1, L.tile * 0.04);
       rr(px + inset, py + inset, L.tile - inset * 2, L.tile - inset * 2, L.tile * 0.22);
-      ctx.fillStyle = '#162a6b';
+      const wallG = ctx.createLinearGradient(px, py, px, py + L.tile);
+      wallG.addColorStop(0, '#24479e'); wallG.addColorStop(0.55, '#162a6b'); wallG.addColorStop(1, '#0d1c4a');
+      ctx.fillStyle = wallG;
       ctx.fill();
       ctx.lineWidth = 2;
-      ctx.strokeStyle = '#4da3ff';
+      ctx.strokeStyle = '#5db2ff';
       ctx.stroke();
+      ctx.fillStyle = 'rgba(255,255,255,.13)';
+      rr(px + inset + 2, py + inset + 2, L.tile - inset * 2 - 4, L.tile * 0.28, L.tile * 0.16);
+      ctx.fill();
     }
   }
 
-  // Dots
+  // Dots — warm with a soft glow
+  ctx.save(); ctx.shadowColor = 'rgba(255,233,168,.65)'; ctx.shadowBlur = 5;
   ctx.fillStyle = '#ffe9a8';
   for (const k of dots) {
     const parts = k.split(',');
@@ -628,6 +653,7 @@ function drawMaze() {
     ctx.arc(sx, sy, Math.max(2, L.tile * 0.09), 0, Math.PI * 2);
     ctx.fill();
   }
+  ctx.restore();
 
   // Power orbs: bigger, glowing, pulsing
   for (const k of powers) {
@@ -664,10 +690,12 @@ function drawHero() {
   ctx.fillStyle = 'rgba(0,0,0,0.35)';
   ctx.fill();
 
-  // Round teal body
+  // Round teal body — glossy radial gradient
   ctx.beginPath();
   ctx.arc(p.x, p.y, r, 0, Math.PI * 2);
-  ctx.fillStyle = '#17cfc0';
+  const heroG = ctx.createRadialGradient(p.x - r * 0.35, p.y - r * 0.4, r * 0.2, p.x, p.y, r * 1.25);
+  heroG.addColorStop(0, '#5ff5e6'); heroG.addColorStop(0.6, '#17cfc0'); heroG.addColorStop(1, '#0a9a90');
+  ctx.fillStyle = heroG;
   ctx.fill();
   ctx.lineWidth = 2;
   ctx.strokeStyle = '#0b7f78';
@@ -757,11 +785,17 @@ function drawSentry(g) {
     ctx.quadraticCurveTo((x0 + x1) / 2, cy + r * 0.75 + lift, x1, cy + r * 0.75);
   }
   ctx.closePath();
-  ctx.fillStyle = body;
+  const sentG = ctx.createRadialGradient(p.x - r * 0.3, cy - r * 0.5, r * 0.2, p.x, cy, r * 1.5);
+  sentG.addColorStop(0, body); sentG.addColorStop(1, dark);
+  ctx.fillStyle = sentG;
   ctx.fill();
   ctx.lineWidth = 2;
   ctx.strokeStyle = dark;
   ctx.stroke();
+  ctx.beginPath();
+  ctx.ellipse(p.x - r * 0.32, cy - r * 0.42, r * 0.30, r * 0.16, -0.5, 0, Math.PI * 2);
+  ctx.fillStyle = 'rgba(255,255,255,.28)';
+  ctx.fill();
 
   // One big eye, tracking the hero (or darting away when frightened)
   let vx = player.x - g.x, vy = player.y - g.y;
@@ -799,12 +833,27 @@ function drawSentry(g) {
 }
 
 function drawOverlay() {
-  ctx.fillStyle = 'rgba(3, 6, 20, 0.72)';
+  ctx.fillStyle = 'rgba(3, 6, 20, 0.62)';
   ctx.fillRect(0, 0, W, H);
+  // glass panel behind the overlay text
+  if (state === 'menu' || state === 'over') {
+    const pw = Math.min(W - 32, 430), ph = state === 'menu' ? 252 : 218;
+    const px = (W - pw) / 2, py = (state === 'menu' ? H * 0.3 - 62 : H * 0.38 - 62);
+    ctx.save();
+    ctx.shadowColor = 'rgba(0,0,0,.55)'; ctx.shadowBlur = 32; ctx.shadowOffsetY = 12;
+    const og = ctx.createLinearGradient(0, py, 0, py + ph);
+    og.addColorStop(0, 'rgba(26,42,86,.88)'); og.addColorStop(1, 'rgba(8,13,34,.92)');
+    rr(px, py, pw, ph, 22); ctx.fillStyle = og; ctx.fill();
+    ctx.restore();
+    ctx.lineWidth = 1.5; ctx.strokeStyle = 'rgba(160,195,255,.28)';
+    rr(px, py, pw, ph, 22); ctx.stroke();
+  }
   ctx.textAlign = 'center';
 
   if (state === 'menu') {
-    ctx.fillStyle = '#7ee8fa';
+    const titleG = ctx.createLinearGradient(0, H * 0.3 - 40, 0, H * 0.3 + 4);
+    titleG.addColorStop(0, '#ffffff'); titleG.addColorStop(0.55, '#a5f3fc'); titleG.addColorStop(1, '#38bdf8');
+    ctx.fillStyle = titleG;
     ctx.font = '800 42px system-ui, sans-serif';
     ctx.fillText('MAZE CHASE', W / 2, H * 0.3);
     ctx.fillStyle = '#eaf2ff';
@@ -870,8 +919,16 @@ function drawBelowBoard() {
 }
 
 function draw() {
-  ctx.fillStyle = '#05081a';
+  const sceneG = ctx.createLinearGradient(0, 0, 0, H);
+  sceneG.addColorStop(0, '#0a1233'); sceneG.addColorStop(0.55, '#05081a'); sceneG.addColorStop(1, '#02040d');
+  ctx.fillStyle = sceneG;
   ctx.fillRect(0, 0, W, H);
+  // faint distant stars for depth
+  ctx.fillStyle = 'rgba(160,195,255,.20)';
+  for (let i = 0; i < 22; i++) {
+    const sx = (i * 173 + 37) % Math.max(1, W), sy = (i * 97 + 19) % 60;
+    ctx.beginPath(); ctx.arc(sx, sy, 1.3, 0, Math.PI * 2); ctx.fill();
+  }
   drawHUD();
   drawMaze();
   drawHero();

@@ -5,14 +5,18 @@
 <meta name="viewport" content="width=device-width, initial-scale=1, user-scalable=no">
 <title>Hoppy Hopper</title>
 <style>
-  html, body { margin: 0; height: 100%; background: #7ec86e; overflow: hidden;
-    font-family: system-ui, sans-serif; }
+  html, body { margin: 0; height: 100%; overflow: hidden;
+    background: radial-gradient(120% 90% at 50% 0%, #2b5a3a 0%, rgba(43,90,58,0) 55%), linear-gradient(180deg,#173d24,#0d2415 70%);
+    font-family: "Avenir Next","Segoe UI",system-ui, sans-serif; }
   canvas { display: block; margin: 0 auto; touch-action: none; }
   #hud { position: fixed; top: 12px; left: 16px; color: #fff; font-size: 22px;
-    font-weight: 700; text-shadow: 0 2px 6px rgba(0,0,0,.5); }
-  #over { position: fixed; inset: 0; display: none; align-items: center;
-    justify-content: center; background: rgba(15,15,20,.72); color: #fff;
-    font-size: 34px; font-weight: 800; text-align: center; }
+    font-weight: 800; text-shadow: 0 2px 6px rgba(0,0,0,.45); letter-spacing:.4px;
+    background: rgba(14,32,20,.42); backdrop-filter: blur(8px); -webkit-backdrop-filter: blur(8px);
+    border: 1px solid rgba(255,255,255,.28); border-radius: 16px; padding: 8px 16px 10px;
+    box-shadow: 0 10px 28px rgba(0,0,0,.35); }
+  #over { position: fixed; inset: 0; display: none; align-items: center; flex-direction: column;
+    justify-content: center; background: radial-gradient(90% 70% at 50% 40%, rgba(20,40,28,.55), rgba(8,14,10,.82)); backdrop-filter: blur(6px); -webkit-backdrop-filter: blur(6px); color: #fff;
+    font-size: 38px; font-weight: 800; text-align: center; text-shadow: 0 4px 18px rgba(0,0,0,.5); }
 </style>
 </head>
 <body>
@@ -165,31 +169,68 @@ function frame(t) {
     const li = cam + r;
     if (li < 0) continue;
     const l = lanes[li], top = H - (r + 1) * laneH;
-    ctx.fillStyle = l.road ? '#3c3f46' : (li % 2 ? '#74be66' : '#7ec86e');
-    ctx.fillRect(0, top, W, laneH);
     if (l.road) {
-      ctx.fillStyle = '#f0c850';
+      const rg = ctx.createLinearGradient(0, top, 0, top + laneH);
+      rg.addColorStop(0, '#4a4f5c'); rg.addColorStop(0.5, '#33363f'); rg.addColorStop(1, '#24262d');
+      ctx.fillStyle = rg; ctx.fillRect(0, top, W, laneH);
+      ctx.fillStyle = 'rgba(255,255,255,.10)'; ctx.fillRect(0, top, W, 2);
+    } else {
+      const gg = ctx.createLinearGradient(0, top, 0, top + laneH);
+      if (li % 2) { gg.addColorStop(0, '#86d174'); gg.addColorStop(1, '#62ad52'); }
+      else { gg.addColorStop(0, '#92d97f'); gg.addColorStop(1, '#6db95e'); }
+      ctx.fillStyle = gg; ctx.fillRect(0, top, W, laneH);
+      ctx.fillStyle = 'rgba(255,255,220,.16)'; ctx.fillRect(0, top, W, 2);
+    }
+    if (l.road) {
+      ctx.fillStyle = '#ffd95e';
+      ctx.save(); ctx.shadowColor = 'rgba(240,200,80,.6)'; ctx.shadowBlur = 6;
       for (let d = 0; d < 8; d++)
-        ctx.fillRect(d * W / 8 + 6, top + laneH / 2 - 4, W / 8 - 12, 8);
-      const cols = ['#e65a5a', '#5a8ce6', '#f0b43c'];
+        ctx.fillRect(d * W / 8 + 6, top + laneH / 2 - 3, W / 8 - 12, 6);
+      ctx.restore();
+      const cols = [['#ff8a7a','#d93a30'], ['#7db4ff','#2f62c4'], ['#ffd166','#dd9412']];
       l.cars.forEach((x, k) => {
-        ctx.fillStyle = cols[k % 3];
-        ctx.beginPath();
-        ctx.roundRect((x - 0.09) * W, top + laneH * 0.22, 0.18 * W, laneH * 0.56, 10);
-        ctx.fill();
+        const cx0 = (x - 0.09) * W, cy0 = top + laneH * 0.22, cw = 0.18 * W, ch = laneH * 0.56;
+        ctx.fillStyle = 'rgba(0,0,0,.28)';
+        ctx.beginPath(); ctx.roundRect(cx0 + 3, cy0 + 5, cw, ch, 10); ctx.fill();
+        const cg = ctx.createLinearGradient(0, cy0, 0, cy0 + ch);
+        cg.addColorStop(0, cols[k % 3][0]); cg.addColorStop(1, cols[k % 3][1]);
+        ctx.fillStyle = cg;
+        ctx.beginPath(); ctx.roundRect(cx0, cy0, cw, ch, 10); ctx.fill();
+        ctx.fillStyle = 'rgba(190,235,255,.85)';
+        ctx.beginPath(); ctx.roundRect(cx0 + cw * 0.30, cy0 + ch * 0.22, cw * 0.40, ch * 0.34, 5); ctx.fill();
+        ctx.fillStyle = 'rgba(255,255,255,.35)';
+        ctx.beginPath(); ctx.roundRect(cx0 + 4, cy0 + 3, cw - 8, ch * 0.22, 7); ctx.fill();
+        ctx.fillStyle = '#16181d';
+        for (const wx of [0.18, 0.82]) { ctx.beginPath(); ctx.arc(cx0 + cw * wx, cy0 + ch + 1, Math.max(3, ch * 0.14), 0, 7); ctx.fill(); }
       });
     }
   }
-  // the hopper
+  // the hopper — glossy frog with soft shadow and highlight
   const px = W / 2, py = H - (PLAYER_ROW + 0.5) * laneH, rad = laneH * 0.30;
-  ctx.fillStyle = '#4bb45a';
+  ctx.fillStyle = 'rgba(20,50,20,.30)';
+  ctx.beginPath(); ctx.ellipse(px, py + rad * 0.82, rad * 0.95, rad * 0.28, 0, 0, 7); ctx.fill();
+  const fg = ctx.createRadialGradient(px - rad * 0.35, py - rad * 0.4, rad * 0.2, px, py, rad * 1.25);
+  fg.addColorStop(0, '#8fe388'); fg.addColorStop(0.6, '#4bb45a'); fg.addColorStop(1, '#2e8f3e');
+  ctx.fillStyle = fg;
   ctx.beginPath(); ctx.arc(px, py, rad, 0, 7); ctx.fill();
+  ctx.fillStyle = 'rgba(255,255,255,.28)';
+  ctx.beginPath(); ctx.ellipse(px - rad * 0.32, py - rad * 0.48, rad * 0.38, rad * 0.20, -0.5, 0, 7); ctx.fill();
   ctx.fillStyle = '#fff';
   ctx.beginPath(); ctx.arc(px - rad * 0.37, py - rad * 0.2, rad * 0.3, 0, 7); ctx.fill();
   ctx.beginPath(); ctx.arc(px + rad * 0.37, py - rad * 0.2, rad * 0.3, 0, 7); ctx.fill();
   ctx.fillStyle = '#1e1e1e';
   ctx.beginPath(); ctx.arc(px - rad * 0.37, py - rad * 0.2, rad * 0.15, 0, 7); ctx.fill();
   ctx.beginPath(); ctx.arc(px + rad * 0.37, py - rad * 0.2, rad * 0.15, 0, 7); ctx.fill();
+  ctx.fillStyle = 'rgba(255,255,255,.9)';
+  ctx.beginPath(); ctx.arc(px - rad * 0.42, py - rad * 0.26, rad * 0.05, 0, 7); ctx.fill();
+  ctx.beginPath(); ctx.arc(px + rad * 0.32, py - rad * 0.26, rad * 0.05, 0, 7); ctx.fill();
+  ctx.fillStyle = 'rgba(255,150,150,.45)';
+  ctx.beginPath(); ctx.arc(px - rad * 0.62, py + rad * 0.28, rad * 0.16, 0, 7); ctx.fill();
+  ctx.beginPath(); ctx.arc(px + rad * 0.62, py + rad * 0.28, rad * 0.16, 0, 7); ctx.fill();
+  // vignette for depth
+  const vg = ctx.createRadialGradient(W/2, H/2, H*0.35, W/2, H/2, H*0.85);
+  vg.addColorStop(0, 'rgba(8,25,12,0)'); vg.addColorStop(1, 'rgba(8,25,12,.18)');
+  ctx.fillStyle = vg; ctx.fillRect(0, 0, W, H);
   requestAnimationFrame(frame);
 }
 requestAnimationFrame(frame);

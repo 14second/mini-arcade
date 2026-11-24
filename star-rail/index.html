@@ -9,15 +9,23 @@
 <title>Star Rail</title>
 <style>
   * { margin:0; padding:0; box-sizing:border-box; }
-  html, body { width:100%; height:100%; overflow:hidden; background:#060a18;
+  html, body { width:100%; height:100%; overflow:hidden;
+    background:
+      radial-gradient(120% 90% at 50% 0%, #16264d 0%, rgba(22,38,77,0) 55%),
+      linear-gradient(180deg, #04060f 0%, #060a18 55%, #02040a 100%);
     font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
     touch-action:none; user-select:none; -webkit-user-select:none; -webkit-tap-highlight-color: transparent; }
   canvas { position:fixed; inset:0; display:block; touch-action:none; }
   #muteBtn { position:fixed; top:10px; right:10px; z-index:10; width:48px; height:48px; border-radius:12px;
-    border:2px solid rgba(255,255,255,.7); background:rgba(10,16,36,.5); color:#fff; font-size:22px;
+    border:1px solid rgba(255,255,255,.45); background:linear-gradient(180deg, rgba(30,46,84,.65), rgba(8,12,28,.65));
+    backdrop-filter:blur(6px); -webkit-backdrop-filter:blur(6px);
+    box-shadow:0 6px 18px rgba(0,0,0,.5), inset 0 1px 0 rgba(255,255,255,.25);
+    color:#fff; font-size:22px;
     line-height:1; cursor:pointer; display:flex; align-items:center; justify-content:center; padding:0; }
   #btnFire { position:fixed; right:18px; bottom:24px; z-index:10; width:88px; height:88px; border-radius:50%;
-    border:2px solid rgba(255,255,255,.7); background:rgba(220,90,40,.55); color:#fff; font-size:18px; font-weight:700;
+    border:1px solid rgba(255,255,255,.5); background:linear-gradient(180deg, rgba(245,120,60,.85), rgba(180,50,25,.85));
+    box-shadow:0 10px 26px rgba(0,0,0,.55), 0 0 22px rgba(240,100,40,.35), inset 0 1px 0 rgba(255,255,255,.35);
+    color:#fff; font-size:18px; font-weight:700;
     display:flex; align-items:center; justify-content:center; }
   #btnFire:active { background:rgba(255,255,255,.35); }
 </style>
@@ -117,6 +125,12 @@ function sfx(name) {
   if (name === "win") { [523, 659, 784, 1047].forEach((f, i) => tone(f, 0.16, "square", 0.11, t + i * 0.11)); }
 }
 
+/* ---------------- guarded storage ---------------- */
+// Storage can be denied (preview panes, private-mode webviews); a throwing
+// read would kill the script or the draw loop — route every access here.
+function storeGet(k) { try { return localStorage.getItem(k); } catch (e) { return null; } }
+function storeSet(k, v) { try { localStorage.setItem(k, v); } catch (e) {} }
+
 /* ---------------- world ---------------- */
 /* z decreases toward the player; objects spawn at z = SPAWN_Z and pass at 0.
    The flight lasts FLIGHT_T seconds before the boss arrives. */
@@ -183,7 +197,7 @@ function startBoss() {
 function hurtShip(dmg) {
   if (ship.invuln > 0) return;
   ship.hp -= dmg; ship.invuln = 0.5; shakeT = 0.25; sfx("hurt");
-  if (ship.hp <= 0) { state = "over"; const best = parseInt(localStorage.getItem("starRailBest") || "0", 10); if (score > best) localStorage.setItem("starRailBest", String(score)); }
+  if (ship.hp <= 0) { state = "over"; const best = parseInt(storeGet("starRailBest") || "0", 10); if (score > best) storeSet("starRailBest", String(score)); }
 }
 function proj(o) {
   const s = 1 - o.z / SPAWN_Z;             // 0 far → 1 at player plane
@@ -283,7 +297,7 @@ function update(dt) {
       if (s.dead) continue;
       if (Math.abs(s.z - boss.z) < 8) {
         const coreHit = boss.coreOpen && Math.hypot(s.x - boss.x, s.y - -30) < 34;
-        if (coreHit) { s.dead = true; boss.hp -= 2; score += 25; if (boss.hp <= 0) { state = "win"; score += 1000; sfx("win"); const best = parseInt(localStorage.getItem("starRailBest") || "0", 10); if (score > best) localStorage.setItem("starRailBest", String(score)); } }
+        if (coreHit) { s.dead = true; boss.hp -= 2; score += 25; if (boss.hp <= 0) { state = "win"; score += 1000; sfx("win"); const best = parseInt(storeGet("starRailBest") || "0", 10); if (score > best) storeSet("starRailBest", String(score)); } }
         else if (Math.hypot(s.x - boss.x, s.y - -10) < 95) { s.dead = true; } // hull absorbs
       }
     }
@@ -292,12 +306,37 @@ function update(dt) {
 }
 
 /* ---------------- draw ---------------- */
+// lighten (amt>0) or darken (amt<0) a #rrggbb colour — visual shading only
+function shade(hex, amt) {
+  const n = parseInt(hex.slice(1), 16);
+  const c = v => Math.max(0, Math.min(255, v));
+  return "rgb(" + c((n >> 16) + amt) + "," + c(((n >> 8) & 255) + amt) + "," + c((n & 255) + amt) + ")";
+}
+// shared glass-panel look for menu / overlay cards
+function glassPanel(x, y, w, h, r) {
+  ctx.save();
+  ctx.shadowColor = "rgba(0,0,0,.6)"; ctx.shadowBlur = 26; ctx.shadowOffsetY = 10;
+  const g = ctx.createLinearGradient(0, y, 0, y + h);
+  g.addColorStop(0, "rgba(18,30,58,.88)"); g.addColorStop(1, "rgba(6,10,22,.92)");
+  ctx.fillStyle = g; ctx.beginPath(); ctx.roundRect(x, y, w, h, r); ctx.fill();
+  ctx.restore();
+  ctx.lineWidth = 1.5; ctx.strokeStyle = "rgba(126,231,255,.28)";
+  ctx.beginPath(); ctx.roundRect(x, y, w, h, r); ctx.stroke();
+  ctx.strokeStyle = "rgba(255,255,255,.10)"; ctx.lineWidth = 1;
+  ctx.beginPath(); ctx.moveTo(x + r, y + 1); ctx.lineTo(x + w - r, y + 1); ctx.stroke();
+}
 function drawShipShape(x, y, s, color, flip) {
   ctx.save(); ctx.translate(x, y); ctx.scale(s * (flip ? -1 : 1), s);
-  ctx.fillStyle = color;
+  ctx.shadowColor = "rgba(0,0,0,.45)"; ctx.shadowBlur = 6; ctx.shadowOffsetY = 3;
+  const hg = ctx.createLinearGradient(0, -16, 0, 16);
+  hg.addColorStop(0, shade(color, 62)); hg.addColorStop(0.5, color); hg.addColorStop(1, shade(color, -52));
+  ctx.fillStyle = hg;
   ctx.beginPath(); ctx.moveTo(0, -16); ctx.lineTo(6, 2); ctx.lineTo(20, 12); ctx.lineTo(7, 10); ctx.lineTo(4, 16);
   ctx.lineTo(-4, 16); ctx.lineTo(-7, 10); ctx.lineTo(-20, 12); ctx.lineTo(-6, 2); ctx.closePath(); ctx.fill();
-  ctx.fillStyle = "#bfe8f5"; ctx.beginPath(); ctx.ellipse(0, -4, 3.4, 6, 0, 0, 7); ctx.fill();
+  ctx.shadowColor = "transparent"; ctx.shadowBlur = 0; ctx.shadowOffsetY = 0;
+  ctx.fillStyle = "rgba(255,255,255,.35)"; ctx.beginPath(); ctx.ellipse(-3, -8, 5, 2.4, -0.5, 0, 7); ctx.fill(); // hull sheen
+  const cg = ctx.createRadialGradient(-1, -6, 0.5, 0, -4, 6); cg.addColorStop(0, "#ffffff"); cg.addColorStop(1, "#8fd3e8");
+  ctx.fillStyle = cg; ctx.beginPath(); ctx.ellipse(0, -4, 3.4, 6, 0, 0, 7); ctx.fill();
   ctx.restore();
 }
 function draw() {
@@ -310,19 +349,31 @@ function draw() {
     ctx.fillStyle = "rgba(255,255,255," + (0.25 + s * 0.75) + ")";
     ctx.fillRect(x, y, 1 + s * 2.4, 1 + s * 2.4);
   }
-  // planet backdrop
-  ctx.fillStyle = "#1b2f52"; ctx.beginPath(); ctx.arc(CX + 130, 120, 54, 0, 7); ctx.fill();
-  ctx.fillStyle = "#274a7c"; ctx.beginPath(); ctx.arc(CX + 112, 104, 44, 0, 7); ctx.fill();
+  // nebula washes (depth behind the starfield)
+  const neb1 = ctx.createRadialGradient(CX - 150, 180, 10, CX - 150, 180, 240);
+  neb1.addColorStop(0, "rgba(90,60,160,.20)"); neb1.addColorStop(1, "rgba(90,60,160,0)");
+  ctx.fillStyle = neb1; ctx.fillRect(0, 0, VW, VH);
+  const neb2 = ctx.createRadialGradient(CX + 170, 520, 10, CX + 170, 520, 260);
+  neb2.addColorStop(0, "rgba(30,110,140,.16)"); neb2.addColorStop(1, "rgba(30,110,140,0)");
+  ctx.fillStyle = neb2; ctx.fillRect(0, 0, VW, VH);
+  // planet backdrop — gradient sphere with terminator shading + faint ring
+  const pg = ctx.createRadialGradient(CX + 112, 100, 8, CX + 130, 120, 58);
+  pg.addColorStop(0, "#3d6db0"); pg.addColorStop(0.55, "#274a7c"); pg.addColorStop(1, "#12233f");
+  ctx.fillStyle = pg; ctx.beginPath(); ctx.arc(CX + 130, 120, 54, 0, 7); ctx.fill();
+  ctx.strokeStyle = "rgba(150,200,255,.20)"; ctx.lineWidth = 5;
+  ctx.beginPath(); ctx.ellipse(CX + 130, 128, 78, 16, -0.32, 0, 7); ctx.stroke();
   ctx.textAlign = "center";
   if (state === "menu") {
-    ctx.fillStyle = "#7ee7ff"; ctx.font = "bold 44px sans-serif"; ctx.fillText("STAR RAIL", VW / 2, 140);
-    ctx.fillStyle = "#fff"; ctx.font = "16px sans-serif";
+    glassPanel(16, 100, VW - 32, 190, 22);
+    const titleG = ctx.createLinearGradient(0, 104, 0, 148); titleG.addColorStop(0, "#ffffff"); titleG.addColorStop(0.55, "#aee9ff"); titleG.addColorStop(1, "#38b6e8");
+    ctx.fillStyle = titleG; ctx.font = "bold 44px sans-serif"; ctx.fillText("STAR RAIL", VW / 2, 140);
+    ctx.fillStyle = "#e6f3fa"; ctx.font = "16px sans-serif";
     ctx.fillText("Drag to steer — your ship follows, aim leads.", VW / 2, 178);
     ctx.fillText("Hold FIRE to shoot. Thread gold gates for", VW / 2, 202);
     ctx.fillText("score and repairs. At the end of the run,", VW / 2, 226);
     ctx.fillText("the Dreadnought waits — hit its glowing core.", VW / 2, 250);
     drawShipShape(VW / 2, 420, 2.6, "#e8eef7");
-    const best = localStorage.getItem("starRailBest");
+    const best = storeGet("starRailBest");
     if (best) { ctx.font = "bold 17px sans-serif"; ctx.fillText("Best score: " + best, VW / 2, 520); }
     ctx.font = "bold 21px sans-serif"; ctx.fillText("TAP TO LAUNCH", VW / 2, 580);
     if (QA_MODE) drawQA();
@@ -333,61 +384,92 @@ function draw() {
   for (const o of sorted) {
     const p = proj(o);
     if (o.type === "gate") {
+      ctx.save(); ctx.shadowColor = o.gate.passed ? "rgba(126,231,135,.9)" : "rgba(255,210,62,.9)"; ctx.shadowBlur = 14 * p.sc + 3;
       ctx.strokeStyle = o.gate.passed ? "#7ee787" : "#ffd23e"; ctx.lineWidth = 5 * p.sc + 1;
-      ctx.beginPath(); ctx.arc(p.x, p.y, 52 * p.sc + 6, 0, 7); ctx.stroke();
+      ctx.beginPath(); ctx.arc(p.x, p.y, 52 * p.sc + 6, 0, 7); ctx.stroke(); ctx.restore();
+      ctx.strokeStyle = "rgba(255,255,255,.35)"; ctx.lineWidth = 1.5;
+      ctx.beginPath(); ctx.arc(p.x, p.y, (52 * p.sc + 6) * 0.82, 0, 7); ctx.stroke();
       ctx.fillStyle = "#ffd23e"; ctx.font = "bold " + Math.round(13 * p.sc + 4) + "px sans-serif";
       ctx.fillText("GATE", p.x, p.y - 56 * p.sc - 8);
     } else if (o.type === "ship") {
       drawShipShape(p.x, p.y, 1.7 * p.sc + 0.15, "#c8553d", true);
       if (o.z < 62) { ctx.fillStyle = "#ff9f43"; ctx.font = "bold " + Math.round(16 * p.sc + 5) + "px sans-serif"; ctx.fillText("!", p.x, p.y - 34 * p.sc); }
     } else if (o.type === "turret") {
-      ctx.fillStyle = "#5a6b84"; ctx.fillRect(p.x - 16 * p.sc, p.y + 6 * p.sc, 32 * p.sc, 20 * p.sc);
-      ctx.fillStyle = "#93a7c4"; ctx.beginPath(); ctx.arc(p.x, p.y, 13 * p.sc + 2, 0, 7); ctx.fill();
-      ctx.fillStyle = "#e5534b"; ctx.beginPath(); ctx.arc(p.x, p.y, 4.5 * p.sc + 1, 0, 7); ctx.fill();
+      const tg2 = ctx.createLinearGradient(p.x, p.y + 4 * p.sc, p.x, p.y + 28 * p.sc); tg2.addColorStop(0, "#7186a3"); tg2.addColorStop(1, "#3d4c63");
+      ctx.fillStyle = tg2; ctx.beginPath(); ctx.roundRect(p.x - 16 * p.sc, p.y + 6 * p.sc, 32 * p.sc, 20 * p.sc, 3 * p.sc); ctx.fill();
+      const dg = ctx.createRadialGradient(p.x - 4 * p.sc, p.y - 5 * p.sc, 2, p.x, p.y, 15 * p.sc + 2); dg.addColorStop(0, "#c3d5ec"); dg.addColorStop(1, "#7186a3");
+      ctx.fillStyle = dg; ctx.beginPath(); ctx.arc(p.x, p.y, 13 * p.sc + 2, 0, 7); ctx.fill();
+      ctx.save(); ctx.shadowColor = "rgba(229,83,75,.9)"; ctx.shadowBlur = 8; ctx.fillStyle = "#ff6b5e"; ctx.beginPath(); ctx.arc(p.x, p.y, 4.5 * p.sc + 1, 0, 7); ctx.fill(); ctx.restore();
     } else if (o.type === "rock") {
       ctx.save(); ctx.translate(p.x, p.y); ctx.rotate((o.spin || 0) + o.z * 0.05); ctx.scale(p.sc, p.sc);
-      ctx.fillStyle = "#7d7468"; ctx.beginPath();
+      const rg = ctx.createRadialGradient(-7, -8, 3, 0, 0, 30); rg.addColorStop(0, "#a39885"); rg.addColorStop(0.6, "#7d7468"); rg.addColorStop(1, "#554c40");
+      ctx.fillStyle = rg; ctx.beginPath();
       for (let k = 0; k < 7; k++) { const a = k / 7 * Math.PI * 2, r = 20 + (k % 2) * 6; ctx[k ? "lineTo" : "moveTo"](Math.cos(a) * r, Math.sin(a) * r); }
-      ctx.closePath(); ctx.fill(); ctx.restore();
+      ctx.closePath(); ctx.fill();
+      ctx.fillStyle = "rgba(0,0,0,.22)"; ctx.beginPath(); ctx.arc(-6, -4, 5, 0, 7); ctx.fill(); ctx.beginPath(); ctx.arc(8, 7, 3.6, 0, 7); ctx.fill();
+      ctx.restore();
     }
   }
   // enemy shots
   for (const p of eShots) {
     const s = 1 - p.z / SPAWN_Z;
-    ctx.fillStyle = "#ff6b5e"; ctx.beginPath(); ctx.arc(CX + p.cx * (0.35 + 0.65 * s), CY + p.cy * (0.35 + 0.65 * s), 3 + s * 5, 0, 7); ctx.fill();
+    ctx.save(); ctx.shadowColor = "rgba(255,107,94,.9)"; ctx.shadowBlur = 9;
+    const eg = ctx.createRadialGradient(CX + p.cx * (0.35 + 0.65 * s) - 1, CY + p.cy * (0.35 + 0.65 * s) - 1, 0.5, CX + p.cx * (0.35 + 0.65 * s), CY + p.cy * (0.35 + 0.65 * s), 3 + s * 5);
+    eg.addColorStop(0, "#ffd9d4"); eg.addColorStop(1, "#f0432f");
+    ctx.fillStyle = eg; ctx.beginPath(); ctx.arc(CX + p.cx * (0.35 + 0.65 * s), CY + p.cy * (0.35 + 0.65 * s), 3 + s * 5, 0, 7); ctx.fill(); ctx.restore();
   }
-  // player shots
-  ctx.fillStyle = "#7ee7ff";
+  // player shots — glowing bolts
+  ctx.save(); ctx.shadowColor = "rgba(126,231,255,.9)"; ctx.shadowBlur = 8; ctx.fillStyle = "#aef1ff";
   for (const s of shots) {
     const p = proj({ x: s.x, y: s.y, z: s.z });
-    ctx.fillRect(p.x - 2, p.y - 8 * p.sc, 4, 14 * p.sc);
+    ctx.beginPath(); ctx.roundRect(p.x - 2, p.y - 8 * p.sc, 4, 14 * p.sc, 2); ctx.fill();
   }
+  ctx.restore();
   // boss
   if (boss && (state === "boss" || state === "win")) {
     const bx = CX + boss.x, by = 190;
-    ctx.fillStyle = "#3d4756"; ctx.beginPath(); ctx.roundRect(bx - 120, by - 56, 240, 92, 20); ctx.fill();
-    ctx.fillStyle = "#57667c"; ctx.beginPath(); ctx.roundRect(bx - 70, by - 84, 140, 42, 14); ctx.fill();
-    ctx.fillStyle = boss.coreOpen ? "#ffd23e" : "#5a2c22";
-    ctx.beginPath(); ctx.arc(bx, by + 2, 30, 0, 7); ctx.fill();
+    const hullG = ctx.createLinearGradient(0, by - 56, 0, by + 36); hullG.addColorStop(0, "#5d6d84"); hullG.addColorStop(0.5, "#3d4756"); hullG.addColorStop(1, "#232b38");
+    ctx.save(); ctx.shadowColor = "rgba(0,0,0,.6)"; ctx.shadowBlur = 22; ctx.shadowOffsetY = 8;
+    ctx.fillStyle = hullG; ctx.beginPath(); ctx.roundRect(bx - 120, by - 56, 240, 92, 20); ctx.fill(); ctx.restore();
+    ctx.fillStyle = "rgba(255,255,255,.16)"; ctx.beginPath(); ctx.roundRect(bx - 108, by - 50, 216, 12, 6); ctx.fill(); // hull sheen
+    const deckG = ctx.createLinearGradient(0, by - 84, 0, by - 42); deckG.addColorStop(0, "#7d90ab"); deckG.addColorStop(1, "#46536a");
+    ctx.fillStyle = deckG; ctx.beginPath(); ctx.roundRect(bx - 70, by - 84, 140, 42, 14); ctx.fill();
+    if (boss.coreOpen) {
+      const coreG = ctx.createRadialGradient(bx - 8, by - 6, 3, bx, by + 2, 32); coreG.addColorStop(0, "#fff6c8"); coreG.addColorStop(0.55, "#ffd23e"); coreG.addColorStop(1, "#e07f1f");
+      ctx.save(); ctx.shadowColor = "rgba(255,210,62,.95)"; ctx.shadowBlur = 26; ctx.fillStyle = coreG;
+      ctx.beginPath(); ctx.arc(bx, by + 2, 30, 0, 7); ctx.fill(); ctx.restore();
+    } else {
+      ctx.fillStyle = "#5a2c22"; ctx.beginPath(); ctx.arc(bx, by + 2, 30, 0, 7); ctx.fill();
+      ctx.fillStyle = "rgba(255,255,255,.14)"; ctx.beginPath(); ctx.ellipse(bx - 9, by - 8, 11, 6, -0.5, 0, 7); ctx.fill();
+    }
     if (boss.coreOpen) { ctx.strokeStyle = "#ffd23e"; ctx.lineWidth = 3; ctx.beginPath(); ctx.arc(bx, by + 2, 40 + Math.sin(performance.now() / 120) * 4, 0, 7); ctx.stroke(); }
     ctx.fillStyle = "#fff"; ctx.font = "bold 15px sans-serif"; ctx.fillText("DREADNOUGHT", bx, by - 100);
-    ctx.fillStyle = "rgba(0,0,0,.5)"; ctx.fillRect(VW / 2 - 100, 76, 200, 12);
-    ctx.fillStyle = "#e5534b"; ctx.fillRect(VW / 2 - 100, 76, 200 * Math.max(0, boss.hp / boss.maxHp), 12);
+    ctx.fillStyle = "rgba(4,8,18,.6)"; ctx.beginPath(); ctx.roundRect(VW / 2 - 104, 72, 208, 20, 10); ctx.fill();
+    ctx.lineWidth = 1; ctx.strokeStyle = "rgba(255,255,255,.3)"; ctx.beginPath(); ctx.roundRect(VW / 2 - 104, 72, 208, 20, 10); ctx.stroke();
+    const bhG = ctx.createLinearGradient(VW / 2 - 100, 0, VW / 2 + 100, 0); bhG.addColorStop(0, "#ff8a5e"); bhG.addColorStop(1, "#e5534b");
+    ctx.fillStyle = bhG; ctx.beginPath(); ctx.roundRect(VW / 2 - 100, 76, Math.max(10, 200 * Math.max(0, boss.hp / boss.maxHp)), 12, 6); ctx.fill();
     if (!boss.coreOpen) { ctx.fillStyle = "#ffd23e"; ctx.font = "13px sans-serif"; ctx.fillText("Core shielded — wait for it to open!", bx, by + 66); }
   }
   // reticle + player ship
   const rx = CX + ship.x * 1.12, ry = CY + (ship.y - 30) * 1.0 - 66;
+  ctx.save(); ctx.shadowColor = "rgba(126,231,255,.8)"; ctx.shadowBlur = 7;
   ctx.strokeStyle = "rgba(126,231,255,.9)"; ctx.lineWidth = 2;
   ctx.beginPath(); ctx.arc(rx, ry, 13, 0, 7); ctx.stroke();
   ctx.beginPath(); ctx.moveTo(rx - 19, ry); ctx.lineTo(rx - 6, ry); ctx.moveTo(rx + 6, ry); ctx.lineTo(rx + 19, ry);
-  ctx.moveTo(rx, ry - 19); ctx.lineTo(rx, ry - 6); ctx.moveTo(rx, ry + 6); ctx.lineTo(rx, ry + 19); ctx.stroke();
+  ctx.moveTo(rx, ry - 19); ctx.lineTo(rx, ry - 6); ctx.moveTo(rx, ry + 6); ctx.lineTo(rx, ry + 19); ctx.stroke(); ctx.restore();
   const sy = CY + 130 + ship.y * 0.55;
+  const flick = 10 + Math.sin(performance.now() / 45) * 3; // engine flame flicker (visual only)
+  const engG = ctx.createRadialGradient(CX + ship.x, sy + 30, 1, CX + ship.x, sy + 30, flick + 8);
+  engG.addColorStop(0, "rgba(160,240,255,.85)"); engG.addColorStop(0.5, "rgba(80,180,255,.4)"); engG.addColorStop(1, "rgba(80,180,255,0)");
+  ctx.fillStyle = engG; ctx.beginPath(); ctx.ellipse(CX + ship.x, sy + 30, 8, flick + 8, 0, 0, 7); ctx.fill();
   if (!(ship.invuln > 0 && Math.floor(performance.now() / 90) % 2)) drawShipShape(CX + ship.x, sy, 1.9, "#e8eef7");
   ctx.fillStyle = "#57d977"; ctx.font = "12px sans-serif"; // engine glow
-  // HUD
-  ctx.fillStyle = "rgba(0,0,0,.45)"; ctx.fillRect(8, 8, 180, 50);
-  ctx.fillStyle = "#444"; ctx.fillRect(16, 16, 140, 11);
-  ctx.fillStyle = ship.hp > 30 ? "#57d977" : "#e5534b"; ctx.fillRect(16, 16, 140 * Math.max(0, ship.hp / 100), 11);
+  // HUD — frosted pill
+  ctx.fillStyle = "rgba(8,14,30,.55)"; ctx.beginPath(); ctx.roundRect(8, 8, 180, 50, 14); ctx.fill();
+  ctx.lineWidth = 1; ctx.strokeStyle = "rgba(126,231,255,.3)"; ctx.beginPath(); ctx.roundRect(8, 8, 180, 50, 14); ctx.stroke();
+  ctx.fillStyle = "rgba(0,0,0,.5)"; ctx.beginPath(); ctx.roundRect(16, 16, 140, 11, 5); ctx.fill();
+  const hpG = ctx.createLinearGradient(16, 0, 156, 0); if (ship.hp > 30) { hpG.addColorStop(0, "#8bf79b"); hpG.addColorStop(1, "#35b558"); } else { hpG.addColorStop(0, "#ff9d5c"); hpG.addColorStop(1, "#e5534b"); }
+  ctx.fillStyle = hpG; ctx.beginPath(); ctx.roundRect(16, 16, Math.max(9, 140 * Math.max(0, ship.hp / 100)), 11, 5); ctx.fill();
   ctx.fillStyle = "#fff"; ctx.font = "bold 14px sans-serif"; ctx.textAlign = "left"; ctx.fillText("SCORE " + score, 16, 48);
   ctx.textAlign = "right"; ctx.fillText(state === "boss" ? "FINAL TARGET" : "RUN " + Math.min(100, Math.round(flightT / FLIGHT_T * 100)) + "%", VW - 62, 30);
   ctx.textAlign = "center";
@@ -395,9 +477,11 @@ function draw() {
   if (state === "win") overlay("DREADNOUGHT DOWN! 🏆", "Final score " + score + " — tap to fly again");
 }
 function overlay(t, s) {
-  ctx.fillStyle = "rgba(0,0,0,.55)"; ctx.fillRect(0, 0, VW, VH);
-  ctx.fillStyle = "#ffd23e"; ctx.font = "bold 32px sans-serif"; ctx.textAlign = "center"; ctx.fillText(t, VW / 2, 330);
-  ctx.fillStyle = "#fff"; ctx.font = "16px sans-serif"; ctx.fillText(s, VW / 2, 364);
+  ctx.fillStyle = "rgba(2,4,10,.45)"; ctx.fillRect(0, 0, VW, VH);
+  glassPanel(30, 272, VW - 60, 118, 20);
+  const og = ctx.createLinearGradient(0, 300, 0, 336); og.addColorStop(0, "#ffffff"); og.addColorStop(1, "#ffd23e");
+  ctx.fillStyle = og; ctx.font = "bold 32px sans-serif"; ctx.textAlign = "center"; ctx.fillText(t, VW / 2, 330);
+  ctx.fillStyle = "#e6f3fa"; ctx.font = "16px sans-serif"; ctx.fillText(s, VW / 2, 364);
 }
 function drawQA() {
   const r = fairnessCheck();

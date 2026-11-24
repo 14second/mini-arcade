@@ -9,19 +9,22 @@
 <title>Tiny Quest</title>
 <style>
   * { margin:0; padding:0; box-sizing:border-box; }
-  html, body { width:100%; height:100%; overflow:hidden; background:#1d4a22;
+  html, body { width:100%; height:100%; overflow:hidden;
+    background: radial-gradient(120% 90% at 50% 0%, #2c6b34 0%, rgba(44,107,52,0) 55%), linear-gradient(180deg, #1d4a22 0%, #122e16 60%, #081a0c 100%);
     font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
     touch-action:none; user-select:none; -webkit-user-select:none; -webkit-tap-highlight-color: transparent; }
   canvas { position:fixed; inset:0; display:block; touch-action:none; }
-  #muteBtn { position:fixed; top:10px; right:10px; z-index:10; width:48px; height:48px; border-radius:12px;
-    border:2px solid rgba(255,255,255,.55); background:rgba(10,30,15,.55); color:#fff; font-size:22px;
+  #muteBtn { position:fixed; top:10px; right:10px; z-index:10; width:48px; height:48px; border-radius:14px;
+    border:1.5px solid rgba(255,255,255,.55); background:linear-gradient(180deg, rgba(24,58,32,.66), rgba(8,24,12,.66)); color:#fff; font-size:22px;
+    box-shadow:0 8px 22px rgba(0,0,0,.4), inset 0 1px 0 rgba(255,255,255,.35);
     line-height:1; cursor:pointer; display:flex; align-items:center; justify-content:center; padding:0; }
   .ctl { position:fixed; z-index:10; width:58px; height:58px; border-radius:50%;
-    border:2px solid rgba(255,255,255,.6); background:rgba(10,30,15,.5); color:#fff; font-size:24px;
+    border:1.5px solid rgba(255,255,255,.6); background:linear-gradient(180deg, rgba(30,70,40,.58), rgba(8,26,13,.58)); color:#fff; font-size:24px;
+    box-shadow:0 10px 24px rgba(0,0,0,.4), inset 0 1px 0 rgba(255,255,255,.35);
     display:flex; align-items:center; justify-content:center; }
   #btnU { left:74px; bottom:150px; } #btnD { left:74px; bottom:34px; }
   #btnL { left:16px; bottom:92px; } #btnR { left:132px; bottom:92px; }
-  #btnS { right:20px; bottom:92px; width:72px; height:72px; background:rgba(200,60,60,.55); }
+  #btnS { right:20px; bottom:92px; width:72px; height:72px; background:linear-gradient(180deg, rgba(232,84,72,.68), rgba(160,32,32,.68)); }
   .ctl:active { background:rgba(255,255,255,.35); }
 </style>
 </head>
@@ -104,10 +107,12 @@ function resize() {
 window.addEventListener("resize", resize); resize();
 function clamp(v, a, b) { return v < a ? a : (v > b ? b : v); }
 
-let actx = null, muted = localStorage.getItem("tqMuted") === "1", musicTimer = null, musicStep = 0;
+function storeGet(k) { try { return localStorage.getItem(k); } catch (e) { return null; } }
+function storeSet(k, v) { try { localStorage.setItem(k, v); } catch (e) {} }
+let actx = null, muted = storeGet("tqMuted") === "1", musicTimer = null, musicStep = 0;
 const muteBtn = document.getElementById("muteBtn");
 muteBtn.textContent = muted ? "🔇" : "🔊";
-muteBtn.addEventListener("click", () => { muted = !muted; localStorage.setItem("tqMuted", muted ? "1" : "0"); muteBtn.textContent = muted ? "🔇" : "🔊"; });
+muteBtn.addEventListener("click", () => { muted = !muted; storeSet("tqMuted", muted ? "1" : "0"); muteBtn.textContent = muted ? "🔇" : "🔊"; });
 function initAudio() {
   iosPlaybackSession();
   if (!actx || actx.state === "closed") { try { const AC = window.AudioContext || window.webkitAudioContext; if (AC) actx = new AC(); window.__maCtx = actx; window.__maActx = function () { return actx; };; } catch (e) {} }
@@ -517,7 +522,7 @@ function computeSlimePrev() {
   slimePrev = prev;
 }
 let swing = 0, invuln = 0, startTime = 0, elapsed = 0, pauseAt = 0, won = false;
-let best = parseInt(localStorage.getItem("tqBest12") || "0", 10);
+let best = parseInt(storeGet("tqBest12") || "0", 10);
 let chestOpen = false, heartTaken = false;
 
 function curMap(areaName) { return areaName === "over" ? LEVELS[level].over : LEVELS[level].dun; }
@@ -707,7 +712,7 @@ function update(dt) {
     } else {
       won = true; state = "win"; sfx("win");
       const t = Math.floor(elapsed);
-      if (best === 0 || t < best) { best = t; localStorage.setItem("tqBest12", String(t)); }
+      if (best === 0 || t < best) { best = t; storeSet("tqBest12", String(t)); }
     }
   }
 }
@@ -758,7 +763,10 @@ function drawKnightFig(x, y, s, facing, swingT) {
   ctx.translate(0, bob);
   ctx.fillStyle = "#5a4632"; ctx.fillRect(-11 * s, 11 * s, 8 * s, 6 * s); ctx.fillRect(4 * s, 11 * s, 8 * s, 6 * s); // boots
   ctx.fillStyle = "#8d99ae"; ctx.fillRect(-10 * s, 1 * s, 20 * s, 11 * s); // legs / skirt of armour
-  ctx.fillStyle = "#4361b8"; ctx.fillRect(-13 * s, -10 * s, 26 * s, 13 * s); // tabard body
+  const tab = gradL(0, -10 * s, 0, 3 * s);
+  tab.addColorStop(0, "#5a78d6"); tab.addColorStop(0.55, "#4361b8"); tab.addColorStop(1, "#2f468c");
+  ctx.fillStyle = tab; ctx.fillRect(-13 * s, -10 * s, 26 * s, 13 * s); // tabard body
+  ctx.fillStyle = "rgba(255,255,255,.16)"; ctx.fillRect(-13 * s, -10 * s, 26 * s, 3 * s);
   ctx.fillStyle = "#e8b53a"; ctx.fillRect(-2.5 * s, -10 * s, 5 * s, 13 * s); // gold trim
   ctx.fillStyle = "#aab6c8"; ctx.fillRect(-13 * s, -10 * s, 4 * s, 10 * s); ctx.fillRect(9 * s, -10 * s, 4 * s, 10 * s); // pauldrons
   // shield on the left arm
@@ -779,7 +787,9 @@ function drawKnightFig(x, y, s, facing, swingT) {
   ctx.restore();
   // head + helmet
   ctx.fillStyle = "#f2c894"; ctx.fillRect(-7 * s, -21 * s, 14 * s, 11 * s); // face
-  ctx.fillStyle = "#c7d0dc"; ctx.fillRect(-9 * s, -27 * s, 18 * s, 8 * s); // helm dome
+  const helm = gradL(0, -27 * s, 0, -16 * s);
+  helm.addColorStop(0, "#eef3f9"); helm.addColorStop(0.5, "#c7d0dc"); helm.addColorStop(1, "#93a2b5");
+  ctx.fillStyle = helm; ctx.fillRect(-9 * s, -27 * s, 18 * s, 8 * s); // helm dome
   ctx.fillRect(-9 * s, -19 * s, 18 * s, 3 * s);
   ctx.fillStyle = "#d8443c"; ctx.beginPath(); ctx.ellipse(-2 * s, -29 * s, 8 * s, 3.4 * s, -0.35, 0, Math.PI * 2); ctx.fill(); // plume
   if (facing !== "up") {
@@ -794,7 +804,9 @@ function drawPrincessFig(x, y, s) {
   // the princess, centred on (x, y): pink gown, golden hair, crown
   ctx.save(); ctx.translate(x, y);
   ctx.fillStyle = "rgba(0,0,0,.25)"; ctx.beginPath(); ctx.ellipse(0, 19 * s, 13 * s, 4 * s, 0, 0, Math.PI * 2); ctx.fill();
-  ctx.fillStyle = "#e754a8"; ctx.beginPath(); // gown
+  const gown = gradL(0, -6 * s, 0, 19 * s);
+  gown.addColorStop(0, "#ff8ac2"); gown.addColorStop(0.55, "#e754a8"); gown.addColorStop(1, "#c2337f");
+  ctx.fillStyle = gown; ctx.beginPath(); // gown
   ctx.moveTo(0, -6 * s); ctx.quadraticCurveTo(13 * s, 6 * s, 15 * s, 19 * s); ctx.lineTo(-15 * s, 19 * s);
   ctx.quadraticCurveTo(-13 * s, 6 * s, 0, -6 * s); ctx.fill();
   ctx.fillStyle = "#ff9ecf"; ctx.fillRect(-2 * s, -6 * s, 4 * s, 22 * s); // sash
@@ -809,12 +821,43 @@ function drawPrincessFig(x, y, s) {
   ctx.restore();
 }
 function tileHash(c, r, salt) { let h = (c * 73 + r * 149 + salt * 31) % 97; return h / 97; }
+function gradL(x0, y0, x1, y1) {
+  const g = ctx["createLinearGradient"](x0, y0, x1, y1);
+  if (g && typeof g.addColorStop !== "function") { try { g.addColorStop = function () {}; } catch (e) { return "#888888"; } }
+  return g;
+}
+function gradR(x0, y0, r0, x1, y1, r1) {
+  const g = ctx["createRadialGradient"](x0, y0, r0, x1, y1, r1);
+  if (g && typeof g.addColorStop !== "function") { try { g.addColorStop = function () {}; } catch (e) { return "#888888"; } }
+  return g;
+}
+function rr(x, y, w, h, r) {
+  ctx.beginPath();
+  ctx.moveTo(x + r, y);
+  ctx.arcTo(x + w, y, x + w, y + h, r); ctx.arcTo(x + w, y + h, x, y + h, r);
+  ctx.arcTo(x, y + h, x, y, r); ctx.arcTo(x, y, x + w, y, r);
+  ctx.closePath();
+}
+function glassPanel(x, y, w, h, r) {
+  ctx.save();
+  ctx.shadowColor = "rgba(4,12,6,.5)"; ctx.shadowBlur = 30; ctx.shadowOffsetY = 10;
+  const g = gradL(0, y, 0, y + h);
+  g.addColorStop(0, "rgba(20,42,26,.88)"); g.addColorStop(1, "rgba(9,20,12,.90)");
+  ctx.fillStyle = g; rr(x, y, w, h, r); ctx.fill();
+  ctx.restore();
+  ctx.lineWidth = 1.5; ctx.strokeStyle = "rgba(255,255,255,.18)"; rr(x, y, w, h, r); ctx.stroke();
+}
 function drawTiles(th, m, offY) {
   for (let r = 0; r < ROWS; r++) for (let c = 0; c < COLS; c++) {
     const ch = m[r][c], x = c * TILE, y = offY + r * TILE;
     const isWall = ch === "#";
-    ctx.fillStyle = isWall ? (area === "over" ? th.wall : th.caveWall) : (area === "over" ? th.floor[(c + r) % 2] : th.caveFloor[(c + r) % 2]);
+    const baseCol = isWall ? (area === "over" ? th.wall : th.caveWall) : (area === "over" ? th.floor[(c + r) % 2] : th.caveFloor[(c + r) % 2]);
+    const innerCol = isWall ? (area === "over" ? th.wallIn : th.caveIn) : null;
+    const tg = gradL(0, y, 0, y + TILE);
+    tg.addColorStop(0, baseCol); tg.addColorStop(1, isWall ? innerCol : baseCol);
+    ctx.fillStyle = tg;
     ctx.fillRect(x, y, TILE, TILE);
+    if (!isWall) { ctx.fillStyle = "rgba(255,255,255,.07)"; ctx.fillRect(x, y, TILE, 3); }
     const h1 = tileHash(c, r, level * 7 + (area === "dun" ? 3 : 0));
     if (!isWall) {
       // floor texture: speckles outdoors, stone seams in the cave
@@ -827,11 +870,14 @@ function drawTiles(th, m, offY) {
         ctx.fillText(th.decor[Math.floor(h1 * 97) % th.decor.length], x + 24, y + 33);
       }
     } else {
-      // wall block with a shaded inset face
-      ctx.fillStyle = area === "over" ? th.wallIn : th.caveIn;
+      // wall block with a shaded inset face: gradient bevel + soft shadow lip
+      const wg = gradL(0, y + 7, 0, y + TILE - 7);
+      wg.addColorStop(0, area === "over" ? th.wall : th.caveWall); wg.addColorStop(1, area === "over" ? th.wallIn : th.caveIn);
+      ctx.fillStyle = wg;
       ctx.fillRect(x + 5, y + 7, TILE - 10, TILE - 10);
-      ctx.fillStyle = "rgba(255,255,255,.14)"; ctx.fillRect(x + 5, y + 7, TILE - 10, 4);
-      ctx.fillStyle = "rgba(0,0,0,.18)"; ctx.fillRect(x + 5, y + TILE - 11, TILE - 10, 4);
+      ctx.fillStyle = "rgba(255,255,255,.22)"; ctx.fillRect(x + 5, y + 7, TILE - 10, 4);
+      ctx.fillStyle = "rgba(0,0,0,.28)"; ctx.fillRect(x + 5, y + TILE - 11, TILE - 10, 4);
+      ctx.fillStyle = "rgba(255,255,255,.10)"; ctx.fillRect(x + 9, y + 15, 10, 5);
     }
     if (ch === "D") {
       // arched cave mouth / doorway with steps
@@ -885,7 +931,9 @@ function drawSlimeFig(s, th, offY) {
   const cx = s.x + 18, baseY = s.y + 36 + offY;
   const sq = Math.sin(s.t * 7) * 2.2; // squash & stretch while hopping
   ctx.fillStyle = "rgba(0,0,0,.22)"; ctx.beginPath(); ctx.ellipse(cx, s.y + 35 + offY, 14, 4, 0, 0, Math.PI * 2); ctx.fill();
-  ctx.fillStyle = th.slime;
+  const sg = gradL(0, s.y + offY - sq, 0, baseY);
+  sg.addColorStop(0, th.slime); sg.addColorStop(1, th.slimeDark);
+  ctx.fillStyle = sg;
   ctx.beginPath();
   ctx.moveTo(cx - 16, baseY);
   ctx.quadraticCurveTo(cx - 17, s.y + 12 + offY - sq, cx - 7, s.y + 7 + offY - sq);
@@ -906,12 +954,20 @@ function draw() {
   const m = curMap(area);
   const offY = 44;
   if (state === "menu") {
-    ctx.fillStyle = th.floor[0]; ctx.fillRect(0, 0, VW, VH);
-    ctx.fillStyle = "rgba(20,40,24,.88)"; ctx.fillRect(0, 90, VW, 400);
+    const mg = gradL(0, 0, 0, VH);
+    mg.addColorStop(0, th.floor[0]); mg.addColorStop(0.6, th.floor[1]); mg.addColorStop(1, th.wallIn);
+    ctx.fillStyle = mg; ctx.fillRect(0, 0, VW, VH);
+    ctx.fillStyle = "rgba(255,255,255,.10)";
+    for (let i = 0; i < 9; i++) { ctx.beginPath(); ctx.arc(30 + i * 48, 52 + (i % 3) * 22, 3, 0, 7); ctx.fill(); }
+    glassPanel(14, 90, VW - 28, 400, 22);
     drawKnightFig(VW / 2 - 78, 428, 1.5, "down", null);
     drawPrincessFig(VW / 2 + 78, 424, 1.5);
-    ctx.fillStyle = "#fff"; ctx.textAlign = "center";
+    ctx.textAlign = "center";
+    const tt = gradL(0, 112, 0, 152);
+    tt.addColorStop(0, "#ffffff"); tt.addColorStop(0.55, "#ffe9a8"); tt.addColorStop(1, "#ffc94d");
+    ctx.fillStyle = tt;
     ctx.font = "bold 42px system-ui"; ctx.fillText("🗡️ Tiny Quest", VW / 2, 150);
+    ctx.fillStyle = "#f2f7f2";
     ctx.font = "20px system-ui";
     ctx.fillText("The Princess is trapped beyond", VW / 2, 205);
     ctx.fillText("the twelfth gate! You are the Knight —", VW / 2, 235);
@@ -925,18 +981,26 @@ function draw() {
   drawTiles(th, m, offY);
   for (const s of slimes) drawSlimeFig(s, th, offY);
 
+  const vg = gradR(VW / 2, VH / 2, VH * 0.40, VW / 2, VH / 2, VH * 0.90);
+  vg.addColorStop(0, "rgba(6,16,8,0)"); vg.addColorStop(1, "rgba(6,16,8,.18)");
+  ctx.fillStyle = vg; ctx.fillRect(0, 0, VW, VH);
   // player knight (blink while invulnerable)
   if (!(invuln > 0 && Math.floor(invuln * 10) % 2 === 0)) {
     drawKnightFig(px + 18, offY + py + 18, 1, face, swing > 0 ? 1 - swing / 0.28 : null);
   }
-  ctx.fillStyle = "rgba(10,30,15,.7)"; ctx.fillRect(0, 0, VW, 44);
+  ctx.save();
+  ctx.shadowColor = "rgba(0,0,0,.35)"; ctx.shadowBlur = 12; ctx.shadowOffsetY = 3;
+  ctx.fillStyle = "rgba(10,30,15,.55)"; rr(6, 5, VW - 12, 40, 14); ctx.fill();
+  ctx.restore();
+  ctx.lineWidth = 1; ctx.strokeStyle = "rgba(255,255,255,.28)"; rr(6, 5, VW - 12, 40, 14); ctx.stroke();
   ctx.fillStyle = "#fff"; ctx.font = "bold 18px system-ui"; ctx.textAlign = "left";
   ctx.fillText("Lv" + (level + 1) + " " + LEVELS[level].name + (area === "over" ? " 🌿" : " 🕳️"), 12, 28);
   ctx.textAlign = "center";
   ctx.fillText("❤️".repeat(hearts) + "  " + (hasKey ? "🔑" : "") + (wave > 0 ? "  Wave " + wave + "/" + LEVELS[level].waves : ""), VW / 2, 28);
   ctx.textAlign = "right"; ctx.fillText(Math.floor(elapsed) + "s", VW - 12, 28);
   if (state === "clear" || state === "over") {
-    ctx.fillStyle = "rgba(0,0,0,.6)"; ctx.fillRect(0, 0, VW, VH);
+    ctx.fillStyle = "rgba(0,0,0,.45)"; ctx.fillRect(0, 0, VW, VH);
+    glassPanel(24, VH / 2 - 95, VW - 48, 150, 22);
     ctx.fillStyle = "#fff"; ctx.textAlign = "center";
     ctx.font = "bold 36px system-ui";
     if (state === "clear") {
@@ -952,7 +1016,13 @@ function draw() {
   }
   if (state === "win") {
     // ——— Congratulations: the Knight rescues the Princess ———
-    ctx.fillStyle = "#274b73"; ctx.fillRect(0, 0, VW, VH);
+    const wg2 = gradL(0, 0, 0, VH);
+    wg2.addColorStop(0, "#3a6ea8"); wg2.addColorStop(0.5, "#274b73"); wg2.addColorStop(1, "#16283f");
+    ctx.fillStyle = wg2; ctx.fillRect(0, 0, VW, VH);
+    ctx.fillStyle = "rgba(255,255,255,.5)";
+    for (let i = 0; i < 14; i++) { const sx2 = (i * 67) % VW, sy2 = 30 + (i * 53) % 300; ctx.globalAlpha = 0.25 + 0.35 * Math.abs(Math.sin(performance.now() / 600 + i)); ctx.beginPath(); ctx.arc(sx2, sy2, 2.2, 0, 7); ctx.fill(); }
+    ctx.globalAlpha = 1;
+    glassPanel(18, 44, VW - 36, 540, 22);
     ctx.fillStyle = "#fff"; ctx.textAlign = "center";
     ctx.font = "bold 40px system-ui"; ctx.fillText("🏰", VW / 2, 84);
     ctx.font = "bold 34px system-ui"; ctx.fillText("🎉 Congratulations! 🎉", VW / 2, 140);

@@ -9,19 +9,30 @@
 <title>Barrel Climb</title>
 <style>
   * { margin:0; padding:0; box-sizing:border-box; }
-  html, body { width:100%; height:100%; overflow:hidden; background:#3a2a12;
+  html, body { width:100%; height:100%; overflow:hidden;
+    background:
+      radial-gradient(120% 90% at 50% 0%, #6b4a1e 0%, rgba(107,74,30,0) 55%),
+      linear-gradient(180deg, #4a3312 0%, #2a1d08 60%, #180e03 100%);
     font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
     touch-action:none; user-select:none; -webkit-user-select:none; -webkit-tap-highlight-color: transparent; }
   canvas { position:fixed; inset:0; display:block; touch-action:none; }
-  #muteBtn { position:fixed; top:10px; right:10px; z-index:10; width:48px; height:48px; border-radius:12px;
-    border:2px solid rgba(255,255,255,.55); background:rgba(30,20,5,.55); color:#fff; font-size:22px;
+  #muteBtn { position:fixed; top:10px; right:10px; z-index:10; width:48px; height:48px; border-radius:14px;
+    border:1px solid rgba(255,220,150,.5); background:linear-gradient(180deg, rgba(96,68,26,.72), rgba(38,25,7,.72));
+    backdrop-filter:blur(8px); -webkit-backdrop-filter:blur(8px);
+    box-shadow:0 6px 18px rgba(0,0,0,.4), inset 0 1px 0 rgba(255,255,255,.25);
+    color:#fff; font-size:22px;
     line-height:1; cursor:pointer; display:flex; align-items:center; justify-content:center; padding:0; }
   .ctl { position:fixed; z-index:10; width:58px; height:58px; border-radius:50%;
-    border:2px solid rgba(255,255,255,.6); background:rgba(30,20,5,.5); color:#fff; font-size:24px;
+    border:1px solid rgba(255,220,150,.55); background:linear-gradient(180deg, rgba(96,68,26,.62), rgba(38,25,7,.62));
+    backdrop-filter:blur(6px); -webkit-backdrop-filter:blur(6px);
+    box-shadow:0 6px 16px rgba(0,0,0,.38), inset 0 1px 0 rgba(255,255,255,.25);
+    color:#fff; font-size:24px;
     display:flex; align-items:center; justify-content:center; }
   #btnU { left:74px; bottom:150px; } #btnD { left:74px; bottom:34px; }
   #btnL { left:16px; bottom:92px; } #btnR { left:132px; bottom:92px; }
-  #btnJ { right:20px; bottom:92px; width:72px; height:72px; background:rgba(200,120,30,.55); }
+  #btnJ { right:20px; bottom:92px; width:72px; height:72px;
+    background:linear-gradient(180deg, rgba(255,154,61,.85), rgba(200,106,26,.85));
+    box-shadow:0 8px 20px rgba(200,106,26,.4), inset 0 1px 0 rgba(255,255,255,.4); }
   .ctl:active { background:rgba(255,255,255,.35); }
 </style>
 </head>
@@ -88,10 +99,15 @@ function resize() {
 window.addEventListener("resize", resize); resize();
 function clamp(v, a, b) { return v < a ? a : (v > b ? b : v); }
 
-let actx = null, muted = localStorage.getItem("bcMuted") === "1", musicTimer = null, musicStep = 0;
+// Guarded storage (2026-11-23 restyle robustness fix): a raw localStorage
+// read at boot throws when storage is denied (preview panes / private mode)
+// and kills the whole script — same keys, wrapped in try/catch.
+function lsGet(k) { try { return localStorage.getItem(k); } catch (e) { return null; } }
+function lsSet(k, v) { try { localStorage.setItem(k, v); } catch (e) {} }
+let actx = null, muted = lsGet("bcMuted") === "1", musicTimer = null, musicStep = 0;
 const muteBtn = document.getElementById("muteBtn");
 muteBtn.textContent = muted ? "🔇" : "🔊";
-muteBtn.addEventListener("click", () => { muted = !muted; localStorage.setItem("bcMuted", muted ? "1" : "0"); muteBtn.textContent = muted ? "🔇" : "🔊"; });
+muteBtn.addEventListener("click", () => { muted = !muted; lsSet("bcMuted", muted ? "1" : "0"); muteBtn.textContent = muted ? "🔇" : "🔊"; });
 function initAudio() {
   iosPlaybackSession();
   if (!actx || actx.state === "closed") { try { const AC = window.AudioContext || window.webkitAudioContext; if (AC) actx = new AC(); window.__maCtx = actx; window.__maActx = function () { return actx; };; } catch (e) {} }
@@ -154,8 +170,8 @@ let state = "menu", round = 1, lives = 3, score = 0, best = 0, bestLevel = 1;
 let levelMsg = "", levelMsgT = 0;
 let px = 0, py = 0, girder = 0, vy = 0, grounded = true, face = 1, invuln = 0;
 let barrels = [], spawnTimer = 0, jumpedBarrels = new Set();
-best = parseInt(localStorage.getItem("bcBest") || "0", 10);
-bestLevel = parseInt(localStorage.getItem("bcBestLevel") || "1", 10);
+best = parseInt(lsGet("bcBest") || "0", 10);
+bestLevel = parseInt(lsGet("bcBestLevel") || "1", 10);
 // QA-only: ?level=N starts a new game at level N (no effect without the param)
 const START_LEVEL = Math.max(1, parseInt(new URLSearchParams(location.search).get("level") || "1", 10) || 1);
 
@@ -168,7 +184,7 @@ function startRound() {
   barrels = []; jumpedBarrels = new Set(); spawnTimer = 1.2;
   girder = 0; px = 40; py = GIRDERS[0] - 36; vy = 0; grounded = true; invuln = 1;
   levelMsg = "LEVEL " + round + " — " + L.name; levelMsgT = 2.0;
-  if (round > bestLevel) { bestLevel = round; localStorage.setItem("bcBestLevel", String(bestLevel)); }
+  if (round > bestLevel) { bestLevel = round; lsSet("bcBestLevel", String(bestLevel)); }
 }
 function barrelSpeed() { return Math.min(190, 90 + round * 14); }
 function spawnInterval() { return Math.max(MIN_SPAWN, 2.2 - round * 0.16); }
@@ -240,7 +256,7 @@ function update(dt) {
       lives--; sfx("hurt");
       if (lives <= 0) {
         state = "over";
-        if (score > best) { best = score; localStorage.setItem("bcBest", String(best)); }
+        if (score > best) { best = score; lsSet("bcBest", String(best)); }
       } else { startRound(); }
       return;
     }
@@ -281,14 +297,51 @@ canvas.addEventListener("pointerdown", () => {
   else if (state === "over") state = "menu";
 });
 
+// ---- visual-only helpers (restyle): rounded rects, glass panels, HUD pill ----
+function rr(x, y, w, h, r) {
+  ctx.beginPath(); ctx.moveTo(x + r, y);
+  ctx.arcTo(x + w, y, x + w, y + h, r); ctx.arcTo(x + w, y + h, x, y + h, r);
+  ctx.arcTo(x, y + h, x, y, r); ctx.arcTo(x, y, x + w, y, r); ctx.closePath();
+}
+function glassPanel(x, y, w, h) {
+  ctx.save();
+  ctx.shadowColor = "rgba(0,0,0,.45)"; ctx.shadowBlur = 26; ctx.shadowOffsetY = 10;
+  const g = ctx.createLinearGradient(0, y, 0, y + h);
+  g.addColorStop(0, "rgba(74,53,22,.88)"); g.addColorStop(1, "rgba(28,18,6,.92)");
+  rr(x, y, w, h, 18); ctx.fillStyle = g; ctx.fill();
+  ctx.restore();
+  rr(x, y, w, h, 18); ctx.strokeStyle = "rgba(255,205,110,.35)"; ctx.lineWidth = 1.5; ctx.stroke();
+  rr(x + 6, y + 6, w - 12, (h - 12) / 2, 12); ctx.fillStyle = "rgba(255,255,255,.05)"; ctx.fill();
+}
+function hudPill() {
+  ctx.save();
+  ctx.shadowColor = "rgba(0,0,0,.35)"; ctx.shadowBlur = 10; ctx.shadowOffsetY = 3;
+  const g = ctx.createLinearGradient(0, 6, 0, 44);
+  g.addColorStop(0, "rgba(62,43,15,.85)"); g.addColorStop(1, "rgba(30,20,6,.85)");
+  rr(6, 6, VW - 12, 38, 19); ctx.fillStyle = g; ctx.fill();
+  ctx.restore();
+  rr(6, 6, VW - 12, 38, 19); ctx.strokeStyle = "rgba(255,205,110,.30)"; ctx.lineWidth = 1; ctx.stroke();
+}
 function draw() {
   ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
-  ctx.fillStyle = "#3a2a12"; ctx.fillRect(0, 0, W, H);
+  const pageG = ctx.createLinearGradient(0, 0, 0, H);
+  pageG.addColorStop(0, "#4a3312"); pageG.addColorStop(0.6, "#2a1d08"); pageG.addColorStop(1, "#180e03");
+  ctx.fillStyle = pageG; ctx.fillRect(0, 0, W, H);
   ctx.setTransform(scale, 0, 0, scale, ox, oy);
-  ctx.fillStyle = "#241a0a"; ctx.fillRect(0, 0, VW, VH);
+  const bgG = ctx.createLinearGradient(0, 0, 0, VH);
+  bgG.addColorStop(0, "#3d2c11"); bgG.addColorStop(0.55, "#241a0a"); bgG.addColorStop(1, "#170d03");
+  ctx.fillStyle = bgG; ctx.fillRect(0, 0, VW, VH);
+  // warm work-light glow near the top of the site (visual depth only)
+  const glow = ctx.createRadialGradient(VW / 2, 90, 10, VW / 2, 90, 330);
+  glow.addColorStop(0, "rgba(255,190,80,.20)"); glow.addColorStop(1, "rgba(255,190,80,0)");
+  ctx.fillStyle = glow; ctx.fillRect(0, 0, VW, VH);
   if (state === "menu") {
-    ctx.fillStyle = "#fff"; ctx.textAlign = "center";
+    glassPanel(20, 84, VW - 40, 368);
+    const tg = ctx.createLinearGradient(0, 96, 0, 142);
+    tg.addColorStop(0, "#fff6dd"); tg.addColorStop(1, "#ffb84d");
+    ctx.fillStyle = tg; ctx.textAlign = "center";
     ctx.font = "bold 42px system-ui"; ctx.fillText("🛢️ Barrel Climb", VW / 2, 130);
+    ctx.fillStyle = "#fff";
     ctx.font = "20px system-ui"; ctx.fillText("Climb the girders, dodge the barrels,", VW / 2, 190);
     ctx.fillText("reach the star at the top!", VW / 2, 220);
     ctx.font = "18px system-ui"; ctx.fillText("Best: " + best + "  •  Best level: " + bestLevel, VW / 2, 270);
@@ -299,49 +352,73 @@ function draw() {
   // girders + ladders
   for (let i = 0; i < GIRDERS.length; i++) {
     for (const s of SEGS[i]) {
-      ctx.fillStyle = "#8a6a2a"; ctx.fillRect(s[0], GIRDERS[i], s[1] - s[0], 14);
-      ctx.fillStyle = "#5d4517";
-      for (let x = s[0]; x + 14 <= s[1]; x += 28) ctx.fillRect(x, GIRDERS[i] + 4, 14, 6);
+      const gg = ctx.createLinearGradient(0, GIRDERS[i], 0, GIRDERS[i] + 14);
+      gg.addColorStop(0, "#c99b45"); gg.addColorStop(0.35, "#9a742e"); gg.addColorStop(1, "#6d4e1a");
+      ctx.fillStyle = gg; ctx.fillRect(s[0], GIRDERS[i], s[1] - s[0], 14);
+      ctx.fillStyle = "rgba(255,230,160,.55)"; ctx.fillRect(s[0], GIRDERS[i], s[1] - s[0], 2);
+      ctx.fillStyle = "rgba(46,30,6,.55)";
+      for (let x = s[0]; x + 14 <= s[1]; x += 28) ctx.fillRect(x, GIRDERS[i] + 5, 14, 5);
     }
   }
   for (let i = 0; i < LADDERS.length; i++) {
     for (const l of LADDERS[i]) {
-      ctx.fillStyle = "#c9a227";
+      const lg = ctx.createLinearGradient(l.x - 3, 0, l.x + 13, 0);
+      lg.addColorStop(0, "#e8c84a"); lg.addColorStop(0.5, "#c9a227"); lg.addColorStop(1, "#96771a");
+      ctx.fillStyle = lg;
       ctx.fillRect(l.x - 3, GIRDERS[i + 1] + 4, 4, GIRDERS[i] - GIRDERS[i + 1] - 4);
       ctx.fillRect(l.x + 9, GIRDERS[i + 1] + 4, 4, GIRDERS[i] - GIRDERS[i + 1] - 4);
       for (let y = GIRDERS[i + 1] + 12; y < GIRDERS[i]; y += 14) ctx.fillRect(l.x - 3, y, 16, 3);
     }
   }
   // star at top
+  ctx.save(); ctx.shadowColor = "rgba(255,217,59,.9)"; ctx.shadowBlur = 18;
   ctx.fillStyle = "#ffd93b"; ctx.font = "34px system-ui"; ctx.textAlign = "center";
   ctx.fillText("⭐", VW / 2, GIRDERS[GIRDERS.length - 1] - 8);
+  ctx.restore();
   // barrels
   for (const b of barrels) {
-    ctx.save(); ctx.translate(b.x + 13, b.y + 13); ctx.rotate(b.rot);
-    ctx.fillStyle = "#a0522d"; ctx.fillRect(-13, -13, 26, 26);
-    ctx.fillStyle = "#7a3a1e"; ctx.fillRect(-13, -4, 26, 8);
+    ctx.save(); ctx.translate(b.x + 13, b.y + 13);
+    ctx.fillStyle = "rgba(0,0,0,.28)"; ctx.beginPath(); ctx.ellipse(0, 15, 13, 4, 0, 0, Math.PI * 2); ctx.fill();
+    ctx.rotate(b.rot);
+    ctx.shadowColor = "rgba(0,0,0,.35)"; ctx.shadowBlur = 6; ctx.shadowOffsetY = 2;
+    const bgr = ctx.createLinearGradient(-13, -13, 13, 13);
+    bgr.addColorStop(0, "#c47a3d"); bgr.addColorStop(0.5, "#a0522d"); bgr.addColorStop(1, "#7a3a1e");
+    ctx.fillStyle = bgr; rr(-13, -13, 26, 26, 6); ctx.fill();
+    ctx.shadowColor = "transparent"; ctx.shadowBlur = 0; ctx.shadowOffsetY = 0;
+    ctx.fillStyle = "#5f2c12"; ctx.fillRect(-13, -4, 26, 8);
+    ctx.fillStyle = "rgba(255,255,255,.28)"; rr(-10, -11, 20, 6, 3); ctx.fill();
     ctx.restore();
   }
   // player
   if (!(invuln > 0 && Math.floor(invuln * 10) % 2 === 0)) {
-    ctx.fillStyle = "#e8722a"; ctx.fillRect(px, py, 36, 36);
+    ctx.fillStyle = "rgba(0,0,0,.30)"; ctx.beginPath(); ctx.ellipse(px + 18, py + 37, 16, 4, 0, 0, Math.PI * 2); ctx.fill();
+    const pg = ctx.createLinearGradient(0, py, 0, py + 36);
+    pg.addColorStop(0, "#ff9a4d"); pg.addColorStop(0.55, "#e8722a"); pg.addColorStop(1, "#c85a1a");
+    ctx.fillStyle = pg; rr(px, py, 36, 36, 8); ctx.fill();
+    ctx.fillStyle = "rgba(255,255,255,.35)"; rr(px + 5, py + 4, 26, 9, 4); ctx.fill();
     ctx.fillStyle = "#fff"; ctx.fillRect(px + (face > 0 ? 20 : 8), py + 8, 8, 8);
     ctx.fillStyle = "#000"; ctx.fillRect(px + (face > 0 ? 23 : 11), py + 11, 4, 4);
     ctx.fillStyle = "#1d4a22"; ctx.fillRect(px + 4, py + 28, 28, 8);
   }
-  ctx.fillStyle = "rgba(30,20,5,.7)"; ctx.fillRect(0, 0, VW, 44);
+  hudPill();
   ctx.fillStyle = "#fff"; ctx.font = "bold 18px system-ui"; ctx.textAlign = "left";
   ctx.fillText("Level " + round, 12, 28);
   ctx.textAlign = "center"; ctx.fillText("❤️".repeat(lives), VW / 2, 28);
   ctx.textAlign = "right"; ctx.fillText(score + " pts", VW - 12, 28);
   if (levelMsgT > 0) {
+    ctx.save(); ctx.shadowColor = "rgba(255,180,60,.85)"; ctx.shadowBlur = 14;
     ctx.fillStyle = "#ffd93b"; ctx.font = "bold 26px system-ui"; ctx.textAlign = "center";
     ctx.fillText(levelMsg, VW / 2, 84);
+    ctx.restore();
   }
   if (state === "over") {
-    ctx.fillStyle = "rgba(0,0,0,.6)"; ctx.fillRect(0, 0, VW, VH);
-    ctx.fillStyle = "#fff"; ctx.textAlign = "center";
+    ctx.fillStyle = "rgba(10,6,2,.55)"; ctx.fillRect(0, 0, VW, VH);
+    glassPanel(VW / 2 - 175, VH / 2 - 95, 350, 190);
+    const og = ctx.createLinearGradient(0, VH / 2 - 62, 0, VH / 2 - 16);
+    og.addColorStop(0, "#fff6dd"); og.addColorStop(1, "#ffb84d");
+    ctx.fillStyle = og; ctx.textAlign = "center";
     ctx.font = "bold 38px system-ui"; ctx.fillText("Squashed!", VW / 2, VH / 2 - 20);
+    ctx.fillStyle = "#fff";
     ctx.font = "20px system-ui";
     ctx.fillText("Score: " + score + "  •  Reached level " + round, VW / 2, VH / 2 + 20);
     ctx.fillText("Tap to return to menu", VW / 2, VH / 2 + 60);
